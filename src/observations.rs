@@ -34,8 +34,8 @@ pub struct Body {
     pub position: Option<Value<[f32; 3]>>,
     pub rotation_xyzw: Option<Value<[f32; 4]>>,
     pub linear_velocity: Option<Value<[f32; 3]>>,
-    /// Replay values are degrees per second; RocketSim uses radians per second.
-    pub angular_velocity_deg: Option<Value<[f32; 3]>>,
+    /// Multiply these boxcars values by 0.01 for RocketSim radians per second.
+    pub angular_velocity_replay_units: Option<Value<[f32; 3]>>,
     pub sleeping: Option<Value<bool>>,
 }
 
@@ -56,7 +56,7 @@ impl Body {
             self.linear_velocity = Some(Value::replay(vector(velocity), frame));
         }
         if let Some(velocity) = body.angular_velocity {
-            self.angular_velocity_deg = Some(Value::replay(vector(velocity), frame));
+            self.angular_velocity_replay_units = Some(Value::replay(vector(velocity), frame));
         }
     }
 }
@@ -351,6 +351,7 @@ impl Tracker {
         actor: ActorId,
         property: &str,
         attribute: &Attribute,
+        names: &[String],
         frame: usize,
         events: &mut Vec<Event>,
     ) {
@@ -452,8 +453,13 @@ impl Tracker {
                 }
             }
             "TAGame.GameEvent_TA:ReplicatedStateName" => {
-                if let Attribute::String(value) = attribute {
-                    self.game_state = Some(Value::replay(value.clone(), frame));
+                if let Attribute::Int(index) = attribute {
+                    if let Some(name) = usize::try_from(*index)
+                        .ok()
+                        .and_then(|index| names.get(index))
+                    {
+                        self.game_state = Some(Value::replay(name.clone(), frame));
+                    }
                 }
             }
             "TAGame.GameEvent_Soccar_TA:ReplicatedScoredOnTeam" => {
@@ -617,6 +623,7 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
                     update.actor_id,
                     property,
                     &update.attribute,
+                    &replay.names,
                     index,
                     &mut events,
                 );

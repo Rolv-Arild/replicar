@@ -45,6 +45,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .and_then(|id| replay.objects.get(id));
             if name.is_some_and(|name| exact.map_or_else(|| name.contains(&needle), |x| name == x))
             {
+                if name.is_some_and(|name| name == "TAGame.GameEvent_TA:ReplicatedStateName") {
+                    if let boxcars::Attribute::Int(index) = &update.attribute {
+                        println!(
+                            "name index {index}: {:?}",
+                            usize::try_from(*index)
+                                .ok()
+                                .and_then(|index| replay.names.get(index))
+                        );
+                    }
+                }
                 println!(
                     "frame {frame_idx} time {:.3} actor {:?} {name:?}: {:?}",
                     frame.time, update.actor_id, update.attribute

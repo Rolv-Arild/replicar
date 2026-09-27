@@ -1,8 +1,8 @@
 # Replay to RocketSim plan
 
-Last updated: 2026-09-27. Status: Phase 1 in progress; observed timeline implemented and train checked.
+Last updated: 2026-09-27. Status: Phase 1 in progress; preliminary Phase 3 conversion runs on train samples.
 
-Next action: calibrate replay angular velocity and control values, then connect fresh observed fields to RocketSim ticks. Investigate the remaining car frames without a player link. Keep `validation` for design checks and `test` untouched until the final freeze.
+Next action: measure conversion residuals across all `train` replays, resolve player ownership gaps and action semantics, then implement versioned serialization and Python loading. Use `validation` only after training changes are chosen; keep `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -76,7 +76,15 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 - Network keyframes announce the same live actors repeatedly, often about every 300 frames. The extractor preserves their state on same-ID/same-class announcements, and resets only after deletion or a class replacement. All 60 training replays produced 149,190 such repeat announcements.
 - Across all train frames, extraction found zero unknown rigid-body actors and zero frames missing the ball. Final network scores agree with header totals after treating an omitted zero-valued header side as zero. This is checked by `cargo test --test observations_train` (12 seconds locally).
 - Player ownership is still unresolved in 49,472 of 2,740,265 car-frame records (1.81%). Those frames remain explicitly unlinked; do not infer teams or stable IDs from actor ID alone. Inspect goal transitions and disappearing/reappearing PRIs to reduce this number.
-- A raw boost byte of 85 corresponds to the kickoff amount of about 33.3, consistent with `raw * 100 / 255`. Steering/throttle byte 128 is neutral; the provisional normalization maps 0 to -1 and 255 to 1. Angular velocity appears to be degrees per second from car rotation changes; verify statistically before using it in RocketSim.
+- A raw boost byte of 85 corresponds to the kickoff amount of about 33.3, consistent with `raw * 100 / 255`. Steering/throttle byte 128 is neutral; the provisional normalization maps 0 to -1 and 255 to 1.
+- Ground-car motion calibration on three 1v1 and one 3v3 training replay gave a median displacement-to-linear-velocity ratio of about 1.00. The median yaw-rate-to-replay-angular-velocity ratio was about 0.0100, so multiply boxcars angular velocity by **0.01** for RocketSim radians per second. This corrects an earlier degrees-per-second hypothesis. Recheck against airborne rotation and other replay versions.
+
+### Preliminary simulation bridge (train samples only, 2026-09-27)
+
+- `conversion::convert_bytes` now produces one `ArenaState` per replay frame, aligned to a 120 Hz timeline. It advances RocketSim only through intervals where both adjacent frames are in the replay's `Active` phase. Countdown and post-goal time is recorded as skipped timeline ticks. The arena's own tick count therefore differs from the full replay-timeline tick.
+- Ball/car position, quaternion, linear velocity, and calibrated angular velocity are applied only when newly observed; boost is similarly corrected only on a fresh update. Unknown replay inputs remain absent from observation output; simulator controls currently use observed throttle/steer/handbrake and neutral values for missing jump/boost/aerial controls. All cars currently receive the Octane hitbox until loadout-to-hitbox mapping is implemented.
+- On the first replay of each train game size, median pre-correction position error (UU) was: 1v1 ball 10.21/car 16.48, 2v2 ball 11.35/car 17.01, 3v3 ball 11.19/car 17.33. The corresponding hold-last-position baselines were ball 42.44/50.12/51.63 and car 116.59/114.68/112.54. Linear extrapolation medians were ball 10.48/11.87/11.60 and car 18.21/18.58/18.84. These are in-sample short-gap checks, not held-out validation metrics; report full distributions and event-specific errors before drawing broad conclusions.
+- `cargo test` passes the fresh-field regression test, the 1v1/2v2/3v3 train conversion smoke test, the soccar mesh smoke test, and the 60-file training observation test.
 
 ## Implementation sequence and deliverables
 
@@ -105,3 +113,4 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: User supplied collision meshes and requested naturally segmented commits. Began Phase 0; kept meshes and IDE files out of version control.
 - 2026-09-27: Pinned both dependencies, implemented strict parser corpus audit with SHA-256 manifest, parsed all `train` replays, and passed the soccar mesh smoke test. Phase 0 complete.
 - 2026-09-27: Added typed frame observations and an inspection CLI. Verified every `train` replay retains the ball and matches final score, and measured repeated actor announcements and unresolved ownership. Phase 1 remains open.
+- 2026-09-27: Calibrated velocity units from train motion, corrected angular velocity scale to 0.01, implemented the first RocketSim bridge and per-observation position residuals, and verified one replay per game size. Full train metrics, action inference, serialization and Python loading remain.
