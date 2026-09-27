@@ -1,8 +1,8 @@
 # Replay to RocketSim plan
 
-Last updated: 2026-09-27. Status: Phase 1 in progress; preliminary Phase 3 conversion runs on train samples.
+Last updated: 2026-09-27. Status: Phase 0 complete; Phases 1 and 3 in progress; preliminary Phase 5 JSONL/Python path implemented.
 
-Next action: measure conversion residuals across all `train` replays, resolve player ownership gaps and action semantics, then implement versioned serialization and Python loading. Use `validation` only after training changes are chosen; keep `test` untouched until the final freeze.
+Next action: measure conversion residuals across all `train` replays, resolve player ownership gaps and action semantics, and improve reconstruction with held-out replay observations. Use `validation` only after training changes are chosen; keep `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -12,7 +12,7 @@ The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Ot
 
 ## Current repository and data
 
-- `Cargo.toml` has no dependencies; `src/lib.rs` is Cargo's starter `add` function.
+- `Cargo.toml` pins parser and simulator dependencies; `src/lib.rs` exposes parsing, observations, conversion, audit, and serialization modules.
 - `replays/` is ignored by `.gitignore`. It contains 180 `.replay` files: 20 per game size in each of `train`, `validation`, and `test` (60 per split; about 212 MB total).
 - The split names are an evaluation contract: inspect and optimize on `train`; use `validation` to decide whether changes generalize; run `test` only for a final, frozen assessment. Keep corpus paths configurable, and never commit replay contents or generated datasets.
 - The user added `collision_meshes/` with `.cmf` files for soccar, hoops, and dropshot. It is ignored as a local asset directory. RocketSim's `init_from_default` expects `./collision_meshes/` when run from the repository root.
@@ -40,7 +40,7 @@ The inspected native API has `Arena::new/new_with_config`, `add_car`, `step_tick
 
 ## Output contract
 
-Provide `convert_bytes(&[u8], &ConvertOptions) -> Result<Conversion, ConvertError>` and a streaming or callback variant for large batches. File IO belongs in a small CLI wrapper. `Conversion` contains replay metadata, an ordered frame sequence, and diagnostics. Each frame contains replay frame index/time/delta, matched RocketSim tick, an `ArenaState` snapshot or explicit unavailable status, scoreboard and clock, stable player/team identities, observed replay events, simulated events with source and tick, and per-field provenance/quality. A missing value remains optional; inference must not be presented as observed truth.
+Provide `convert_bytes(&[u8], &ConvertOptions) -> Result<ConversionOutput, ConvertError>` and a streaming or callback variant for large batches. File IO belongs in a small CLI wrapper. `ConversionOutput` contains replay metadata, an ordered frame sequence, and diagnostics. Each frame contains replay frame index/time/delta, matched RocketSim tick, an `ArenaState` snapshot or explicit unavailable status, scoreboard and clock, stable player/team identities, observed replay events, simulated events with source and tick, and per-field provenance/quality. A missing value remains optional; inference must not be presented as observed truth.
 
 Define a versioned, project-owned transfer schema separate from RocketSim's structs. Include schema version, dependency revisions, replay fingerprint, units, coordinate conventions, tick rate, options, and any unsupported-feature diagnostics. Preserve enough car/ball/pad state to rebuild a useful RocketSim arena when possible; document fields that cannot be restored exactly. Offer newline-delimited JSON for inspection and a compact columnar format (Arrow IPC or Parquet, selected after a size/read-speed prototype) for Python through `pyarrow`. Provide a small Python loader returning typed metadata plus frame columns/NumPy arrays, with a round-trip test. Avoid encoding Rust memory layouts or `Debug` output as a storage format.
 
@@ -86,6 +86,12 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 - On the first replay of each train game size, median pre-correction position error (UU) was: 1v1 ball 10.21/car 16.48, 2v2 ball 11.35/car 17.01, 3v3 ball 11.19/car 17.33. The corresponding hold-last-position baselines were ball 42.44/50.12/51.63 and car 116.59/114.68/112.54. Linear extrapolation medians were ball 10.48/11.87/11.60 and car 18.21/18.58/18.84. These are in-sample short-gap checks, not held-out validation metrics; report full distributions and event-specific errors before drawing broad conclusions.
 - `cargo test` passes the fresh-field regression test, the 1v1/2v2/3v3 train conversion smoke test, the soccar mesh smoke test, and the 60-file training observation test.
 
+### Preliminary serialization and Python access (2026-09-27)
+
+- Schema-v1 JSONL writes a header with SHA-256 fingerprint, pinned dependency revisions, conversion options, player slots, and diagnostics; each frame includes a projected soccar RocketSim state (ball, cars, boost pads), observed replay fields with provenance, separate simulated events, and prediction residuals. `convert_replay` is the command-line writer.
+- The standard-library Python reader streams full frame records. An optional NumPy function makes dense time, ball, car, boost, score, and clock arrays with a car-presence mask and NaN for missing numeric fields. A synthetic loader test and a real 12,292-frame training replay read passed. That replay's JSONL is 115 MB, motivating the planned columnar prototype. The current Rust conversion holds all frames in memory.
+- Exported RocketSim fields absent from replay are simulator estimates, and many have not been calibrated yet. Schema version 1 is provisional until a state-restoration check and compact-format comparison are complete.
+
 ## Implementation sequence and deliverables
 
 | Phase | Deliverable | Exit check |
@@ -113,4 +119,5 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: User supplied collision meshes and requested naturally segmented commits. Began Phase 0; kept meshes and IDE files out of version control.
 - 2026-09-27: Pinned both dependencies, implemented strict parser corpus audit with SHA-256 manifest, parsed all `train` replays, and passed the soccar mesh smoke test. Phase 0 complete.
 - 2026-09-27: Added typed frame observations and an inspection CLI. Verified every `train` replay retains the ball and matches final score, and measured repeated actor announcements and unresolved ownership. Phase 1 remains open.
-- 2026-09-27: Calibrated velocity units from train motion, corrected angular velocity scale to 0.01, implemented the first RocketSim bridge and per-observation position residuals, and verified one replay per game size. Full train metrics, action inference, serialization and Python loading remain.
+- 2026-09-27: Calibrated velocity units from train motion, corrected angular velocity scale to 0.01, implemented the first RocketSim bridge and per-observation position residuals, and verified one replay per game size. Full train metrics and action inference remain.
+- 2026-09-27: Added schema-v1 JSONL state export, command-line conversion, and a Python streaming/NumPy loader. Read a real training export end to end; compact storage, state restoration, and full-corpus evaluation remain.

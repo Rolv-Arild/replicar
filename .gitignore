@@ -2,3 +2,5 @@
 /replays
 /collision_meshes
 /.idea
+__pycache__/
+*.pyc

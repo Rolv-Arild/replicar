@@ -12,6 +12,7 @@ use rocketsim::{
     PhysState, Team, Vec3A,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::observations::{self, Body, ObservedReplay, Value};
 use crate::parse_replay;
@@ -41,7 +42,7 @@ impl fmt::Display for ConvertError {
 
 impl Error for ConvertError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ConvertOptions {
     pub collision_meshes: PathBuf,
     pub seed: u64,
@@ -75,7 +76,7 @@ pub struct ConvertedFrame {
     pub simulated_events: Vec<SimEvent>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Diagnostics {
     pub skipped_timeline_ticks: u64,
     pub unlinked_car_frames: usize,
@@ -84,10 +85,21 @@ pub struct Diagnostics {
 
 #[derive(Debug, Clone)]
 pub struct ConversionOutput {
+    pub source_sha256: Option<String>,
+    pub options: ConvertOptions,
     pub observations: ObservedReplay,
     pub frames: Vec<ConvertedFrame>,
     pub position_residuals: Vec<PositionResidual>,
+    pub car_slots: Vec<CarSlot>,
     pub diagnostics: Diagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CarSlot {
+    pub slot: usize,
+    pub player_key: String,
+    pub team: u8,
+    pub hitbox: String,
 }
 
 /// Error before a fresh replay position is used to correct the simulation.
@@ -206,7 +218,9 @@ pub fn convert_bytes(
 ) -> Result<ConversionOutput, ConvertError> {
     let replay = parse_replay(bytes).map_err(ConvertError::Parse)?;
     let observed = observations::extract(&replay).ok_or(ConvertError::MissingNetworkFrames)?;
-    convert_observations(observed, options)
+    let mut output = convert_observations(observed, options)?;
+    output.source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
+    Ok(output)
 }
 
 /// Convert observations with RocketSim. The mesh directory is initialized once per process.
@@ -224,6 +238,7 @@ pub fn convert_observations(
     config.rng_seed = Some(options.seed);
     let mut arena = Arena::new_with_config(config);
     let mut slots: HashMap<String, usize> = HashMap::new();
+    let mut car_slots = Vec::new();
     let mut actor_slots: HashMap<i32, usize> = HashMap::new();
     let mut frames = Vec::with_capacity(observations.frames.len());
     let mut position_residuals = Vec::new();
@@ -298,6 +313,12 @@ pub fn convert_observations(
                 } else if let Some(team_idx) = car.team {
                     let slot = arena.add_car(team(team_idx), CarBodyConfig::OCTANE);
                     slots.insert(key.clone(), slot);
+                    car_slots.push(CarSlot {
+                        slot,
+                        player_key: key.clone(),
+                        team: team_idx,
+                        hitbox: "octane".to_owned(),
+                    });
                     actor_slots.insert(car.actor_id, slot);
                     diagnostics.default_hitbox_players += 1;
                     Some((slot, true))
@@ -357,9 +378,12 @@ pub fn convert_observations(
         });
     }
     Ok(ConversionOutput {
+        source_sha256: None,
+        options: options.clone(),
         observations,
         frames,
         position_residuals,
+        car_slots,
         diagnostics,
     })
 }

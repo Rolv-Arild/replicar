@@ -1,0 +1,39 @@
+# Replay to RocketSim
+
+This Rust project parses Rocket League soccar replays with `boxcars` and reconstructs one RocketSim state per replay network frame. It also retains replay observations that sit outside RocketSim state: score, clock, player statistics, observed actions, and events. See [PLAN.md](PLAN.md) for the field map, measured results, evaluation protocol, and open work.
+
+## Setup and conversion
+
+Place the supplied RocketSim meshes under `collision_meshes/soccar/`. Run from the repository root:
+
+```powershell
+cargo test
+cargo run --release --bin convert_replay -- replays/train/1v1/example.replay target/example.jsonl
+```
+
+The CLI accepts an optional third argument for the mesh directory. Its output is JSON Lines: one versioned `header` record followed by one `frame` record per network frame. The header records the replay SHA-256, dependency revisions, conversion options, actor-to-car slots, and diagnostics. Each frame contains replay time, timeline tick, a RocketSim state snapshot, the typed observations with source-frame freshness, simulated events, and position prediction residuals. The replay observations distinguish last-seen values from fresh packets through each field's `frame` and `source` keys. Header final scores must never be used as the score at an earlier frame.
+
+State position and linear velocity use Rocket League unreal units (UU and UU/s); state angular velocity uses radians/s. Rotation is three RocketSim basis columns. The timeline is rounded to 120 Hz from the replay's first timestamp. RocketSim's arena tick advances only during continuous `Active` intervals, so it can differ from the timeline tick. Simulated events and unobserved state fields are estimates, not replay truth.
+
+```python
+import sys
+sys.path.insert(0, "python")
+from replay_to_rocketsim import read_header, iter_frames, load_numpy
+
+header = read_header("target/example.jsonl")
+for frame in iter_frames("target/example.jsonl"):
+    print(frame["replay_time"], frame["state"]["ball"]["physics"]["position"])
+    break
+arrays = load_numpy("target/example.jsonl")  # requires NumPy
+print(arrays["car_position"].shape)  # frames × car slots × XYZ
+```
+
+`iter_frames` streams rich records with only Python's standard library. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car positions and velocities, car boost and presence, team scores, and match clock. It uses NaN for absent numeric observations and a mask for absent cars. Use the streaming records for the complete state, action provenance, statistics, and events.
+
+JSONL is intentionally inspectable and currently large: one 12,292-frame training replay produced 115 MB. A compact columnar format and a truly streaming Rust conversion API are planned. The current Rust converter retains all snapshots in memory before writing.
+
+## Present accuracy limits
+
+The first bridge corrects physical fields only on fresh replay updates and simulates intermediate active ticks. It currently assigns every car an Octane hitbox and passes observed throttle, steer, and handbrake to RocketSim. Jump, boost, and aerial inputs are not recovered yet. Score and clock come from replay packets; they are never inferred from simulated goals. Some player ownership links remain unresolved at actor transitions. Prediction metrics so far cover three training replays; held-out validation and final test evaluations have not run. The `test` split remains untouched until settings are frozen.
+
+The provided `replays/` and `collision_meshes/` folders, generated `target/` outputs, and IDE files are ignored by Git.
