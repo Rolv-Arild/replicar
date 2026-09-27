@@ -1,8 +1,8 @@
 # Replay to RocketSim plan
 
-Last updated: 2026-09-27. Status: Phase 0 complete; Phase 1 next.
+Last updated: 2026-09-27. Status: Phase 1 in progress; observed timeline implemented and train checked.
 
-Next action: build and verify the typed actor/ownership graph and observed state timeline on `train`. Keep `validation` for design checks and `test` untouched until the final freeze.
+Next action: calibrate replay angular velocity and control values, then connect fresh observed fields to RocketSim ticks. Investigate the remaining car frames without a player link. Keep `validation` for design checks and `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -70,6 +70,14 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 - Frequent relevant attributes include `ReplicatedRBState` (1,577,611), `ReplicatedSteer` (800,401), `ReplicatedThrottle` (317,093), `ReplicatedActive` (190,244), `NewReplicatedPickupData` (112,989), `ReplicatedBoost` (55,576), `bReplicatedHandbrake` (50,673), `SecondsRemaining` (18,877), and `MatchScore` (18,652). Actions and scoreboard belong in the conversion output even where they are not part of RocketSim's `ArenaState`.
 - The local soccar collision meshes load and support a RocketSim arena tick (`cargo test --test mesh_smoke`).
 
+### Phase 1 observations (train only, 2026-09-27)
+
+- A typed observation extractor now tracks actor lifetimes, car-to-PRI, player-to-team and boost-component-to-car links, ball/car rigid bodies, replicated steering/throttle/handbrake, boost amount, team score, game clock, overtime, player match stats, and goal-scored-on events. Each observed field carries its last source frame. The final header score stays separate from the frame timeline.
+- Network keyframes announce the same live actors repeatedly, often about every 300 frames. The extractor preserves their state on same-ID/same-class announcements, and resets only after deletion or a class replacement. All 60 training replays produced 149,190 such repeat announcements.
+- Across all train frames, extraction found zero unknown rigid-body actors and zero frames missing the ball. Final network scores agree with header totals after treating an omitted zero-valued header side as zero. This is checked by `cargo test --test observations_train` (12 seconds locally).
+- Player ownership is still unresolved in 49,472 of 2,740,265 car-frame records (1.81%). Those frames remain explicitly unlinked; do not infer teams or stable IDs from actor ID alone. Inspect goal transitions and disappearing/reappearing PRIs to reduce this number.
+- A raw boost byte of 85 corresponds to the kickoff amount of about 33.3, consistent with `raw * 100 / 255`. Steering/throttle byte 128 is neutral; the provisional normalization maps 0 to -1 and 255 to 1. Angular velocity appears to be degrees per second from car rotation changes; verify statistically before using it in RocketSim.
+
 ## Implementation sequence and deliverables
 
 | Phase | Deliverable | Exit check |
@@ -96,3 +104,4 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: Inspected starter repository and counted replay splits. Read `boxcars` 0.11.5 public docs and native `rocketsim` source from the locally cached upstream `v3-rust` checkout. Wrote initial architecture and evaluation plan. No replay contents were parsed and no converter code was changed.
 - 2026-09-27: User supplied collision meshes and requested naturally segmented commits. Began Phase 0; kept meshes and IDE files out of version control.
 - 2026-09-27: Pinned both dependencies, implemented strict parser corpus audit with SHA-256 manifest, parsed all `train` replays, and passed the soccar mesh smoke test. Phase 0 complete.
+- 2026-09-27: Added typed frame observations and an inspection CLI. Verified every `train` replay retains the ball and matches final score, and measured repeated actor announcements and unresolved ownership. Phase 1 remains open.

@@ -12,3 +12,4 @@ pub fn parse_replay(bytes: &[u8]) -> Result<Replay, ParseError> {
 }
 
 pub mod audit;
+pub mod observations;
