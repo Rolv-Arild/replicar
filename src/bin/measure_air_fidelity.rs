@@ -9,6 +9,39 @@ use glam::{Mat3A, Quat, Vec3A};
 use replay_to_rocketsim::conversion::ConvertOptions;
 use replay_to_rocketsim::observations;
 
+#[derive(Clone, Copy)]
+enum AirMode {
+    ReplayOnly,
+    CurrentInverse,
+    RlcisInverse,
+}
+
+// Port of ReverseAirOrientInputs in external/RLCarInputSolver/AirSolver.cpp.
+// This compares the aerial orientation formula, not the full C++ solver.
+fn rlcis_air_controls(rot: Mat3A, before: Vec3A, mut after: Vec3A, dt: f32) -> [f32; 3] {
+    let max_ang_sq = 5.5_f32.powi(2);
+    if ((after.length_squared() - max_ang_sq) / max_ang_sq).abs() < 0.01 {
+        after *= 1.25;
+    }
+    let local_tau = rot.transpose() * ((after - before) / dt);
+    let local_omega = rot.transpose() * before;
+    let rhs = local_tau + local_omega * Vec3A::new(4.47166, 2.7982, 1.8865);
+    let roll = rhs.x / -36.0796;
+    let pitch = rhs.y / (-12.1460 - rhs.y.signum() * local_omega.y * 2.7982);
+    let yaw = rhs.z / (8.9196 + rhs.z.signum() * local_omega.z * 1.8865);
+    let deadzone = |v: f32| {
+        let v = v.clamp(-1.0, 1.0);
+        if v.abs() < 0.1 {
+            0.0
+        } else if v.abs() > 0.95 {
+            v.signum()
+        } else {
+            v
+        }
+    };
+    [deadzone(pitch), deadzone(yaw), deadzone(roll)]
+}
+
 fn paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     if path.is_file() {
         return Ok(vec![path.to_owned()]);
@@ -33,10 +66,10 @@ fn rotation_error_degrees(a: Mat3A, b: Mat3A) -> f32 {
 
 fn evaluate(
     replay_paths: &[PathBuf],
-    lookahead: bool,
+    mode: AirMode,
 ) -> Result<(usize, f32, f32, f32, f32), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
-    options.infer_air_controls_from_lookahead = lookahead;
+    options.infer_air_controls_from_lookahead = !matches!(mode, AirMode::ReplayOnly);
 
     let mut rot_errors = Vec::new();
     let mut ang_errors = Vec::new();
@@ -113,6 +146,19 @@ fn evaluate(
                 {
                     continue;
                 }
+                if c0
+                    .inputs
+                    .dodge_active_raw
+                    .as_ref()
+                    .is_some_and(|d| d.frame == i - 1 && d.value % 2 == 1)
+                    || c1
+                        .inputs
+                        .dodge_active_raw
+                        .as_ref()
+                        .is_some_and(|d| d.frame == i && d.value % 2 == 1)
+                {
+                    continue;
+                }
 
                 let dt = f1.time - f0.time;
                 if !dt.is_finite() || dt <= 0.0 || dt > 0.05 {
@@ -135,7 +181,19 @@ fn evaluate(
                 }
                 arena.set_car_state(car_slot, car_state);
 
-                arena.set_car_controls(car_slot, sim_car.controls);
+                let mut controls = sim_car.controls;
+                if matches!(mode, AirMode::RlcisInverse) {
+                    let [pitch, yaw, roll] = rlcis_air_controls(
+                        car_state.phys.rot_mat,
+                        car_state.phys.ang_vel,
+                        Vec3A::from_array(ang1.value) * 0.01,
+                        dt,
+                    );
+                    controls.pitch = pitch;
+                    controls.yaw = yaw;
+                    controls.roll = roll;
+                }
+                arena.set_car_controls(car_slot, controls);
 
                 for _ in 0..gap_ticks {
                     arena.step_tick();
@@ -182,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Measuring WITHOUT lookahead...");
     let (no_samples, no_rot_p50, no_rot_p90, no_ang_p50, no_ang_p90) =
-        evaluate(&replay_paths, false)?;
+        evaluate(&replay_paths, AirMode::ReplayOnly)?;
     println!(
         "Without lookahead ({no_samples} pairs, {} replays): rot p50 = {:.3} deg, p90 = {:.3} deg | ang_vel p50 = {:.3} rad/s, p90 = {:.3} rad/s",
         replay_paths.len(),
@@ -194,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Measuring WITH lookahead...");
     let (with_samples, with_rot_p50, with_rot_p90, with_ang_p50, with_ang_p90) =
-        evaluate(&replay_paths, true)?;
+        evaluate(&replay_paths, AirMode::CurrentInverse)?;
     println!(
         "With lookahead ({with_samples} pairs, {} replays): rot p50 = {:.3} deg, p90 = {:.3} deg | ang_vel p50 = {:.3} rad/s, p90 = {:.3} rad/s",
         replay_paths.len(),
@@ -202,6 +260,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         with_rot_p90,
         with_ang_p50,
         with_ang_p90
+    );
+
+    println!("Measuring RLCarInputSolver aerial inverse...");
+    let (rlcis_samples, rlcis_rot_p50, rlcis_rot_p90, rlcis_ang_p50, rlcis_ang_p90) =
+        evaluate(&replay_paths, AirMode::RlcisInverse)?;
+    println!(
+        "RLCarInputSolver ({rlcis_samples} pairs, {} replays): rot p50 = {:.3} deg, p90 = {:.3} deg | ang_vel p50 = {:.3} rad/s, p90 = {:.3} rad/s",
+        replay_paths.len(),
+        rlcis_rot_p50,
+        rlcis_rot_p90,
+        rlcis_ang_p50,
+        rlcis_ang_p90
     );
 
     Ok(())

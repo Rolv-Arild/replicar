@@ -334,14 +334,14 @@ The original calibration tool estimated nonzero pitch on 36,423 of 53,565 airbor
 
 ### Unmasked physical fidelity (`src/bin/measure_air_fidelity.rs`)
 
-`measure_air_fidelity` now samples all 60 replays per split, matches each primary replay car to its RocketSim slot, requires the same car lifetime and fresh airborne endpoints, and uses an isolated one-car simulation from each starting packet. This directly tests one-step control inversion with the future endpoint available. It does not include full match collisions or test causal prediction.
+`measure_air_fidelity` samples all 60 replays per split, matches each primary replay car to its RocketSim slot, requires the same car lifetime and fresh airborne endpoints without a dodge activation, and uses an isolated one-car simulation from each starting packet. This directly tests one-step control inversion with the future endpoint available. It does not include full match collisions or test causal prediction. These figures share the matched sample in the three-way comparison below.
 
 | Dataset | Metric | Without Lookahead (Baseline) | With Lookahead (`infer_air_controls_from_lookahead`) | Improvement |
 | --- | --- | ---: | ---: | ---: |
-| **Train (52,864 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.529 / 1.342 | **0.026 / 0.857** | Lower angular error |
-| Train | Rotation p50 / p90 (deg) | **2.769 / 7.062** | 3.064 / 7.684 | Higher rotation error |
-| **Validation (55,321 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.479 / 1.316 | **0.030 / 0.878** | Lower angular error |
-| Validation | Rotation p50 / p90 (deg) | **2.758 / 7.226** | 3.038 / 7.788 | Higher rotation error |
+| **Train (51,045 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.507 / 1.150 | **0.024 / 0.670** | Lower angular error |
+| Train | Rotation p50 / p90 (deg) | **2.739 / 6.999** | 3.041 / 7.582 | Higher rotation error |
+| **Validation (53,458 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.449 / 1.123 | **0.028 / 0.672** | Lower angular error |
+| Validation | Rotation p50 / p90 (deg) | **2.731 / 7.111** | 3.011 / 7.755 | Higher rotation error |
 
 ### Masked evaluation and leakage prevention
 
@@ -352,6 +352,23 @@ In `evaluate_corpus.rs`, future data leakage is strictly prevented:
 
 Enabled by default (`infer_air_controls_from_lookahead = true`), and ablatable via `--no-infer-air-lookahead` and `--infer-air-lookahead`.
 
+
+## RLCarInputSolver comparison (supplied C++ code)
+
+`external/RLCarInputSolver` estimates controls from two states. Its `Framework.h` expects a separate C++ RocketSim checkout, so the full ground solver is not directly executable against this project's native Rust RocketSim build. The replay stream directly supplies throttle, steer, and handbrake; it also supplies boost amount and boost/jump/dodge component counters. The C++ solver infers throttle, steer, handbrake, boost activation, and jump from motion. Those estimates may help when packets are absent, but they are not independent ground truth for recorded controls.
+
+I ported the aerial orientation formula from `AirSolver.cpp` into `measure_air_fidelity` for a controlled comparison. All three columns use the same primary car pairs: active play at both ends, unchanged actor lifetime and player, fresh position/rotation/angular velocity at both ends, altitude above 100 UU, $0 < \Delta t \le 0.05$s, and no fresh dodge activation. Each pair starts a single Octane car from the replay state, applies controls for the elapsed RocketSim ticks, and compares the result with the next replay packet. “Replay-only” uses observed controls plus the project's steer-to-yaw fallback; “current inverse” uses the converter's offline aerial estimate; “RLCarInputSolver” replaces its pitch/yaw/roll with the supplied formula, including its deadzones and angular-speed correction. The full C++ boost, jump, flip, handbrake, and ground-steer heuristics are not tested here.
+
+| Split | Pairs | Aerial controls | Angular velocity p50 / p90 (rad/s) | Rotation p50 / p90 (deg) |
+| --- | ---: | --- | ---: | ---: |
+| Train | 51,045 | Replay-only | 0.507 / 1.150 | **2.739 / 6.999** |
+| Train | 51,045 | Current inverse | **0.024 / 0.670** | 3.041 / **7.582** |
+| Train | 51,045 | RLCarInputSolver inverse | 0.113 / 0.673 | 3.041 / 7.630 |
+| Validation | 53,458 | Replay-only | 0.449 / 1.123 | **2.731 / 7.111** |
+| Validation | 53,458 | Current inverse | **0.028 / 0.672** | **3.011 / 7.755** |
+| Validation | 53,458 | RLCarInputSolver inverse | 0.111 / 0.676 | 3.012 / 7.816 |
+
+The supplied aerial formula improves angular-velocity fit over replay-only steering, but the current RocketSim-specific inverse is better at p50 and p90 on both splits. Neither inferred method improves isolated rotation error. Because both formulas use the next state, the low angular error is an offline fit, not evidence that they recover the player's actual stick input or improve masked forward prediction. Keep recorded replay controls as observations; use inverse estimates only for missing channels with provenance, and do not replace the current aerial formula on these results.
 
 ## One-step pre-correction kinematic residuals
 
