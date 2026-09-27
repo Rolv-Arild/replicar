@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use glam::Quat;
 use rocketsim::{
-    Arena, ArenaConfig, ArenaEvent, ArenaState, CarBodyConfig, CarControls, GameMode, Mat3A,
-    PhysState, Team, Vec3A,
+    Arena, ArenaConfig, ArenaEvent, ArenaState, CarBodyConfig, CarControls, CarState, GameMode,
+    Mat3A, PhysState, Team, Vec3A,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -239,7 +239,7 @@ pub fn convert_observations(
     let mut arena = Arena::new_with_config(config);
     let mut slots: HashMap<String, usize> = HashMap::new();
     let mut car_slots = Vec::new();
-    let mut actor_slots: HashMap<i32, usize> = HashMap::new();
+    let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
     let mut frames = Vec::with_capacity(observations.frames.len());
     let mut position_residuals = Vec::new();
     let mut diagnostics = Diagnostics::default();
@@ -308,8 +308,8 @@ pub fn convert_observations(
         for car in &frame.cars {
             let slot = if let Some(key) = &car.player_key {
                 if let Some(slot) = slots.get(key).copied() {
-                    actor_slots.insert(car.actor_id, slot);
-                    Some((slot, false))
+                    actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
+                    Some((slot, car.actor_created_frame == frame.index))
                 } else if let Some(team_idx) = car.team {
                     let slot = arena.add_car(team(team_idx), CarBodyConfig::OCTANE);
                     slots.insert(key.clone(), slot);
@@ -319,7 +319,7 @@ pub fn convert_observations(
                         team: team_idx,
                         hitbox: "octane".to_owned(),
                     });
-                    actor_slots.insert(car.actor_id, slot);
+                    actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
                     diagnostics.default_hitbox_players += 1;
                     Some((slot, true))
                 } else {
@@ -329,13 +329,14 @@ pub fn convert_observations(
                 actor_slots
                     .get(&car.actor_id)
                     .copied()
-                    .map(|slot| (slot, false))
+                    .filter(|(_, created_frame)| *created_frame == car.actor_created_frame)
+                    .map(|(slot, _)| (slot, false))
             };
-            let Some((slot, new_car)) = slot else {
+            let Some((slot, new_lifetime)) = slot else {
                 diagnostics.unlinked_car_frames += 1;
                 continue;
             };
-            if simulated && !new_car {
+            if simulated && !new_lifetime {
                 let previous = observations
                     .frames
                     .get(frame.index.wrapping_sub(1))
@@ -356,10 +357,15 @@ pub fn convert_observations(
                     position_residuals.push(residual);
                 }
             }
-            let mut state = *arena.get_car_state(slot);
-            let mut dirty = apply_body(&mut state.phys, &car.body, frame.index, new_car);
+            let mut state = if new_lifetime {
+                CarState::default()
+            } else {
+                *arena.get_car_state(slot)
+            };
+            let mut dirty =
+                apply_body(&mut state.phys, &car.body, frame.index, new_lifetime) || new_lifetime;
             if let Some(boost) = &car.boost {
-                if should_apply(boost, frame.index, new_car) {
+                if should_apply(boost, frame.index, new_lifetime) {
                     state.boost = boost.value;
                     dirty = true;
                 }

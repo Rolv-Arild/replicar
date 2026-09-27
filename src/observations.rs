@@ -77,7 +77,11 @@ pub struct Inputs {
 #[derive(Debug, Clone, Serialize)]
 pub struct Car {
     pub actor_id: i32,
+    /// Creation frame for this actor lifetime; repeat keyframe announcements do not change it.
+    pub actor_created_frame: usize,
     pub player_key: Option<String>,
+    /// Whether the current pawn-to-player link is active. A known owner is retained when it goes inactive.
+    pub player_link_active: bool,
     pub team: Option<u8>,
     pub body: Body,
     pub boost: Option<Value<f32>>,
@@ -167,8 +171,10 @@ struct Actor {
 
 #[derive(Clone, Default)]
 struct TrackedCar {
+    created_frame: usize,
     body: Body,
     player_actor: Option<ActorId>,
+    player_link_active: bool,
     boost: Option<Value<f32>>,
     boost_raw: Option<Value<u8>>,
     inputs: Inputs,
@@ -271,7 +277,7 @@ impl Tracker {
         }
     }
 
-    fn announce(&mut self, id: ActorId, class: &str) {
+    fn announce(&mut self, id: ActorId, class: &str, frame: usize) {
         if let Some(existing) = self.actors.get(&id) {
             if existing.class == class {
                 self.diagnostics.repeated_actor_announcements += 1;
@@ -283,7 +289,13 @@ impl Tracker {
         let kind = classify(class);
         match kind {
             ActorKind::Car => {
-                self.cars.insert(id, TrackedCar::default());
+                self.cars.insert(
+                    id,
+                    TrackedCar {
+                        created_frame: frame,
+                        ..TrackedCar::default()
+                    },
+                );
             }
             ActorKind::Ball => {
                 self.ball = Some((id, Body::default()));
@@ -306,7 +318,12 @@ impl Tracker {
         match property {
             "Engine.Pawn:PlayerReplicationInfo" => {
                 if let Some(car) = self.cars.get_mut(&actor) {
-                    car.player_actor = linked_actor(attribute);
+                    if let Attribute::ActiveActor(value) = attribute {
+                        car.player_link_active = value.active;
+                        if value.active {
+                            car.player_actor = Some(value.actor);
+                        }
+                    }
                 }
             }
             "Engine.PlayerReplicationInfo:Team" => {
@@ -556,7 +573,9 @@ impl Tracker {
                     .map_or((None, None), |(key, team)| (Some(key.clone()), *team));
                 Car {
                     actor_id: actor.0,
+                    actor_created_frame: tracked.created_frame,
                     player_key,
+                    player_link_active: tracked.player_link_active,
                     team,
                     body: tracked.body.clone(),
                     boost: tracked.boost.clone(),
@@ -608,7 +627,7 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         }
         for actor in &frame.new_actors {
             if let Some(class) = prop_name(replay, actor.object_id.0) {
-                tracker.announce(actor.actor_id, class);
+                tracker.announce(actor.actor_id, class, index);
             }
         }
         for update in &frame.updated_actors {

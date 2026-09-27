@@ -42,3 +42,45 @@ fn one_replay_per_train_game_size_converts_to_finite_states() {
         assert!(!output.position_residuals.is_empty());
     }
 }
+
+#[test]
+fn inactive_player_link_and_reused_actor_id_keep_distinct_lifetimes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("replays/train/1v1/00b7b402-b7dc-42af-b48d-e165ed2fd47c.replay");
+    let meshes = root.join("collision_meshes");
+    if !path.is_file() || !meshes.join("soccar").is_dir() {
+        eprintln!("skipping actor-lifetime corpus test: local replay or meshes missing");
+        return;
+    }
+    let output = convert_bytes(
+        &fs::read(path).unwrap(),
+        &ConvertOptions {
+            collision_meshes: meshes,
+            ..ConvertOptions::default()
+        },
+    )
+    .unwrap();
+    let demoed = output.observations.frames[3996]
+        .cars
+        .iter()
+        .find(|car| car.actor_id == 141)
+        .unwrap();
+    assert!(demoed.player_key.is_some());
+    assert!(!demoed.player_link_active);
+    let reused = output.observations.frames[4093]
+        .cars
+        .iter()
+        .find(|car| car.actor_id == 18)
+        .unwrap();
+    assert_eq!(reused.actor_created_frame, 4093);
+    assert!(reused.player_key.is_none());
+    let respawned = output.frames[4093]
+        .state
+        .cars
+        .iter()
+        .find(|(info, _)| info.idx == 0)
+        .unwrap()
+        .1;
+    assert!(!respawned.is_demoed);
+    assert!((respawned.phys.pos.x - 256.0).abs() < 0.01);
+}
