@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-27. Status: Phase 0 complete; Phases 1 and 3 in progress; preliminary Phase 5 JSONL/Python path implemented.
 
-Next action: measure conversion residuals across all `train` replays, resolve player ownership gaps and action semantics, and improve reconstruction with held-out replay observations. Use `validation` only after training changes are chosen; keep `test` untouched until the final freeze.
+Next action: investigate one-step car tail errors, resolve player ownership gaps and action semantics, then improve reconstruction against the frozen masked-observation baseline. Use `validation` to check chosen changes; keep `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -92,6 +92,12 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 - The standard-library Python reader streams full frame records. An optional NumPy function makes dense time, ball, car, boost, score, and clock arrays with a car-presence mask and NaN for missing numeric fields. A synthetic loader test and a real 12,292-frame training replay read passed. That replay's JSONL is 115 MB, motivating the planned columnar prototype. The current Rust conversion holds all frames in memory.
 - Exported RocketSim fields absent from replay are simulator estimates, and many have not been calibrated yet. Schema version 1 is provisional until a state-restoration check and compact-format comparison are complete.
 
+### Corpus-wide development evaluation (2026-09-27)
+
+- `evaluate_corpus` converted all 60 `train` and all 60 `validation` replays with zero failures. It saves per-replay hashes, options, errors, and aggregate quantiles in ignored JSON reports. The `test` split has not been touched.
+- A deterministic withheld-physics check masks all ball/car rigid-body fields at offsets 1–4 of every 100-frame block, then compares simulated positions to fresh original packets in active play. At a four-frame mask, validation car median/p90 errors (UU) are 16.0/47.2 in 1v1, 16.1/41.4 in 2v2, and 17.7/47.1 in 3v3; linear extrapolation gives 25.5/66.8, 26.5/62.9, and 28.5/65.6 respectively. Ball gains are smaller. See `RESULTS.md` for all groups, protocol, and caveats.
+- On one-step train comparisons, RocketSim improves median car position over linear extrapolation but loses at p99 in 2v2 and 3v3. Investigate collision, demolition, kickoff, hitbox and missing-input cases before claiming full-state accuracy. The fixed periodic mask should be cross-checked against a different deterministic schedule.
+
 ## Implementation sequence and deliverables
 
 | Phase | Deliverable | Exit check |
@@ -121,3 +127,4 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: Added typed frame observations and an inspection CLI. Verified every `train` replay retains the ball and matches final score, and measured repeated actor announcements and unresolved ownership. Phase 1 remains open.
 - 2026-09-27: Calibrated velocity units from train motion, corrected angular velocity scale to 0.01, implemented the first RocketSim bridge and per-observation position residuals, and verified one replay per game size. Full train metrics and action inference remain.
 - 2026-09-27: Added schema-v1 JSONL state export, command-line conversion, and a Python streaming/NumPy loader. Read a real training export end to end; compact storage, state restoration, and full-corpus evaluation remain.
+- 2026-09-27: Added a corpus evaluator with one-step and four-frame masked-physics metrics. Established train and validation baselines on all 120 development replays; recorded findings in `RESULTS.md`. The held-out `test` split remains sealed.

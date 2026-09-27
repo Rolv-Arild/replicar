@@ -1,6 +1,6 @@
 # Replay to RocketSim
 
-This Rust project parses Rocket League soccar replays with `boxcars` and reconstructs one RocketSim state per replay network frame. It also retains replay observations that sit outside RocketSim state: score, clock, player statistics, observed actions, and events. See [PLAN.md](PLAN.md) for the field map, measured results, evaluation protocol, and open work.
+This Rust project parses Rocket League soccar replays with `boxcars` and reconstructs one RocketSim state per replay network frame. It also retains replay observations that sit outside RocketSim state: score, clock, player statistics, observed actions, and events. See [PLAN.md](PLAN.md) for the field map and open work, and [RESULTS.md](RESULTS.md) for measured accuracy.
 
 ## Setup and conversion
 
@@ -12,6 +12,8 @@ cargo run --release --bin convert_replay -- replays/train/1v1/example.replay tar
 ```
 
 The CLI accepts an optional third argument for the mesh directory. Its output is JSON Lines: one versioned `header` record followed by one `frame` record per network frame. The header records the replay SHA-256, dependency revisions, conversion options, actor-to-car slots, and diagnostics. Each frame contains replay time, timeline tick, a RocketSim state snapshot, the typed observations with source-frame freshness, simulated events, and position prediction residuals. The replay observations distinguish last-seen values from fresh packets through each field's `frame` and `source` keys. Header final scores must never be used as the score at an earlier frame.
+
+To reproduce the development accuracy report, run `cargo run --release --bin evaluate_corpus -- replays/train target/train-conversion-metrics.json` and use `replays/validation` for the held-out development check. The evaluator records one-step residuals and a four-frame masked-physics prediction against hold-position and linear baselines. Keep `replays/test` for the final frozen evaluation.
 
 State position and linear velocity use Rocket League unreal units (UU and UU/s); state angular velocity uses radians/s. Rotation is three RocketSim basis columns. The timeline is rounded to 120 Hz from the replay's first timestamp. RocketSim's arena tick advances only during continuous `Active` intervals, so it can differ from the timeline tick. Simulated events and unobserved state fields are estimates, not replay truth.
 
@@ -34,6 +36,6 @@ JSONL is intentionally inspectable and currently large: one 12,292-frame trainin
 
 ## Present accuracy limits
 
-The first bridge corrects physical fields only on fresh replay updates and simulates intermediate active ticks. It currently assigns every car an Octane hitbox and passes observed throttle, steer, and handbrake to RocketSim. Jump, boost, and aerial inputs are not recovered yet. Score and clock come from replay packets; they are never inferred from simulated goals. Some player ownership links remain unresolved at actor transitions. Prediction metrics so far cover three training replays; held-out validation and final test evaluations have not run. The `test` split remains untouched until settings are frozen.
+The first bridge corrects physical fields only on fresh replay updates and simulates intermediate active ticks. It currently assigns every car an Octane hitbox and passes observed throttle, steer, and handbrake to RocketSim. Jump, boost, and aerial inputs are not recovered yet. Score and clock come from replay packets; they are never inferred from simulated goals. Some player ownership links remain unresolved at actor transitions. Corpus-wide train and validation prediction baselines are in [RESULTS.md](RESULTS.md). The `test` split remains untouched until settings are frozen.
 
 The provided `replays/` and `collision_meshes/` folders, generated `target/` outputs, and IDE files are ignored by Git.
