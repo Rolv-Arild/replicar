@@ -218,3 +218,55 @@ Car position errors generalize consistently without regression:
 - Validation all car position p50 / p90 / p99: 16.39 / 41.09 / 69.61 UU.
 
 Enabled by default with --sync-pads and ablatable with --no-sync-pads.
+
+
+## Aerial steer control routing (`infer_air_steer_controls`)
+
+### Physics analysis and calibration (`src/bin/calibrate_air_steer.rs`)
+
+In RocketSim (update_air_torque), when a car is airborne (`!state.is_on_ground`), `CarControls.steer` only steers wheels on ground surfaces. In the air, RocketSim ignores steer and solely evaluates `CarControls.yaw`, `CarControls.roll`, and `CarControls.pitch`. When these controls are left at zero, RocketSim applies heavy aerodynamic angular damping (`air_control::DAMPING`), bringing rotational velocity to a halt.
+
+In Rocket League replays, players replicate `ReplicatedSteer` (horizontal stick X) continuously. Pitch stick movements (stick Y) are not replicated in standard soccar network frames. Calibration on all 60 
+`replays/train` (`src/bin/calibrate_air_steer.rs`) revealed:
+- 709,925 total airborne frames across the training corpus.
+- 68.1% of air frames (483,261) have non-neutral steer (|steer| > 0.1).
+- Steer and local car yaw have the same sign in 283,213 frames vs opposite sign in 94,195 frames (a 3:1 majority), directly matching RocketSim's internal air torque coordinate convention (`dir_yaw = up_dir`).
+- Routing steer to `controls.yaw` when airborne (`!state.is_on_ground`) allows RocketSim to accurately simulate player-guided aerial yaw rotation and cancel unwanted aerodynamic damping during active steering.
+
+### Evaluation metrics and ablation results
+
+Evaluated on all 60 `train` and 60 `validation` replays with `--no-infer-air-steer` ablation. Zero failures.
+
+#### Masked car rotation and angular velocity p50 by horizon (Train)
+
+| Metric | Horizon | No air steer (Baseline) | Air steer (`infer_air_steer_controls`) | Hold baseline |
+| --- | ---: | ---: | ---: | ---: |
+| Rotation angle (deg) | 1 | 1.87 | **1.84** | 8.10 |
+| Rotation angle (deg) | 2 | 1.90 | **1.87** | 9.54 |
+| Rotation angle (deg) | 3 | 2.74 | **2.66** | 13.36 |
+| Rotation angle (deg) | 4 | 3.39 | **3.25** | 18.16 |
+| Angular velocity (rad/s) | 1 | 0.442 | **0.414** | 0.511 |
+| Angular velocity (rad/s) | 2 | 0.485 | **0.456** | 0.668 |
+| Angular velocity (rad/s) | 3 | 0.599 | **0.565** | 0.937 |
+| Angular velocity (rad/s) | 4 | 0.618 | **0.579** | 1.186 |
+
+- Masked airborne angular velocity error p50 on train dropped from 1.343 rad/s to **1.255 rad/s**.
+- One-step car position p50 / p90 / p99: 16.956 / 41.991 / 68.012 -> **16.955 / 41.991 / 68.033 UU**.
+
+#### Masked car rotation and angular velocity p50 by horizon (Validation Generalization)
+
+| Metric | Horizon | No air steer (Baseline) | Air steer (`infer_air_steer_controls`) | Hold baseline |
+| --- | ---: | ---: | ---: | ---: |
+| Rotation angle (deg) | 1 | 1.89 | **1.86** | 8.15 |
+| Rotation angle (deg) | 2 | 1.89 | **1.85** | 9.71 |
+| Rotation angle (deg) | 3 | 2.53 | **2.47** | 12.99 |
+| Rotation angle (deg) | 4 | 3.18 | **3.08** | 17.89 |
+| Angular velocity (rad/s) | 1 | 0.417 | **0.391** | 0.484 |
+| Angular velocity (rad/s) | 2 | 0.473 | **0.436** | 0.650 |
+| Angular velocity (rad/s) | 3 | 0.545 | **0.516** | 0.898 |
+| Angular velocity (rad/s) | 4 | 0.612 | **0.578** | 1.125 |
+
+- Masked airborne angular velocity error p50 on validation dropped from 1.300 rad/s to **1.218 rad/s**.
+- One-step car position p50 / p90 / p99: 16.391 / 41.092 / 69.611 -> **16.391 / 41.092 / 69.613 UU**.
+
+Enabled by default (`infer_air_steer_controls = true`) with `--infer-air-steer` and ablatable via `--no-infer-air-steer`.

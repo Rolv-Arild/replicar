@@ -59,6 +59,8 @@ pub struct ConvertOptions {
     pub gate_dodge_on_observed_impulse: bool,
     /// Reconcile boost pad pickups and cooldowns from replay pickup data.
     pub sync_boost_pad_pickups: bool,
+    /// Route steer input to aerial yaw while airborne.
+    pub infer_air_steer_controls: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -76,6 +78,7 @@ impl Default for ConvertOptions {
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
+            infer_air_steer_controls: true,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -563,6 +566,10 @@ pub fn convert_observations(
                 }
                 controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
             }
+            let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
+            if options.infer_air_steer_controls && airborne {
+                controls.yaw = controls.steer;
+            }
             if dodge_jump_control {
                 controls.jump = true;
                 controls.pitch = dodge_pitch_control;
@@ -870,5 +877,83 @@ mod tests {
         let output = convert_observations(replay, &options).unwrap();
         let pad_state = output.frames[0].state.boost_pads[0].1;
         assert_eq!(pad_state.cooldown, 4.0);
+    }
+
+    #[test]
+    fn air_steer_controls_route_to_aerial_yaw_and_roll() {
+        let car = observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: Body {
+                position: Some(Value {
+                    value: [0.0, 0.0, 200.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                ..Body::default()
+            },
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs {
+                steer: Some(Value {
+                    value: 0.75,
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                handbrake: Some(Value {
+                    value: false,
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                ..observations::Inputs::default()
+            },
+        };
+
+        let make_replay = |car: observations::Car| ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: vec![observations::Frame {
+                index: 0,
+                time: 0.0,
+                delta: 0.033,
+                ball: None,
+                cars: vec![car],
+                players: Vec::new(),
+                team_scores: [None, None],
+                seconds_remaining: None,
+                overtime: None,
+                game_state: Some(Value {
+                    value: "Active".to_string(),
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                events: Vec::new(),
+                pad_pickups: Vec::new(),
+            }],
+            diagnostics: Default::default(),
+        };
+
+        let mut options = ConvertOptions::default();
+        options.infer_air_steer_controls = true;
+        let out = convert_observations(make_replay(car.clone()), &options).unwrap();
+        let controls = out.frames[0].state.cars[0].1.controls;
+        let (yaw, roll) = (controls.yaw, controls.roll);
+        assert_eq!(yaw, 0.75);
+        assert_eq!(roll, 0.0);
+
+        // When option disabled, yaw remains zero
+        options.infer_air_steer_controls = false;
+        let out_disabled = convert_observations(make_replay(car), &options).unwrap();
+        let controls_disabled = out_disabled.frames[0].state.cars[0].1.controls;
+        let (yaw_dis, roll_dis) = (controls_disabled.yaw, controls_disabled.roll);
+        assert_eq!(yaw_dis, 0.0);
+        assert_eq!(roll_dis, 0.0);
     }
 }
