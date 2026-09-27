@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-27. Status: Phase 0 complete; Phases 1 and 3 in progress; preliminary Phase 5 JSONL/Python path implemented.
 
-Next action: investigate one-step car tail errors, remaining transient car actors, action semantics and hitbox mapping, then improve reconstruction against the masked-observation baseline. Use `validation` to check chosen changes; keep `test` untouched until the final freeze.
+Next action: investigate one-step car tail errors, remaining transient car actors, jump/aerial semantics and hitbox mapping, then improve reconstruction against the masked-observation baseline. Use `validation` to check chosen changes; keep `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -82,7 +82,7 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 ### Preliminary simulation bridge (train samples only, 2026-09-27)
 
 - `conversion::convert_bytes` now produces one `ArenaState` per replay frame, aligned to a 120 Hz timeline. It advances RocketSim only through intervals where both adjacent frames are in the replay's `Active` phase. Countdown and post-goal time is recorded as skipped timeline ticks. The arena's own tick count therefore differs from the full replay-timeline tick.
-- Ball/car position, quaternion, linear velocity, and calibrated angular velocity are applied only when newly observed; boost is similarly corrected only on a fresh update. Unknown replay inputs remain absent from observation output; simulator controls currently use observed throttle/steer/handbrake and neutral values for missing jump/boost/aerial controls. All cars currently receive the Octane hitbox until loadout-to-hitbox mapping is implemented.
+- Ball/car position, quaternion, linear velocity, and calibrated angular velocity are applied only when newly observed; boost is similarly corrected only on a fresh update. Unknown replay inputs remain absent from observation output; simulator controls use observed throttle/steer/handbrake, inferred boost activity from the replicated counter, and neutral values for missing jump/aerial controls. All cars currently receive the Octane hitbox until loadout-to-hitbox mapping is implemented.
 - On the first replay of each train game size, median pre-correction position error (UU) was: 1v1 ball 10.21/car 16.48, 2v2 ball 11.35/car 17.01, 3v3 ball 11.19/car 17.33. The corresponding hold-last-position baselines were ball 42.44/50.12/51.63 and car 116.59/114.68/112.54. Linear extrapolation medians were ball 10.48/11.87/11.60 and car 18.21/18.58/18.84. These are in-sample short-gap checks, not held-out validation metrics; report full distributions and event-specific errors before drawing broad conclusions.
 - `cargo test` passes the fresh-field regression test, the 1v1/2v2/3v3 train conversion smoke test, the soccar mesh smoke test, and the 60-file training observation test.
 
@@ -95,8 +95,9 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 ### Corpus-wide development evaluation (2026-09-27)
 
 - `evaluate_corpus` converted all 60 `train` and all 60 `validation` replays with zero failures. It saves per-replay hashes, options, errors, and aggregate quantiles in ignored JSON reports. The `test` split has not been touched.
-- A deterministic withheld-physics check masks all ball/car rigid-body fields at offsets 1–4 of every 100-frame block, then compares simulated positions to fresh original packets in active play. After the identity fix, four-frame validation car median/p90 errors (UU) are 16.0/46.8 in 1v1, 16.1/41.3 in 2v2, and 17.7/47.0 in 3v3; linear extrapolation gives 25.5/66.8, 26.5/62.9, and 28.5/65.6 respectively. Ball gains are smaller. See `RESULTS.md` for all groups, protocol, and caveats.
-- On one-step train comparisons, RocketSim improves median car position over linear extrapolation but loses at p99 in 2v2 and 3v3. Investigate collision, demolition, kickoff, hitbox and missing-input cases before claiming full-state accuracy. The fixed periodic mask should be cross-checked against a different deterministic schedule.
+- A deterministic withheld-physics check masks all ball/car rigid-body fields at offsets 1–4 of every 100-frame block, then compares simulated positions to fresh original packets in active play. With inferred boost, four-frame validation car median/p90 errors (UU) are 15.4/45.7 in 1v1, 16.0/40.0 in 2v2, and 17.4/46.8 in 3v3; linear extrapolation gives 25.5/66.8, 26.5/63.1, and 28.5/65.6 respectively. Ball gains are smaller. See `RESULTS.md` for all groups, protocol, and caveats.
+- On one-step train comparisons, RocketSim improves median car position over linear extrapolation but loses at p99 in all three game sizes. Investigate collision, demolition, kickoff, hitbox and missing-input cases before claiming full-state accuracy. The fixed periodic mask should be cross-checked against a different deterministic schedule.
+- `calibrate_boost` found that 2,818/2,824 short train intervals ending with an odd-to-even boost activation counter transition show boost depletion; validation has 3,011/3,014. Interpreting odd counter values as active boost input improves four-frame masked car median/p90 across validation sizes, though one-step car p99 increases slightly. The option is enabled by default and can be ablated with `--no-inferred-boost` in the CLIs. The signal is inferred rather than an explicit boolean action field.
 
 ## Implementation sequence and deliverables
 
@@ -129,3 +130,4 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: Added schema-v1 JSONL state export, command-line conversion, and a Python streaming/NumPy loader. Read a real training export end to end; compact storage, state restoration, and full-corpus evaluation remain.
 - 2026-09-27: Added a corpus evaluator with one-step and four-frame masked-physics metrics. Established train and validation baselines on all 120 development replays; recorded findings in `RESULTS.md`. The held-out `test` split remains sealed.
 - 2026-09-27: Traced most unlinked car frames to inactive pawn links during demolition, retained the known owner until deletion, and keyed car-slot fallback to actor creation frame to block reused-ID contamination. Reset simulator car state on a genuine new lifetime. Re-ran train and validation reports; masked-position medians were stable and car p90 slightly improved on validation.
+- 2026-09-27: Calibrated the boost-component activation counter against boost consumption on train, enabled odd-value boost input, and ran a no-boost ablation. All three validation game sizes improved on four-frame masked car position; documented the small one-step p99 regression and refreshed `RESULTS.md`.

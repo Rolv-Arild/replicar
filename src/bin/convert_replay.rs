@@ -17,13 +17,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes]")?,
     );
-    let mesh_path = args.next().map(PathBuf::from);
-    if args.next().is_some() {
-        return Err(
-            "usage: convert_replay <input.replay> <output.jsonl> [collision_meshes]".into(),
-        );
-    }
     let mut options = ConvertOptions::default();
+    let mut mesh_path = None;
+    for arg in args {
+        if arg == "--no-inferred-boost" {
+            options.infer_boost_from_active = false;
+        } else if mesh_path.is_none() {
+            mesh_path = Some(PathBuf::from(arg));
+        } else {
+            return Err("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes] [--no-inferred-boost]".into());
+        }
+    }
     if let Some(path) = mesh_path {
         options.collision_meshes = path;
     }

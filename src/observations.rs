@@ -70,7 +70,7 @@ pub struct Inputs {
     pub throttle: Option<Value<f32>>,
     pub steer: Option<Value<f32>>,
     pub handbrake: Option<Value<bool>>,
-    /// Sequence/counter from boost component; its bit semantics remain to be measured.
+    /// Boost component activation counter. Odd values appear active in train replay calibration.
     pub boost_active_raw: Option<Value<u8>>,
 }
 

@@ -46,6 +46,8 @@ impl Error for ConvertError {}
 pub struct ConvertOptions {
     pub collision_meshes: PathBuf,
     pub seed: u64,
+    /// Interpret odd boost-component ReplicatedActive bytes as active boost input.
+    pub infer_boost_from_active: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
     pub max_gap_ticks: u64,
 }
@@ -55,6 +57,7 @@ impl Default for ConvertOptions {
         Self {
             collision_meshes: PathBuf::from("collision_meshes"),
             seed: 0,
+            infer_boost_from_active: true,
             max_gap_ticks: 1200,
         }
     }
@@ -198,11 +201,17 @@ fn apply_body(state: &mut PhysState, body: &Body, index: usize, new_entity: bool
     applied
 }
 
-fn controls_from_observation(car: &observations::Car) -> CarControls {
+fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) -> CarControls {
     CarControls {
         throttle: car.inputs.throttle.as_ref().map_or(0.0, |v| v.value),
         steer: car.inputs.steer.as_ref().map_or(0.0, |v| v.value),
         handbrake: car.inputs.handbrake.as_ref().is_some_and(|v| v.value),
+        boost: options.infer_boost_from_active
+            && car
+                .inputs
+                .boost_active_raw
+                .as_ref()
+                .is_some_and(|v| v.value % 2 == 1),
         ..CarControls::default()
     }
 }
@@ -373,7 +382,7 @@ pub fn convert_observations(
             if dirty {
                 arena.set_car_state(slot, state);
             }
-            arena.set_car_controls(slot, controls_from_observation(car));
+            arena.set_car_controls(slot, controls_from_observation(car, options));
         }
         frames.push(ConvertedFrame {
             replay_frame: frame.index,

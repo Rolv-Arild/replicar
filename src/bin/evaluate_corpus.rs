@@ -298,11 +298,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes]")?,
     );
-    let meshes = args.next().map(PathBuf::from);
-    if args.next().is_some() {
-        return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes]".into());
-    }
     let mut options = ConvertOptions::default();
+    let mut meshes = None;
+    for arg in args {
+        if arg == "--no-inferred-boost" {
+            options.infer_boost_from_active = false;
+        } else if meshes.is_none() {
+            meshes = Some(PathBuf::from(arg));
+        } else {
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost]".into());
+        }
+    }
     if let Some(meshes) = meshes {
         options.collision_meshes = meshes;
     }
