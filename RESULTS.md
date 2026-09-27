@@ -2,11 +2,11 @@
 
 Last updated: 2026-09-27. These are development baselines for the current converter, not a final accuracy claim. The ignored machine-readable reports are `target/train-conversion-metrics.json` and `target/validation-conversion-metrics.json`. Each report includes every replay's SHA-256, dependencies, seed, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
-These tables include the actor-lifetime and inactive-owner fix, inferred boost input, active-pawn demolition correction, primary-car selection when an old demolished actor overlaps a replacement, and loadout-derived hitboxes from the supplied item catalog. The no-boost ablation reports remain locally under `target/*-conversion-metrics-no-boost.json`; reproduce them with `--no-inferred-boost`. Earlier reports remain under `target/*-conversion-metrics-before-identity.json`, `target/*-conversion-metrics-before-demo-ghost-fix.json`, `target/*-conversion-metrics-before-hitboxes.json`, and `target/*-conversion-metrics-before-item-catalog.json` where available.
+These tables include the actor-lifetime and inactive-owner fix, inferred boost input, active-pawn demolition correction, primary-car selection when an old demolished actor overlaps a replacement, loadout-derived hitboxes, and motion-gated jump input. The no-boost ablation reports remain locally under `target/*-conversion-metrics-no-boost.json`; reproduce them with `--no-inferred-boost`. The previous no-jump default reports are `target/*-conversion-metrics-before-gated-jump.json`; reproduce them with `--no-inferred-jump`. Earlier reports remain under `target/*-conversion-metrics-before-identity.json`, `target/*-conversion-metrics-before-demo-ghost-fix.json`, `target/*-conversion-metrics-before-hitboxes.json`, and `target/*-conversion-metrics-before-item-catalog.json` where available.
 
 ## Protocol
 
-`cargo run --release --bin evaluate_corpus -- replays/train target/train-conversion-metrics.json` measures the position immediately before a fresh replay packet corrects it. When multiple car actors share a player key, only the selected primary car is evaluated. The evaluator also hides **all ball and car rigid-body fields** at frame offsets 1–4 in each 100-frame block, runs conversion again, and compares the resulting positions with fresh original replay positions. Only active-phase comparisons with a last observed position at most 0.5 seconds old are counted. Hold-last-position and constant-linear-velocity extrapolation share the same last unmasked observation. All values below are pooled absolute position errors in Rocket League unreal units (UU). This test measures short-horizon prediction at network frames; it does not verify every RocketSim field or long unobserved intervals. A regular mask schedule is deterministic but may correlate with periodic replay behavior; a later independent schedule should check it.
+`cargo run --release --bin evaluate_corpus -- replays/train target/train-conversion-metrics.json` measures the position immediately before a fresh replay packet corrects it. When multiple car actors share a player key, only the selected primary car is evaluated. The evaluator also hides **all ball and car rigid-body fields** at frame offsets 1–4 in each 100-frame block, runs conversion again, and compares the resulting positions with fresh original replay positions. Only active-phase comparisons with a last observed position at most 0.5 seconds old are counted. Hold-last-position and constant-linear-velocity extrapolation share the same last unmasked observation. All values below are pooled absolute position errors in Rocket League unreal units (UU). This test measures short-horizon prediction at network frames; it does not verify every RocketSim field or long unobserved intervals. An independent replay-specific mask schedule confirmed the direction of the car-position gains below.
 
 ## Four-frame masked prediction
 
@@ -15,28 +15,28 @@ Each cell is median / p90 error in UU. The simulated and linear columns use the 
 | Split | Game size | Body | RocketSim | Linear | Samples |
 | --- | --- | --- | ---: | ---: | ---: |
 | train | 1v1 | ball | 12.2 / 41.1 | 14.4 / 51.9 | 1,635 |
-| train | 1v1 | car | 18.5 / 49.9 | 30.1 / 69.6 | 1,535 |
+| train | 1v1 | car | 18.3 / 46.0 | 30.1 / 69.6 | 1,535 |
 | train | 2v2 | ball | 12.4 / 39.1 | 13.2 / 51.3 | 1,532 |
-| train | 2v2 | car | 16.4 / 40.7 | 26.7 / 63.0 | 2,853 |
+| train | 2v2 | car | 15.9 / 39.8 | 26.7 / 63.0 | 2,853 |
 | train | 3v3 | ball | 14.6 / 41.9 | 16.5 / 57.9 | 1,930 |
-| train | 3v3 | car | 17.7 / 43.3 | 30.3 / 64.3 | 5,665 |
+| train | 3v3 | car | 17.5 / 42.2 | 30.3 / 64.3 | 5,665 |
 | validation | 1v1 | ball | 10.6 / 38.1 | 12.1 / 46.4 | 1,720 |
-| validation | 1v1 | car | 15.4 / 43.9 | 25.5 / 66.8 | 1,592 |
+| validation | 1v1 | car | 15.0 / 42.6 | 25.5 / 66.8 | 1,592 |
 | validation | 2v2 | ball | 11.8 / 37.2 | 13.1 / 45.6 | 1,733 |
-| validation | 2v2 | car | 15.9 / 39.3 | 26.5 / 63.1 | 3,203 |
+| validation | 2v2 | car | 15.6 / 38.8 | 26.5 / 63.1 | 3,203 |
 | validation | 3v3 | ball | 14.2 / 42.4 | 15.3 / 56.0 | 1,945 |
-| validation | 3v3 | car | 17.2 / 45.2 | 28.5 / 65.6 | 5,606 |
+| validation | 3v3 | car | 17.0 / 44.1 | 28.5 / 65.6 | 5,606 |
 
 ## One-step pre-correction prediction on train
 
 | Game size | Body | RocketSim p50 / p90 / p99 | Linear p50 / p90 / p99 | Fresh positions |
 | --- | --- | ---: | ---: | ---: |
 | 1v1 | ball | 9.38 / 34.12 / 64.43 | 9.38 / 35.13 / 67.95 | 164,616 |
-| 1v1 | car | 17.83 / 42.29 / 69.37 | 19.06 / 45.16 / 75.59 | 158,055 |
+| 1v1 | car | 17.86 / 42.33 / 69.43 | 19.06 / 45.16 / 75.59 | 158,055 |
 | 2v2 | ball | 11.20 / 33.72 / 63.61 | 10.87 / 34.77 / 69.13 | 151,225 |
-| 2v2 | car | 16.09 / 41.42 / 63.49 | 17.36 / 43.78 / 69.68 | 285,343 |
+| 2v2 | car | 16.05 / 41.39 / 63.49 | 17.36 / 43.78 / 69.68 | 285,343 |
 | 3v3 | ball | 11.41 / 36.24 / 66.14 | 11.14 / 37.84 / 74.45 | 189,151 |
-| 3v3 | car | 17.31 / 42.65 / 69.77 | 18.69 / 44.66 / 72.23 | 555,544 |
+| 3v3 | car | 17.25 / 42.61 / 69.74 | 18.69 / 44.66 / 72.23 | 555,544 |
 
 One-step simulated car p99 errors are now below linear extrapolation in all three game sizes. The evaluator's top training car error over linear extrapolation fell from about 10,724 UU before demolition correction to 932 UU after selecting primary cars; the metric also excludes retired duplicate actors. Across train and validation, 32,751 overlapping or otherwise shadowed car-frame records were skipped, and active replay pawn evidence corrected 592 simulated demolition flags. Validation one-step car p99 fell from 76.68/73.38/76.39 UU to 66.69/62.52/72.39 UU across 1v1/2v2/3v3. Collision, kickoff, hitbox, and unknown input cases still need investigation. The masked results do not establish accurate jump/flip, boost-pad, event, or scoreboard reconstruction.
 
@@ -55,25 +55,27 @@ Validation results at mask horizon 4 are below. Each value is median / p90 error
 | 1v1 | ball | Velocity (UU/s) | 5.46 / 21.77 | 86.99 / 347.79 | 1,720 |
 | 1v1 | ball | Rotation (degrees) | 2.86 / 5.78 | 40.11 / 51.57 | 1,720 |
 | 1v1 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.14 | 1,720 |
-| 1v1 | car | Velocity (UU/s) | 53.22 / 287.07 | 180.27 / 648.79 | 1,592 |
-| 1v1 | car | Rotation (degrees) | 4.52 / 29.06 | 20.32 / 59.16 | 1,592 |
-| 1v1 | car | Angular velocity (rad/s) | 0.99 / 3.63 | 1.28 / 4.19 | 1,592 |
+| 1v1 | car | Velocity (UU/s) | 51.85 / 238.31 | 180.27 / 648.79 | 1,592 |
+| 1v1 | car | Rotation (degrees) | 4.50 / 29.06 | 20.32 / 59.16 | 1,592 |
+| 1v1 | car | Angular velocity (rad/s) | 0.97 / 3.64 | 1.28 / 4.19 | 1,592 |
 | 2v2 | ball | Velocity (UU/s) | 5.44 / 21.65 | 86.79 / 527.24 | 1,733 |
 | 2v2 | ball | Rotation (degrees) | 2.86 / 5.73 | 40.11 / 51.57 | 1,733 |
 | 2v2 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.65 | 1,733 |
-| 2v2 | car | Velocity (UU/s) | 45.78 / 242.76 | 198.85 / 628.28 | 3,201 |
-| 2v2 | car | Rotation (degrees) | 3.19 / 25.68 | 17.53 / 53.98 | 3,203 |
+| 2v2 | car | Velocity (UU/s) | 43.28 / 203.60 | 198.85 / 628.28 | 3,201 |
+| 2v2 | car | Rotation (degrees) | 3.20 / 25.68 | 17.53 / 53.98 | 3,203 |
 | 2v2 | car | Angular velocity (rad/s) | 0.61 / 3.34 | 1.09 / 3.59 | 3,201 |
 | 3v3 | ball | Velocity (UU/s) | 5.46 / 25.90 | 88.73 / 987.46 | 1,945 |
 | 3v3 | ball | Rotation (degrees) | 2.86 / 6.81 | 43.31 / 51.57 | 1,945 |
 | 3v3 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 2.70 | 1,945 |
-| 3v3 | car | Velocity (UU/s) | 41.28 / 219.55 | 209.35 / 641.28 | 5,605 |
+| 3v3 | car | Velocity (UU/s) | 39.68 / 188.16 | 209.35 / 641.28 | 5,605 |
 | 3v3 | car | Rotation (degrees) | 3.04 / 22.94 | 17.53 / 52.84 | 5,606 |
 | 3v3 | car | Angular velocity (rad/s) | 0.54 / 3.22 | 1.09 / 3.52 | 5,605 |
 
 Car angular velocity has the smallest gain, especially near p90. Missing jump and aerial controls and hitbox mismatch are plausible contributors, but the current report does not isolate them. Ball angular velocity median is zero in both systems because many sampled intervals contain no change; its p90 is more informative. This is a short-horizon comparison with replay packets, not a guarantee that all unobserved state is correct.
 
 ## Rotation calibration and independent mask
+
+The masked metrics in this section are the earlier no-jump baseline; the motion-gated results appear below.
 
 `cargo run --release --bin calibrate_rotation -- replays/train` compared fresh car angular-velocity packets against the quaternion change over short active-play intervals. On 367,746 ground intervals, the world-frame interpretation had median/p90 vector error 0.31/1.14 rad/s, versus 0.33/1.86 when rotated from car-local coordinates and 3.75/6.06 when negated. On 262,200 air intervals, the corresponding errors were 0.62/2.64, 4.20/9.76, and 7.26/12.49 rad/s. The median direction alignment of world-frame angular velocity with quaternion motion was approximately 1.00 in both groups. This confirms the existing 0.01 scale and world-coordinate mapping; the remaining masked error is unlikely to come from a coordinate transform. The comparison uses two packet endpoints, so it also includes real within-interval acceleration.
 
@@ -99,9 +101,9 @@ The alternate mask also groups fresh car angular-velocity targets by observed he
 | validation | transition | 5,962 | 1.84 / 4.67 | 0.94 / 4.01 |
 | validation | air | 12,599 | 1.25 / 3.25 | 1.13 / 3.36 |
 
-Ground steering accounts for the aggregate angular-velocity gain. Near takeoff the simulator is worse than the held baseline, and airborne median error is also higher. Missing jump, dodge, and aerial controls are the next concrete hypothesis to test. A read-only train replay audit found that `ReplicatedActive` jump and dodge bytes increment across adjacent frames and dodge updates can coincide with `DodgeTorque`; they are activation evidence, not a demonstrated held-button state. Exact input timing and duration remain unknown, so the default converter preserves those counters as observations without using them as RocketSim controls.
+Ground steering accounts for the aggregate angular-velocity gain. Near takeoff the simulator is worse than the held baseline, and airborne median error is also higher. Missing dodge and aerial controls remain concrete hypotheses to test. A read-only train replay audit found that `ReplicatedActive` jump and dodge bytes increment across adjacent frames and dodge updates can coincide with `DodgeTorque`; they are activation evidence, not a demonstrated held-button state. Exact input timing and duration remain unknown; the later motion-gated rule below uses the jump counter only when its impulse is not already observed.
 
-## Action-event timing and jump-input ablation
+## Action-event timing and earlier raw jump-input ablation
 
 `calibrate_action_events` traces primary linked cars in active play and compares each fresh jump, double-jump, or dodge counter change with the nearest fresh body packets strictly before and after it, each within 0.15 seconds. It preserves `DodgeTorque` as a raw, provenance-tagged vector. The event association does not isolate collisions or prove exact controller timing. The 60 training replays show:
 
@@ -116,7 +118,7 @@ Ground steering accounts for the aggregate angular-velocity gain. Near takeoff t
 
 The same pattern appears on validation: jump-to-odd median vertical-velocity change is +304 UU/s versus -6 for jump-to-even; 14,431 of 14,730 dodge-to-odd transitions carry fresh torque. Nearly all counter changes are a +1 increment. Odd transitions therefore give strong evidence of a jump or dodge activation, and even transitions usually mark its end. The packet timestamp can still lag the physical input, and the replicated duration may differ from the actual button hold.
 
-An opt-in `--inferred-jump` ablation sets RocketSim's jump control while the jump counter is odd. It was evaluated with the same seed-239847 alternate mask; 60/60 train and 60/60 validation replays converted. Validation car-position median/p90 error (UU) at mask horizon 4 improved modestly, but one-step pre-correction error increased in every game size:
+An opt-in `--inferred-jump` ablation sets RocketSim's jump control while the jump counter is odd. It was evaluated against the earlier no-jump default with the same seed-239847 alternate mask; 60/60 train and 60/60 validation replays converted. Validation car-position median/p90 error (UU) at mask horizon 4 improved modestly, but one-step pre-correction error increased in every game size:
 
 | Size | Four-frame default | Four-frame inferred jump | One-step default | One-step inferred jump |
 | --- | ---: | ---: | ---: | ---: |
@@ -124,7 +126,23 @@ An opt-in `--inferred-jump` ablation sets RocketSim's jump control while the jum
 | 2v2 | 15.90 / 41.23 | 15.34 / 40.53 | 15.96 / 41.46 | 16.03 / 41.63 |
 | 3v3 | 16.98 / 46.65 | 16.55 / 46.47 | 16.87 / 42.05 | 16.91 / 42.19 |
 
-Training showed the same direction: four-frame medians improved by 0.27–0.47 UU while one-step medians worsened by 0.02–0.15 UU. The default remains **off**. The current inferred input reaches RocketSim after the replay packet; if the observed body already contains the jump impulse, the simulator may apply it late. Before enabling it, measure error around event frames and calibrate when to inject the control relative to packet timing and the current jump state. The alternate-mask reports are `target/*-conversion-metrics-inferred-jump.json`; omit `--inferred-jump` for the baseline.
+Training showed the same direction: four-frame medians improved by 0.27–0.47 UU while one-step medians worsened by 0.02–0.15 UU. The raw-counter mode remains opt-in; the motion-gated mode is now the default. That ungated input reaches RocketSim after the replay packet; if the observed body already contains the jump impulse, the simulator may apply it late. The follow-up motion-gated rule is measured below. The alternate-mask reports are `target/*-conversion-metrics-inferred-jump.json`; use `--no-inferred-jump` for the no-jump baseline.
+
+## Motion-gated jump timing
+
+The jump-packet timing audit on `train` found 10,622 odd jump transitions with a fresh rigid-body packet in the same frame. The median vertical-velocity change was +295 UU/s **before** that packet and +20.5 UU/s after it; 6,922 of those same-frame packets already reported upward velocity above 200 UU/s. This supports the inference that applying a new RocketSim jump impulse after every odd counter packet often applies it too late.
+
+The motion-gated rule starts inferred jump input only when the most recently observed car center is below 50 UU and a fresh velocity packet does not already show upward speed above 150 UU/s. That decision stays with the activation until the next counter update. It uses only observations available at that frame, so a hidden rigid-body packet can still leave a jump event available for prediction. The thresholds were selected from `train` timing evidence and then checked unchanged on `validation`. The rule estimates a control; it does not claim the original button timing or duration is known.
+
+All 60 `train` and 60 `validation` replays converted under both the fixed and seed-239847 masks, with zero failures. Validation car-position error (UU) at four-frame horizon and linear-velocity p90 (UU/s) improved in every size. The old columns use `--no-inferred-jump`; the new columns use the motion-gated default.
+
+| Size | Fixed-mask position p50/p90 old → new | Fixed-mask velocity p90 old → new | Alternate-mask position p90 old → new | One-step position p50 old → new |
+| --- | ---: | ---: | ---: | ---: |
+| 1v1 | 15.36/43.87 → 15.03/42.63 | 287.07 → 238.31 | 43.70 → 42.01 | 16.36 → 16.40 |
+| 2v2 | 15.90/39.31 → 15.61/38.75 | 242.76 → 203.60 | 41.23 → 39.77 | 15.96 → 15.92 |
+| 3v3 | 17.23/45.24 → 17.03/44.10 | 219.55 → 188.16 | 46.65 → 45.30 | 16.87 → 16.81 |
+
+One-step p90 and p99 are effectively stable; 1v1 one-step median rises by 0.04 UU. Fixed-mask train car-position p90 also improves from 49.89/40.58/43.28 to 45.95/39.77/42.20 UU across 1v1/2v2/3v3. The motion-gated mode is enabled by default. `--no-inferred-jump` reproduces the earlier no-jump baseline, and `--inferred-jump` selects the earlier ungated odd-counter experiment. The new alternate-mask reports are `target/*-conversion-metrics-gated-jump.json`; fixed-mask reports are `target/*-conversion-metrics.json`. The `test` split remains sealed.
 
 ## Loadout body products and hitboxes
 

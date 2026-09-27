@@ -24,12 +24,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_boost_from_active = false;
         } else if arg == "--inferred-jump" {
             options.infer_jump_from_active = true;
+            options.gate_jump_on_observed_impulse = false;
+        } else if arg == "--gated-jump" {
+            options.infer_jump_from_active = true;
+            options.gate_jump_on_observed_impulse = true;
+        } else if arg == "--no-inferred-jump" {
+            options.infer_jump_from_active = false;
+            options.gate_jump_on_observed_impulse = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes] [--no-inferred-boost] [--inferred-jump] [--octane-hitbox]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox]".into());
         }
     }
     if let Some(path) = mesh_path {

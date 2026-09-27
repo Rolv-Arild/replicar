@@ -44,6 +44,11 @@ struct Counts {
     upward_dvz_300: usize,
     rising_z_10: usize,
     dvz: Vec<f32>,
+    fresh_at_event: usize,
+    grounded_at_event: usize,
+    upward_at_event: usize,
+    pre_event_dvz: Vec<f32>,
+    post_event_dvz: Vec<f32>,
 }
 
 fn quantile(values: &mut [f32], fraction: f64) -> Option<f32> {
@@ -75,6 +80,27 @@ fn paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
 fn record_motion(counts: &mut Counts, activation: Activation, motions: &[Motion]) {
     let before_index = motions.partition_point(|motion| motion.frame < activation.frame);
     let after_index = motions.partition_point(|motion| motion.frame <= activation.frame);
+    if let Some(current) = motions
+        .get(before_index)
+        .filter(|motion| motion.frame == activation.frame)
+    {
+        counts.fresh_at_event += 1;
+        counts.grounded_at_event += usize::from(current.z < 50.0);
+        counts.upward_at_event += usize::from(current.vz > 200.0);
+        if let Some(before) = before_index
+            .checked_sub(1)
+            .and_then(|index| motions.get(index))
+        {
+            if activation.time - before.time <= 0.15 {
+                counts.pre_event_dvz.push(current.vz - before.vz);
+            }
+        }
+        if let Some(after) = motions.get(after_index) {
+            if after.time - activation.time <= 0.15 {
+                counts.post_event_dvz.push(after.vz - current.vz);
+            }
+        }
+    }
     let (Some(before), Some(after)) = (
         before_index
             .checked_sub(1)
@@ -199,6 +225,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             group.upward_dvz_300,
             group.rising_z_10,
             quantile(&mut group.dvz, 0.5),
+        );
+        println!(
+            "  at_event={} z<50={} vz>200={} pre_dvz_p50={:?} post_dvz_p50={:?}",
+            group.fresh_at_event,
+            group.grounded_at_event,
+            group.upward_at_event,
+            quantile(&mut group.pre_event_dvz, 0.5),
+            quantile(&mut group.post_event_dvz, 0.5),
         );
     }
     Ok(())

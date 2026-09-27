@@ -49,8 +49,10 @@ pub struct ConvertOptions {
     pub seed: u64,
     /// Interpret odd boost-component ReplicatedActive bytes as active boost input.
     pub infer_boost_from_active: bool,
-    /// Experimental: interpret odd jump-component activation bytes as held jump input.
+    /// Infer jump input from odd jump-component activation bytes.
     pub infer_jump_from_active: bool,
+    /// Start an inferred jump only while near the ground and before its impulse is observed.
+    pub gate_jump_on_observed_impulse: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -63,7 +65,8 @@ impl Default for ConvertOptions {
             collision_meshes: PathBuf::from("collision_meshes"),
             seed: 0,
             infer_boost_from_active: true,
-            infer_jump_from_active: false,
+            infer_jump_from_active: true,
+            gate_jump_on_observed_impulse: true,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -233,6 +236,18 @@ fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) 
     }
 }
 
+fn jump_impulse_unobserved(car: &observations::Car, frame: usize) -> bool {
+    car.body
+        .position
+        .as_ref()
+        .is_some_and(|position| position.value[2] < 50.0)
+        && !car
+            .body
+            .linear_velocity
+            .as_ref()
+            .is_some_and(|velocity| velocity.frame == frame && velocity.value[2] > 150.0)
+}
+
 fn team(index: u8) -> Team {
     if index == 0 { Team::Blue } else { Team::Orange }
 }
@@ -303,6 +318,7 @@ pub fn convert_observations(
     let mut slots: HashMap<String, usize> = HashMap::new();
     let mut car_slots = Vec::new();
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
+    let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut frames = Vec::with_capacity(observations.frames.len());
     let mut position_residuals = Vec::new();
     let mut diagnostics = Diagnostics::default();
@@ -465,7 +481,23 @@ pub fn convert_observations(
             if dirty {
                 arena.set_car_state(slot, state);
             }
-            arena.set_car_controls(slot, controls_from_observation(car, options));
+            let mut controls = controls_from_observation(car, options);
+            if options.gate_jump_on_observed_impulse {
+                let key = (car.actor_id, car.actor_created_frame);
+                if let Some(raw) = car
+                    .inputs
+                    .jump_active_raw
+                    .as_ref()
+                    .filter(|raw| raw.frame == frame.index)
+                {
+                    gated_jump_active.insert(
+                        key,
+                        raw.value % 2 == 1 && jump_impulse_unobserved(car, frame.index),
+                    );
+                }
+                controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
+            }
+            arena.set_car_controls(slot, controls);
         }
         frames.push(ConvertedFrame {
             replay_frame: frame.index,
@@ -519,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn jump_counter_inference_is_opt_in() {
+    fn jump_counter_inference_can_be_ablated_and_gated() {
         let mut car = observations::Car {
             actor_id: 1,
             actor_created_frame: 0,
@@ -540,9 +572,28 @@ mod tests {
             },
         };
         let mut options = ConvertOptions::default();
+        assert!(options.infer_jump_from_active);
+        assert!(options.gate_jump_on_observed_impulse);
+        options.infer_jump_from_active = false;
+        options.gate_jump_on_observed_impulse = false;
         assert!(!controls_from_observation(&car, &options).jump);
         options.infer_jump_from_active = true;
         assert!(controls_from_observation(&car, &options).jump);
+        car.body.position = Some(Value {
+            value: [0.0, 0.0, 17.0],
+            frame: 1,
+            source: Source::Replay,
+        });
+        car.body.linear_velocity = Some(Value {
+            value: [0.0, 0.0, 300.0],
+            frame: 1,
+            source: Source::Replay,
+        });
+        assert!(!jump_impulse_unobserved(&car, 1));
+        car.body.linear_velocity.as_mut().unwrap().frame = 0;
+        assert!(jump_impulse_unobserved(&car, 1));
+        car.body.position.as_mut().unwrap().value[2] = 100.0;
+        assert!(!jump_impulse_unobserved(&car, 1));
         car.inputs.jump_active_raw.as_mut().unwrap().value = 2;
         assert!(!controls_from_observation(&car, &options).jump);
     }

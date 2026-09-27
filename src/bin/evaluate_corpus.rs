@@ -652,6 +652,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_boost_from_active = false;
         } else if arg == "--inferred-jump" {
             options.infer_jump_from_active = true;
+            options.gate_jump_on_observed_impulse = false;
+        } else if arg == "--gated-jump" {
+            options.infer_jump_from_active = true;
+            options.gate_jump_on_observed_impulse = true;
+        } else if arg == "--no-inferred-jump" {
+            options.infer_jump_from_active = false;
+            options.gate_jump_on_observed_impulse = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -664,7 +671,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--inferred-jump] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
