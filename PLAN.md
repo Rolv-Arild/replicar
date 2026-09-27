@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-27. Status: Phase 0 complete; Phases 1 and 3 in progress; preliminary Phase 5 JSONL/Python path implemented.
 
-Next action: investigate one-step car tail errors, remaining transient car actors, jump/aerial semantics and hitbox mapping, then improve reconstruction against the masked-observation baseline. Use `validation` to check chosen changes; keep `test` untouched until the final freeze.
+Next action: investigate one-step car tail errors, remaining transient car actors, jump/dodge counter timing and hitbox mapping, then improve reconstruction against the masked-observation baseline. Use `validation` to check chosen changes; keep `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -98,6 +98,7 @@ Target acceptance gates after baselines are known: strict parse/conversion succe
 - A deterministic withheld-physics check masks all ball/car rigid-body fields at offsets 1–4 of every 100-frame block, then compares simulated positions to fresh original packets in active play. With inferred boost, four-frame validation car median/p90 errors (UU) are 15.4/45.7 in 1v1, 16.0/40.0 in 2v2, and 17.4/46.8 in 3v3; linear extrapolation gives 25.5/66.8, 26.5/63.1, and 28.5/65.6 respectively. Ball gains are smaller. See `RESULTS.md` for all groups, protocol, and caveats.
 - On one-step train comparisons, RocketSim improves median car position over linear extrapolation but loses at p99 in all three game sizes. Investigate collision, demolition, kickoff, hitbox and missing-input cases before claiming full-state accuracy. The fixed periodic mask should be cross-checked against a different deterministic schedule.
 - `calibrate_boost` found that 2,818/2,824 short train intervals ending with an odd-to-even boost activation counter transition show boost depletion; validation has 3,011/3,014. Interpreting odd counter values as active boost input improves four-frame masked car median/p90 across validation sizes, though one-step car p99 increases slightly. The option is enabled by default and can be ablated with `--no-inferred-boost` in the CLIs. The signal is inferred rather than an explicit boolean action field.
+- Typed observations now retain raw activation counters for jump, double jump, dodge, and flip-car components alongside boost. The train audit found 50,240 fresh jump, 10,496 double-jump, 42,564 dodge, and 40 flip-car counter updates. These remain replay evidence; do not equate odd values with a held jump button or use them as RocketSim input until their timing and meaning are calibrated.
 
 ## Implementation sequence and deliverables
 
@@ -131,3 +132,4 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-09-27: Added a corpus evaluator with one-step and four-frame masked-physics metrics. Established train and validation baselines on all 120 development replays; recorded findings in `RESULTS.md`. The held-out `test` split remains sealed.
 - 2026-09-27: Traced most unlinked car frames to inactive pawn links during demolition, retained the known owner until deletion, and keyed car-slot fallback to actor creation frame to block reused-ID contamination. Reset simulator car state on a genuine new lifetime. Re-ran train and validation reports; masked-position medians were stable and car p90 slightly improved on validation.
 - 2026-09-27: Calibrated the boost-component activation counter against boost consumption on train, enabled odd-value boost input, and ran a no-boost ablation. All three validation game sizes improved on four-frame masked car position; documented the small one-step p99 regression and refreshed `RESULTS.md`.
+- 2026-09-27: Added jump, double-jump, dodge, and flip component counters to the replay observation stream and verified their presence across training replays. Their exact control semantics remain open.

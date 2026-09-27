@@ -25,6 +25,7 @@ fn training_observations_preserve_ball_and_final_scores() {
     collect(&root, &mut paths);
     assert!(!paths.is_empty());
     paths.sort();
+    let mut action_component_updates = [0usize; 5];
     for path in paths {
         let bytes = fs::read(&path).unwrap();
         let replay = parse_replay(&bytes).unwrap();
@@ -62,5 +63,20 @@ fn training_observations_preserve_ball_and_final_scores() {
             "{}",
             path.display()
         );
+        for frame in &observed.frames {
+            for car in &frame.cars {
+                let actions = [
+                    &car.inputs.boost_active_raw,
+                    &car.inputs.jump_active_raw,
+                    &car.inputs.double_jump_active_raw,
+                    &car.inputs.dodge_active_raw,
+                    &car.inputs.flip_car_active_raw,
+                ];
+                for (count, action) in action_component_updates.iter_mut().zip(actions) {
+                    *count += usize::from(action.as_ref().is_some_and(|v| v.frame == frame.index));
+                }
+            }
+        }
     }
+    assert!(action_component_updates.into_iter().all(|count| count > 0));
 }

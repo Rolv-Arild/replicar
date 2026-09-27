@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut unknown_updates = 0;
     let mut missing_ball = 0;
     let mut car_frames = 0;
+    let mut action_component_updates = [0usize; 5];
     for path in &paths {
         let replay = parse_replay(&fs::read(path)?)?;
         let observed = observations::extract(&replay).ok_or("network frames missing")?;
@@ -77,6 +78,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|frame| frame.ball.is_none())
             .count();
         car_frames += this_car_frames;
+        for frame in &observed.frames {
+            for car in &frame.cars {
+                let actions = [
+                    &car.inputs.boost_active_raw,
+                    &car.inputs.jump_active_raw,
+                    &car.inputs.double_jump_active_raw,
+                    &car.inputs.dodge_active_raw,
+                    &car.inputs.flip_car_active_raw,
+                ];
+                for (count, action) in action_component_updates.iter_mut().zip(actions) {
+                    *count += usize::from(action.as_ref().is_some_and(|v| v.frame == frame.index));
+                }
+            }
+        }
     }
     println!(
         "files={} score_mismatches={} unlinked_car_frames={}/{} repeated_announcements={} unknown_body_updates={} missing_ball_frames={}",
@@ -87,6 +102,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         repeated,
         unknown_updates,
         missing_ball
+    );
+    println!(
+        "fresh component counters: boost={} jump={} double_jump={} dodge={} flip_car={}",
+        action_component_updates[0],
+        action_component_updates[1],
+        action_component_updates[2],
+        action_component_updates[3],
+        action_component_updates[4]
     );
     Ok(())
 }

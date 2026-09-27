@@ -72,6 +72,10 @@ pub struct Inputs {
     pub handbrake: Option<Value<bool>>,
     /// Boost component activation counter. Odd values appear active in train replay calibration.
     pub boost_active_raw: Option<Value<u8>>,
+    pub jump_active_raw: Option<Value<u8>>,
+    pub double_jump_active_raw: Option<Value<u8>>,
+    pub dodge_active_raw: Option<Value<u8>>,
+    pub flip_car_active_raw: Option<Value<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,9 +162,18 @@ enum ActorKind {
     Ball,
     Player,
     Team(u8),
-    BoostComponent,
+    Component(ComponentKind),
     GameEvent,
     Other,
+}
+
+#[derive(Clone, Copy)]
+enum ComponentKind {
+    Boost,
+    Jump,
+    DoubleJump,
+    Dodge,
+    FlipCar,
 }
 
 #[derive(Clone)]
@@ -215,7 +228,15 @@ fn classify(class: &str) -> ActorKind {
     } else if class.contains("__PRI_TA") {
         ActorKind::Player
     } else if class.contains("CarComponent_Boost") {
-        ActorKind::BoostComponent
+        ActorKind::Component(ComponentKind::Boost)
+    } else if class.contains("CarComponent_DoubleJump") {
+        ActorKind::Component(ComponentKind::DoubleJump)
+    } else if class.contains("CarComponent_Jump") {
+        ActorKind::Component(ComponentKind::Jump)
+    } else if class.contains("CarComponent_Dodge") {
+        ActorKind::Component(ComponentKind::Dodge)
+    } else if class.contains("CarComponent_FlipCar") {
+        ActorKind::Component(ComponentKind::FlipCar)
     } else if class.contains("GameEvent_Soccar") {
         ActorKind::GameEvent
     } else {
@@ -269,7 +290,7 @@ impl Tracker {
                 ActorKind::Player => {
                     self.players.remove(&id);
                 }
-                ActorKind::BoostComponent => {
+                ActorKind::Component(_) => {
                     self.components.remove(&id);
                 }
                 _ => {}
@@ -432,7 +453,7 @@ impl Tracker {
             "TAGame.CarComponent_TA:ReplicatedActive" => {
                 if let (
                     Some(Actor {
-                        kind: ActorKind::BoostComponent,
+                        kind: ActorKind::Component(component),
                         ..
                     }),
                     Some(car_id),
@@ -443,7 +464,14 @@ impl Tracker {
                     attribute,
                 ) {
                     if let Some(car) = self.cars.get_mut(car_id) {
-                        car.inputs.boost_active_raw = Some(Value::replay(*raw, frame));
+                        let field = match component {
+                            ComponentKind::Boost => &mut car.inputs.boost_active_raw,
+                            ComponentKind::Jump => &mut car.inputs.jump_active_raw,
+                            ComponentKind::DoubleJump => &mut car.inputs.double_jump_active_raw,
+                            ComponentKind::Dodge => &mut car.inputs.dodge_active_raw,
+                            ComponentKind::FlipCar => &mut car.inputs.flip_car_active_raw,
+                        };
+                        *field = Some(Value::replay(*raw, frame));
                     }
                 }
             }
