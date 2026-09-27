@@ -26,6 +26,7 @@ fn training_observations_preserve_ball_and_final_scores() {
     assert!(!paths.is_empty());
     paths.sort();
     let mut action_component_updates = [0usize; 5];
+    let mut dodge_torque_updates = 0;
     for path in paths {
         let bytes = fs::read(&path).unwrap();
         let replay = parse_replay(&bytes).unwrap();
@@ -75,8 +76,15 @@ fn training_observations_preserve_ball_and_final_scores() {
                 for (count, action) in action_component_updates.iter_mut().zip(actions) {
                     *count += usize::from(action.as_ref().is_some_and(|v| v.frame == frame.index));
                 }
+                dodge_torque_updates += usize::from(
+                    car.inputs
+                        .dodge_torque_replay_units
+                        .as_ref()
+                        .is_some_and(|v| v.frame == frame.index),
+                );
             }
         }
     }
     assert!(action_component_updates.into_iter().all(|count| count > 0));
+    assert!(dodge_torque_updates > 0);
 }

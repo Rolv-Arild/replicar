@@ -75,6 +75,8 @@ pub struct Inputs {
     pub jump_active_raw: Option<Value<u8>>,
     pub double_jump_active_raw: Option<Value<u8>>,
     pub dodge_active_raw: Option<Value<u8>>,
+    /// Raw replay dodge-torque vector; its relation to a controller direction is uncalibrated.
+    pub dodge_torque_replay_units: Option<Value<[f32; 3]>>,
     pub flip_car_active_raw: Option<Value<u8>>,
 }
 
@@ -508,6 +510,16 @@ impl Tracker {
                             ComponentKind::FlipCar => &mut car.inputs.flip_car_active_raw,
                         };
                         *field = Some(Value::replay(*raw, frame));
+                    }
+                }
+            }
+            "TAGame.CarComponent_Dodge_TA:DodgeTorque" => {
+                if let (Some(car_id), Attribute::Location(torque)) =
+                    (self.components.get(&actor), attribute)
+                {
+                    if let Some(car) = self.cars.get_mut(car_id) {
+                        car.inputs.dodge_torque_replay_units =
+                            Some(Value::replay(vector(*torque), frame));
                     }
                 }
             }

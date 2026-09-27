@@ -650,6 +650,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
+        } else if arg == "--inferred-jump" {
+            options.infer_jump_from_active = true;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -662,7 +664,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--inferred-jump] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {

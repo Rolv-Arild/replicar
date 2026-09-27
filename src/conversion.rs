@@ -49,6 +49,8 @@ pub struct ConvertOptions {
     pub seed: u64,
     /// Interpret odd boost-component ReplicatedActive bytes as active boost input.
     pub infer_boost_from_active: bool,
+    /// Experimental: interpret odd jump-component activation bytes as held jump input.
+    pub infer_jump_from_active: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -61,6 +63,7 @@ impl Default for ConvertOptions {
             collision_meshes: PathBuf::from("collision_meshes"),
             seed: 0,
             infer_boost_from_active: true,
+            infer_jump_from_active: false,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -218,6 +221,12 @@ fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) 
             && car
                 .inputs
                 .boost_active_raw
+                .as_ref()
+                .is_some_and(|v| v.value % 2 == 1),
+        jump: options.infer_jump_from_active
+            && car
+                .inputs
+                .jump_active_raw
                 .as_ref()
                 .is_some_and(|v| v.value % 2 == 1),
         ..CarControls::default()
@@ -507,6 +516,35 @@ mod tests {
         assert!(apply_body(&mut state, &body, 3, false));
         assert_eq!(state.pos, Vec3A::new(1.0, 2.0, 3.0));
         assert_eq!(state.ang_vel.z, 1.0);
+    }
+
+    #[test]
+    fn jump_counter_inference_is_opt_in() {
+        let mut car = observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: None,
+            player_link_active: false,
+            team: None,
+            body_product_id: None,
+            body: Body::default(),
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs {
+                jump_active_raw: Some(Value {
+                    value: 1,
+                    frame: 1,
+                    source: Source::Replay,
+                }),
+                ..observations::Inputs::default()
+            },
+        };
+        let mut options = ConvertOptions::default();
+        assert!(!controls_from_observation(&car, &options).jump);
+        options.infer_jump_from_active = true;
+        assert!(controls_from_observation(&car, &options).jump);
+        car.inputs.jump_active_raw.as_mut().unwrap().value = 2;
+        assert!(!controls_from_observation(&car, &options).jump);
     }
 
     #[test]

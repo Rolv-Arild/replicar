@@ -99,7 +99,32 @@ The alternate mask also groups fresh car angular-velocity targets by observed he
 | validation | transition | 5,962 | 1.84 / 4.67 | 0.94 / 4.01 |
 | validation | air | 12,599 | 1.25 / 3.25 | 1.13 / 3.36 |
 
-Ground steering accounts for the aggregate angular-velocity gain. Near takeoff the simulator is worse than the held baseline, and airborne median error is also higher. Missing jump, dodge, and aerial controls are the next concrete hypothesis to test. A read-only train replay audit found that `ReplicatedActive` jump and dodge bytes increment across adjacent frames and dodge updates can coincide with `DodgeTorque`; they are activation evidence, not a demonstrated held-button state. Exact input timing and duration remain unknown, so those counters are still preserved as observations rather than sent directly to RocketSim controls.
+Ground steering accounts for the aggregate angular-velocity gain. Near takeoff the simulator is worse than the held baseline, and airborne median error is also higher. Missing jump, dodge, and aerial controls are the next concrete hypothesis to test. A read-only train replay audit found that `ReplicatedActive` jump and dodge bytes increment across adjacent frames and dodge updates can coincide with `DodgeTorque`; they are activation evidence, not a demonstrated held-button state. Exact input timing and duration remain unknown, so the default converter preserves those counters as observations without using them as RocketSim controls.
+
+## Action-event timing and jump-input ablation
+
+`calibrate_action_events` traces primary linked cars in active play and compares each fresh jump, double-jump, or dodge counter change with the nearest fresh body packets strictly before and after it, each within 0.15 seconds. It preserves `DodgeTorque` as a raw, provenance-tagged vector. The event association does not isolate collisions or prove exact controller timing. The 60 training replays show:
+
+| Transition | Events | Paired body intervals | Median vertical-velocity change (UU/s) | Fresh dodge torque |
+| --- | ---: | ---: | ---: | ---: |
+| Jump to odd | 17,614 | 17,559 | +302 | 63 |
+| Jump to even | 19,525 | 19,461 | -5 | 393 |
+| Double-jump to odd | 1,725 | 1,723 | +217 | 6 |
+| Double-jump to even | 2,849 | 2,845 | -42 | 10 |
+| Dodge to odd | 14,094 | 14,040 | -58 | 13,914 |
+| Dodge to even | 15,561 | 15,520 | -31 | 128 |
+
+The same pattern appears on validation: jump-to-odd median vertical-velocity change is +304 UU/s versus -6 for jump-to-even; 14,431 of 14,730 dodge-to-odd transitions carry fresh torque. Nearly all counter changes are a +1 increment. Odd transitions therefore give strong evidence of a jump or dodge activation, and even transitions usually mark its end. The packet timestamp can still lag the physical input, and the replicated duration may differ from the actual button hold.
+
+An opt-in `--inferred-jump` ablation sets RocketSim's jump control while the jump counter is odd. It was evaluated with the same seed-239847 alternate mask; 60/60 train and 60/60 validation replays converted. Validation car-position median/p90 error (UU) at mask horizon 4 improved modestly, but one-step pre-correction error increased in every game size:
+
+| Size | Four-frame default | Four-frame inferred jump | One-step default | One-step inferred jump |
+| --- | ---: | ---: | ---: | ---: |
+| 1v1 | 15.86 / 43.70 | 15.87 / 43.44 | 16.36 / 38.85 | 16.54 / 39.10 |
+| 2v2 | 15.90 / 41.23 | 15.34 / 40.53 | 15.96 / 41.46 | 16.03 / 41.63 |
+| 3v3 | 16.98 / 46.65 | 16.55 / 46.47 | 16.87 / 42.05 | 16.91 / 42.19 |
+
+Training showed the same direction: four-frame medians improved by 0.27–0.47 UU while one-step medians worsened by 0.02–0.15 UU. The default remains **off**. The current inferred input reaches RocketSim after the replay packet; if the observed body already contains the jump impulse, the simulator may apply it late. Before enabling it, measure error around event frames and calibrate when to inject the control relative to packet timing and the current jump state. The alternate-mask reports are `target/*-conversion-metrics-inferred-jump.json`; omit `--inferred-jump` for the baseline.
 
 ## Loadout body products and hitboxes
 
