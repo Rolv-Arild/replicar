@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use glam::Quat;
 use rocketsim::{
@@ -228,16 +229,39 @@ fn team(index: u8) -> Team {
 }
 
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
-/// Names come from game-extracted product metadata; hitbox families follow Epic's
-/// Rocket League car-hitbox list. Unknown IDs retain the Octane fallback.
+/// The embedded map is generated from the user's item catalog, the official
+/// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
+/// the Octane fallback.
 fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
-    Some(match id {
-        21 | 23 | 26 | 4284 => ("octane", CarBodyConfig::OCTANE),
-        22 => ("breakout", CarBodyConfig::BREAKOUT),
-        403 => ("dominus", CarBodyConfig::DOMINUS),
-        7012 => ("hybrid", CarBodyConfig::HYBRID),
-        7477 => ("merc", CarBodyConfig::MERC),
-        _ => return None,
+    static CATALOG: OnceLock<Vec<(u32, &'static str)>> = OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| {
+        let mut rows = Vec::new();
+        for line in include_str!("../data/body_hitboxes.tsv").lines().skip(1) {
+            let mut columns = line.split('\t');
+            let id = columns
+                .next()
+                .unwrap()
+                .parse::<u32>()
+                .expect("body product ID");
+            let _name = columns.next().expect("body product name");
+            let hitbox = columns.next().expect("body hitbox");
+            if hitbox != "unmapped" {
+                rows.push((id, hitbox));
+            }
+        }
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        rows
+    });
+    let index = catalog.binary_search_by_key(&id, |entry| entry.0).ok()?;
+    Some(match catalog[index].1 {
+        "octane" => ("octane", CarBodyConfig::OCTANE),
+        "breakout" => ("breakout", CarBodyConfig::BREAKOUT),
+        "dominus" => ("dominus", CarBodyConfig::DOMINUS),
+        "hybrid" => ("hybrid", CarBodyConfig::HYBRID),
+        "merc" => ("merc", CarBodyConfig::MERC),
+        "plank" => ("plank", CarBodyConfig::PLANK),
+        "psyclops" => ("psyclops", CarBodyConfig::PSYCLOPS),
+        unknown => panic!("unsupported body hitbox in catalog: {unknown}"),
     })
 }
 
@@ -496,11 +520,21 @@ mod tests {
             (4284, "octane", CarBodyConfig::OCTANE),
             (7012, "hybrid", CarBodyConfig::HYBRID),
             (7477, "merc", CarBodyConfig::MERC),
+            (7979, "merc", CarBodyConfig::MERC),
+            (25, "octane", CarBodyConfig::OCTANE),
+            (1691, "plank", CarBodyConfig::PLANK),
+            (1919, "plank", CarBodyConfig::PLANK),
+            (10900, "octane", CarBodyConfig::OCTANE),
+            (4782, "psyclops", CarBodyConfig::PSYCLOPS),
+            (11141, "hybrid", CarBodyConfig::HYBRID),
+            (12325, "dominus", CarBodyConfig::DOMINUS),
+            (12657, "breakout", CarBodyConfig::BREAKOUT),
+            (12814, "octane", CarBodyConfig::OCTANE),
         ] {
             let (actual_name, actual) = hitbox_for_body_product(product).unwrap();
             assert_eq!(actual_name, name);
             assert_eq!(actual.hitbox_size, expected.hitbox_size);
         }
-        assert!(hitbox_for_body_product(7979).is_none());
+        assert!(hitbox_for_body_product(13008).is_none());
     }
 }

@@ -132,7 +132,7 @@ fn live_car_wins_over_retired_car_with_same_player() {
 }
 
 #[test]
-fn replay_loadout_products_select_hitboxes_and_preserve_unknown_ids() {
+fn replay_loadout_products_select_hitboxes_and_preserve_nonplaying_ids() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let meshes = root.join("collision_meshes");
     if !meshes.join("soccar").is_dir() {

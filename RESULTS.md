@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-27. These are development baselines for the current converter, not a final accuracy claim. The ignored machine-readable reports are `target/train-conversion-metrics.json` and `target/validation-conversion-metrics.json`. Each report includes every replay's SHA-256, dependencies, seed, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
-These tables include the actor-lifetime and inactive-owner fix, inferred boost input, active-pawn demolition correction, primary-car selection when an old demolished actor overlaps a replacement, and loadout-derived hitboxes. The no-boost ablation reports remain locally under `target/*-conversion-metrics-no-boost.json`; reproduce them with `--no-inferred-boost`. Earlier reports remain under `target/*-conversion-metrics-before-identity.json`, `target/*-conversion-metrics-before-demo-ghost-fix.json`, and `target/*-conversion-metrics-before-hitboxes.json` where available.
+These tables include the actor-lifetime and inactive-owner fix, inferred boost input, active-pawn demolition correction, primary-car selection when an old demolished actor overlaps a replacement, and loadout-derived hitboxes from the supplied item catalog. The no-boost ablation reports remain locally under `target/*-conversion-metrics-no-boost.json`; reproduce them with `--no-inferred-boost`. Earlier reports remain under `target/*-conversion-metrics-before-identity.json`, `target/*-conversion-metrics-before-demo-ghost-fix.json`, `target/*-conversion-metrics-before-hitboxes.json`, and `target/*-conversion-metrics-before-item-catalog.json` where available.
 
 ## Protocol
 
@@ -25,7 +25,7 @@ Each cell is median / p90 error in UU. The simulated and linear columns use the 
 | validation | 2v2 | ball | 11.8 / 37.2 | 13.1 / 45.6 | 1,733 |
 | validation | 2v2 | car | 15.9 / 39.3 | 26.5 / 63.1 | 3,203 |
 | validation | 3v3 | ball | 14.2 / 42.4 | 15.3 / 56.0 | 1,945 |
-| validation | 3v3 | car | 17.2 / 45.3 | 28.5 / 65.6 | 5,606 |
+| validation | 3v3 | car | 17.2 / 45.2 | 28.5 / 65.6 | 5,606 |
 
 ## One-step pre-correction prediction on train
 
@@ -56,8 +56,8 @@ Validation results at mask horizon 4 are below. Each value is median / p90 error
 | 1v1 | ball | Rotation (degrees) | 2.86 / 5.78 | 40.11 / 51.57 | 1,720 |
 | 1v1 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.14 | 1,720 |
 | 1v1 | car | Velocity (UU/s) | 53.22 / 287.07 | 180.27 / 648.79 | 1,592 |
-| 1v1 | car | Rotation (degrees) | 4.51 / 29.06 | 20.32 / 59.16 | 1,592 |
-| 1v1 | car | Angular velocity (rad/s) | 0.99 / 3.62 | 1.28 / 4.19 | 1,592 |
+| 1v1 | car | Rotation (degrees) | 4.52 / 29.06 | 20.32 / 59.16 | 1,592 |
+| 1v1 | car | Angular velocity (rad/s) | 0.99 / 3.63 | 1.28 / 4.19 | 1,592 |
 | 2v2 | ball | Velocity (UU/s) | 5.44 / 21.65 | 86.79 / 527.24 | 1,733 |
 | 2v2 | ball | Rotation (degrees) | 2.86 / 5.73 | 40.11 / 51.57 | 1,733 |
 | 2v2 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.65 | 1,733 |
@@ -67,7 +67,7 @@ Validation results at mask horizon 4 are below. Each value is median / p90 error
 | 3v3 | ball | Velocity (UU/s) | 5.46 / 25.90 | 88.73 / 987.46 | 1,945 |
 | 3v3 | ball | Rotation (degrees) | 2.86 / 6.81 | 43.31 / 51.57 | 1,945 |
 | 3v3 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 2.70 | 1,945 |
-| 3v3 | car | Velocity (UU/s) | 41.28 / 219.47 | 209.35 / 641.28 | 5,605 |
+| 3v3 | car | Velocity (UU/s) | 41.28 / 219.55 | 209.35 / 641.28 | 5,605 |
 | 3v3 | car | Rotation (degrees) | 3.04 / 22.94 | 17.53 / 52.84 | 5,606 |
 | 3v3 | car | Angular velocity (rad/s) | 0.54 / 3.22 | 1.09 / 3.52 | 5,605 |
 
@@ -75,7 +75,7 @@ Car angular velocity has the smallest gain, especially near p90. Missing jump an
 
 ## Loadout body products and hitboxes
 
-`TAGame.PRI_TA:ClientLoadouts` supplies a body product ID for each team. The extractor preserves both values on each player and attaches the currently selected one to a linked car. IDs were matched to names using the [game-extracted product catalog](https://raw.githubusercontent.com/rocketleagueapi/items/main/src/parsed/products.json), then to hitbox families using [Rocket League's official hitbox list](https://www.epicgames.com/help/c-37599050/c-Trending_0/snadyq-isabh-hitboxes-syarat-rocket-league-a20257614). RocketSim's matching preset is used at car-slot creation.
+`TAGame.PRI_TA:ClientLoadouts` supplies a body product ID for each team. The extractor preserves both values on each player and attaches the currently selected one to a linked car. The user's August 2026 `items.csv` supplies product names; [Rocket League's official hitbox list](https://www.epicgames.com/help/c-37599050/c-32343914/a20257614?lang=en-US), additional [Season 22](https://www.rocketleague.com/news/rocket-league-season-22-training-rivalries-and-rewards) and [Season 23](https://www.rocketleague.com/news/hit-the-pitch-for-the-world-cup-in-rocket-league-season-23) announcements, and a localized official listing supply families. RocketSim's dedicated Psyclops preset covers that special body. The checked-in inputs, aliases, source URLs, generator, and unresolved rows are documented in [data/README.md](data/README.md). RocketSim's matching preset is used at car-slot creation.
 
 | Product ID | Body | Hitbox | Playing slots in train |
 | ---: | --- | --- | ---: |
@@ -87,7 +87,8 @@ Car angular velocity has the smallest gain, especially near p90. Missing jump an
 | 4284 | Fennec | Octane | 178 |
 | 7012 | Tesla Cybertruck | Hybrid | 1 |
 | 7477 | Nomad GXT | Merc | 0 |
+| 7979 | Stampede | Merc | 0 |
 
-Training had 240 playing car slots, all with a mapped body product ID. Product 7477 appeared on a non-playing PRI. One additional raw ID, 7979, appeared on another non-playing PRI and is unresolved in the checked catalog; it remains in observations and falls back to Octane if it is ever used by a playing car. Validation had 240 playing slots: 239 Octane and one Hybrid. Four Octane slots used unresolved products (1919, 10900, 25, 1691); these were left as fallbacks rather than mapped from validation examples.
+The generated map covers 213 of 238 `Body` product rows; 11 of the 25 unresolved rows are generic drop or mystery labels, and 14 are named vehicles without a verified assignment in the checked sources. Unknown IDs remain raw and use an Octane fallback if selected by a playing car. The two rare training PRI products 7477 and 7979 were attached to non-playing actors; 7979 is now identified as Stampede, which the official list puts in Merc. All 240 playing train slots and all 240 playing validation slots have mapped IDs. Validation now has 237 Octane, two Plank, and one Hybrid slot. Its four formerly unresolved playing IDs are 25 Road Hog (Octane), 1691 Mantis (Plank), 1919 Centio (Plank), and 10900 Shokunin (Octane).
 
-The mapping changed only seven playing train slots and one validation slot. Train one-step car p90 improved slightly in three of the seven affected replays, was unchanged to two decimal places in three, and worsened by 0.02 UU in one. Aggregate validation four-frame car position median/p90 is unchanged at the precision shown above; validation 2v2 car velocity median moved from 45.40 to 45.78 UU/s. This is primarily a state-fidelity correction; the current sparse non-Octane sample does not establish a broad prediction gain. `--octane-hitbox` reproduces the original setup.
+Compared with the previous eight-ID map, full-corpus train position metrics are unchanged. Validation gains two Plank slots. Four-frame car position median/p90 is unchanged in 1v1 and 2v2 to three decimals; 3v3 moves from 17.221/45.252 to 17.233/45.235 UU. One-step p90 in the Mantis replay improves by 0.008 UU, while the Centio replay worsens by 0.136 UU; other percentiles move in both directions. This is a state-fidelity correction, and the small sample does not establish a broad prediction gain. `--octane-hitbox` reproduces the original all-Octane setup.
