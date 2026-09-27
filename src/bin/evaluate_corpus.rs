@@ -10,6 +10,7 @@ use replay_to_rocketsim::conversion::{
     ConversionOutput, ConvertOptions, PositionResidual, convert_bytes, convert_observations,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
+use rocketsim::ArenaEvent;
 use serde::Serialize;
 
 #[derive(Default)]
@@ -123,6 +124,8 @@ struct ReplayReport {
     arena_ticks: u64,
     skipped_timeline_ticks: u64,
     unlinked_car_frames: usize,
+    shadowed_car_frames: usize,
+    active_pawn_demo_corrections: usize,
     position_uu: BodySummary,
 }
 
@@ -147,6 +150,114 @@ struct Report {
     all: BodySummary,
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
+    worst_car_regret_uu: Vec<OutlierRecord>,
+}
+
+#[derive(Serialize)]
+struct OutlierRecord {
+    path: String,
+    frame: usize,
+    replay_time: f32,
+    actor_id: i32,
+    player_key: Option<String>,
+    team: Option<u8>,
+    actor_created_frame: usize,
+    player_link_active: bool,
+    observed_position: [f32; 3],
+    previous_observed_position: Option<[f32; 3]>,
+    observed_velocity: Option<[f32; 3]>,
+    previous_sim_position: Option<[f32; 3]>,
+    previous_sim_velocity: Option<[f32; 3]>,
+    previous_sim_on_ground: Option<bool>,
+    previous_sim_demoed: Option<bool>,
+    boost_active_raw: Option<u8>,
+    jump_active_raw: Option<u8>,
+    double_jump_active_raw: Option<u8>,
+    dodge_active_raw: Option<u8>,
+    event_kinds: Vec<&'static str>,
+    gap_seconds: f32,
+    simulated_error_uu: f32,
+    linear_error_uu: f32,
+    regret_uu: f32,
+}
+
+fn outlier_record(
+    path: &Path,
+    conversion: &ConversionOutput,
+    residual: &PositionResidual,
+) -> Option<OutlierRecord> {
+    let actor_id = residual.actor_id?;
+    let linear_error = residual.linear_extrapolation_error_uu?;
+    if !linear_error.is_finite() || !residual.simulated_error_uu.is_finite() {
+        return None;
+    }
+    let observed_frame = conversion.observations.frames.get(residual.frame)?;
+    let car = observed_frame
+        .cars
+        .iter()
+        .find(|car| car.actor_id == actor_id)?;
+    let observed_position = car.body.position.as_ref()?.value;
+    let slot = car.player_key.as_ref().and_then(|key| {
+        conversion
+            .car_slots
+            .iter()
+            .find(|slot| &slot.player_key == key)
+            .map(|slot| slot.slot)
+    });
+    let previous_car = conversion
+        .frames
+        .get(residual.frame.checked_sub(1)?)
+        .and_then(|frame| {
+            frame
+                .state
+                .cars
+                .iter()
+                .find(|(info, _)| Some(info.idx) == slot)
+                .map(|(_, state)| state)
+        });
+    let previous_observed_position = conversion
+        .observations
+        .frames
+        .get(residual.frame.checked_sub(1)?)
+        .and_then(|frame| frame.cars.iter().find(|car| car.actor_id == actor_id))
+        .and_then(|car| car.body.position.as_ref().map(|value| value.value));
+    let event_kinds = conversion.frames[residual.frame]
+        .simulated_events
+        .iter()
+        .map(|event| match event.event {
+            ArenaEvent::BallHitWorld(_) => "ball_hit_world",
+            ArenaEvent::CarHitBall(_) => "car_hit_ball",
+            ArenaEvent::CarHitCar(_) => "car_hit_car",
+            ArenaEvent::CarHitWorld(_) => "car_hit_world",
+            ArenaEvent::CarPickupBoost(_) => "car_pickup_boost",
+        })
+        .collect();
+    Some(OutlierRecord {
+        path: path.display().to_string(),
+        frame: residual.frame,
+        replay_time: observed_frame.time,
+        actor_id,
+        player_key: car.player_key.clone(),
+        team: car.team,
+        actor_created_frame: car.actor_created_frame,
+        player_link_active: car.player_link_active,
+        observed_position,
+        previous_observed_position,
+        observed_velocity: car.body.linear_velocity.as_ref().map(|v| v.value),
+        previous_sim_position: previous_car.map(|state| state.phys.pos.to_array()),
+        previous_sim_velocity: previous_car.map(|state| state.phys.vel.to_array()),
+        previous_sim_on_ground: previous_car.map(|state| state.is_on_ground),
+        previous_sim_demoed: previous_car.map(|state| state.is_demoed),
+        boost_active_raw: car.inputs.boost_active_raw.as_ref().map(|v| v.value),
+        jump_active_raw: car.inputs.jump_active_raw.as_ref().map(|v| v.value),
+        double_jump_active_raw: car.inputs.double_jump_active_raw.as_ref().map(|v| v.value),
+        dodge_active_raw: car.inputs.dodge_active_raw.as_ref().map(|v| v.value),
+        event_kinds,
+        gap_seconds: residual.seconds_since_previous_position,
+        simulated_error_uu: residual.simulated_error_uu,
+        linear_error_uu: linear_error,
+        regret_uu: residual.simulated_error_uu - linear_error,
+    })
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -248,7 +359,7 @@ fn masked_metrics(
                 &original.frames,
             );
         }
-        for car in &original_frame.cars {
+        for car in replay_to_rocketsim::observations::primary_linked_cars(original_frame) {
             let Some(stale) = masked_frame
                 .cars
                 .iter()
@@ -329,6 +440,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         all: all.summary(),
         masked_position_uu_by_horizon_frames: BTreeMap::new(),
         masked_by_game_size: BTreeMap::new(),
+        worst_car_regret_uu: Vec::new(),
     };
     let mut masked_by_horizon: BTreeMap<usize, ByBody> = BTreeMap::new();
     let mut masked_by_size: BTreeMap<String, BTreeMap<usize, ByBody>> = BTreeMap::new();
@@ -343,6 +455,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     own.add(residual);
                     groups.entry(size.clone()).or_default().add(residual);
                     all.add(residual);
+                    let regret = residual
+                        .linear_extrapolation_error_uu
+                        .map(|linear| residual.simulated_error_uu - linear);
+                    let keep = residual.actor_id.is_some()
+                        && regret.is_some_and(f32::is_finite)
+                        && (report.worst_car_regret_uu.len() < 100
+                            || report
+                                .worst_car_regret_uu
+                                .last()
+                                .is_some_and(|last| regret.unwrap() > last.regret_uu));
+                    if keep {
+                        if let Some(outlier) = outlier_record(path, &conversion, residual) {
+                            report.worst_car_regret_uu.push(outlier);
+                            report
+                                .worst_car_regret_uu
+                                .sort_by(|a, b| b.regret_uu.total_cmp(&a.regret_uu));
+                            report.worst_car_regret_uu.truncate(100);
+                        }
+                    }
                 }
                 let masked = masked_observations(&conversion.observations);
                 match convert_observations(masked, &options) {
@@ -378,6 +509,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     arena_ticks: conversion.frames.last().map_or(0, |f| f.state.tick_count),
                     skipped_timeline_ticks: conversion.diagnostics.skipped_timeline_ticks,
                     unlinked_car_frames: conversion.diagnostics.unlinked_car_frames,
+                    shadowed_car_frames: conversion.diagnostics.shadowed_car_frames,
+                    active_pawn_demo_corrections: conversion
+                        .diagnostics
+                        .active_pawn_demo_corrections,
                     position_uu: own.summary(),
                 });
             }

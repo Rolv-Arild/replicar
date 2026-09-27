@@ -84,3 +84,49 @@ fn inactive_player_link_and_reused_actor_id_keep_distinct_lifetimes() {
     assert!(!respawned.is_demoed);
     assert!((respawned.phys.pos.x - 256.0).abs() < 0.01);
 }
+
+#[test]
+fn live_car_wins_over_retired_car_with_same_player() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("replays/train/3v3/0005f298-7918-4f85-97ef-7044ca0f682a.replay");
+    let meshes = root.join("collision_meshes");
+    if !path.is_file() || !meshes.join("soccar").is_dir() {
+        eprintln!("skipping duplicate-car corpus test: local replay or meshes missing");
+        return;
+    }
+    let output = convert_bytes(
+        &fs::read(path).unwrap(),
+        &ConvertOptions {
+            collision_meshes: meshes,
+            ..ConvertOptions::default()
+        },
+    )
+    .unwrap();
+    let observed = &output.observations.frames[6686];
+    let live = observed.cars.iter().find(|car| car.actor_id == 81).unwrap();
+    let retired = observed
+        .cars
+        .iter()
+        .find(|car| car.actor_id == 110)
+        .unwrap();
+    assert!(live.player_link_active);
+    assert!(!retired.player_link_active);
+    assert_eq!(live.player_key, retired.player_key);
+    let slot = output
+        .car_slots
+        .iter()
+        .find(|slot| Some(&slot.player_key) == live.player_key.as_ref())
+        .unwrap()
+        .slot;
+    let converted = output.frames[6686]
+        .state
+        .cars
+        .iter()
+        .find(|(info, _)| info.idx == slot)
+        .unwrap()
+        .1;
+    assert!((converted.phys.pos.x + 2107.0).abs() < 1.0);
+    assert!((converted.phys.pos.y + 4290.0).abs() < 1.0);
+    assert!(output.diagnostics.shadowed_car_frames > 0);
+    assert!(output.diagnostics.active_pawn_demo_corrections > 0);
+}

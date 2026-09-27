@@ -1,6 +1,6 @@
 //! Replay frame snapshots produced by short RocketSim steps and fresh corrections.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -84,6 +84,8 @@ pub struct Diagnostics {
     pub skipped_timeline_ticks: u64,
     pub unlinked_car_frames: usize,
     pub default_hitbox_players: usize,
+    pub active_pawn_demo_corrections: usize,
+    pub shadowed_car_frames: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -314,7 +316,18 @@ pub fn convert_observations(
             ball_initialized = true;
         }
 
-        for car in &frame.cars {
+        let primary = observations::primary_linked_cars(frame);
+        diagnostics.shadowed_car_frames += frame
+            .cars
+            .iter()
+            .filter(|car| car.player_key.is_some())
+            .count()
+            - primary.len();
+        let mut selected_slots = HashSet::new();
+        for car in primary
+            .into_iter()
+            .chain(frame.cars.iter().filter(|car| car.player_key.is_none()))
+        {
             let slot = if let Some(key) = &car.player_key {
                 if let Some(slot) = slots.get(key).copied() {
                     actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
@@ -345,6 +358,11 @@ pub fn convert_observations(
                 diagnostics.unlinked_car_frames += 1;
                 continue;
             };
+            if car.player_key.is_none() && selected_slots.contains(&slot) {
+                diagnostics.shadowed_car_frames += 1;
+                continue;
+            }
+            selected_slots.insert(slot);
             if simulated && !new_lifetime {
                 let previous = observations
                     .frames
@@ -373,6 +391,12 @@ pub fn convert_observations(
             };
             let mut dirty =
                 apply_body(&mut state.phys, &car.body, frame.index, new_lifetime) || new_lifetime;
+            if car.player_link_active && state.is_demoed {
+                state.is_demoed = false;
+                state.demo_respawn_timer = 0.0;
+                diagnostics.active_pawn_demo_corrections += 1;
+                dirty = true;
+            }
             if let Some(boost) = &car.boost {
                 if should_apply(boost, frame.index, new_lifetime) {
                     state.boost = boost.value;

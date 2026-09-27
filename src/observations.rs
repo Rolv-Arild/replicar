@@ -133,6 +133,37 @@ pub struct Frame {
     pub events: Vec<Event>,
 }
 
+/// Choose the replay car that currently represents each known player. A demolished
+/// car actor can remain in the network after a replacement car has appeared.
+pub fn primary_linked_cars(frame: &Frame) -> Vec<&Car> {
+    let mut by_player: HashMap<&str, &Car> = HashMap::new();
+    for car in &frame.cars {
+        let Some(key) = car.player_key.as_deref() else {
+            continue;
+        };
+        let priority = |car: &Car| {
+            (
+                car.player_link_active,
+                car.actor_created_frame,
+                car.body
+                    .position
+                    .as_ref()
+                    .is_some_and(|v| v.frame == frame.index),
+            )
+        };
+        match by_player.get_mut(key) {
+            Some(current) if priority(car) > priority(current) => *current = car,
+            None => {
+                by_player.insert(key, car);
+            }
+            _ => {}
+        }
+    }
+    let mut result: Vec<_> = by_player.into_values().collect();
+    result.sort_by_key(|car| car.actor_id);
+    result
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Header {
     pub game_type: String,
