@@ -1,14 +1,14 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! Replay parsing and reconstruction into RocketSim states.
+//!
+//! The conversion pipeline is being built incrementally. Strict network parsing and
+//! corpus auditing are available first; simulation follows after the replay field
+//! map has been measured.
+
+use boxcars::{ParseError, ParserBuilder, Replay};
+
+/// Parse a replay, requiring the network frames needed for state conversion.
+pub fn parse_replay(bytes: &[u8]) -> Result<Replay, ParseError> {
+    ParserBuilder::new(bytes).must_parse_network_data().parse()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod audit;

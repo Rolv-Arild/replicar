@@ -1,8 +1,8 @@
 # Replay to RocketSim plan
 
-Last updated: 2026-09-27. Status: Phase 0 in progress.
+Last updated: 2026-09-27. Status: Phase 0 complete; Phase 1 next.
 
-Next action: pin the native RocketSim dependency, run a strict parser inventory of `train`, and complete an arena smoke test. Keep `validation` for design checks and `test` untouched until the final freeze.
+Next action: build and verify the typed actor/ownership graph and observed state timeline on `train`. Keep `validation` for design checks and `test` untouched until the final freeze.
 
 ## Goal and scope
 
@@ -16,7 +16,7 @@ The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Ot
 - `replays/` is ignored by `.gitignore`. It contains 180 `.replay` files: 20 per game size in each of `train`, `validation`, and `test` (60 per split; about 212 MB total).
 - The split names are an evaluation contract: inspect and optimize on `train`; use `validation` to decide whether changes generalize; run `test` only for a final, frozen assessment. Keep corpus paths configurable, and never commit replay contents or generated datasets.
 - The user added `collision_meshes/` with `.cmf` files for soccar, hoops, and dropshot. It is ignored as a local asset directory. RocketSim's `init_from_default` expects `./collision_meshes/` when run from the repository root.
-- The installed Rust compiler is 1.97.1. A native Rust RocketSim checkout is cached locally, but neither dependency is currently in this project's lockfile.
+- The installed Rust compiler is 1.97.1. `boxcars` 0.11.5 and native `rocketsim` commit `79f4d22fc533614d540b88457a96352c17da6b73` are pinned in `Cargo.toml`/`Cargo.lock` and compile locally.
 
 ## Crate findings and dependency decision
 
@@ -62,6 +62,14 @@ Use held-out observations within `train` to measure reconstruction where truth e
 
 Target acceptance gates after baselines are known: strict parse/conversion success on supported soccar corpus, zero unexplained identity/scoreboard invariant failures, reproducible output, serialization round-trip and Python load, and a material held-out improvement over the baseline on validation without major regressions by game size. Set numerical error thresholds from measured baselines rather than guessing values now. Any unsupported replay gets an explicit error or partial-result status.
 
+### Phase 0 measured baseline (train only, 2026-09-27)
+
+- `cargo run --bin replay_audit -- replays/train target/train-audit.json` strictly parsed 60/60 files, all `TAGame.Replay_Soccar_TA`, totaling 677,609 network frames. File hashes and individual diagnostics are in the generated, ignored `target/train-audit.json`.
+- There were 1,577,611 rigid-body updates. Linear and angular velocity were absent in 1,547 of them (about 0.098% each). The fields must still be modeled as optional, since absence is concentrated in particular updates and will affect state correctness.
+- No non-monotonic frame times were found. The audit should next record distributions of gaps and phase transitions, since monotonic time alone does not prove continuous physics time.
+- Frequent relevant attributes include `ReplicatedRBState` (1,577,611), `ReplicatedSteer` (800,401), `ReplicatedThrottle` (317,093), `ReplicatedActive` (190,244), `NewReplicatedPickupData` (112,989), `ReplicatedBoost` (55,576), `bReplicatedHandbrake` (50,673), `SecondsRemaining` (18,877), and `MatchScore` (18,652). Actions and scoreboard belong in the conversion output even where they are not part of RocketSim's `ArenaState`.
+- The local soccar collision meshes load and support a RocketSim arena tick (`cargo test --test mesh_smoke`).
+
 ## Implementation sequence and deliverables
 
 | Phase | Deliverable | Exit check |
@@ -79,7 +87,7 @@ Keep this file current after each phase: update the status, dependency revisions
 ## Open decisions and needed resources
 
 - Native Rust `rocketsim` is the current target. Revisit only if the user specifies the C++ bindings.
-- Verify the supplied collision meshes load successfully with the pinned RocketSim revision.
+- Determine the replay actor links and encoding/scaling of controls, boost, clock, and score on `train` before applying them to simulator state.
 - Determine desired downstream Python shape and preferred storage after a small Arrow IPC versus Parquet prototype. The schema should support both ML arrays and richer event/scoreboard inspection.
 - When the independent converter is ready, request the user's Python/`rust-carball` implementation for a controlled comparison after this pipeline has its own baseline.
 
@@ -87,3 +95,4 @@ Keep this file current after each phase: update the status, dependency revisions
 
 - 2026-09-27: Inspected starter repository and counted replay splits. Read `boxcars` 0.11.5 public docs and native `rocketsim` source from the locally cached upstream `v3-rust` checkout. Wrote initial architecture and evaluation plan. No replay contents were parsed and no converter code was changed.
 - 2026-09-27: User supplied collision meshes and requested naturally segmented commits. Began Phase 0; kept meshes and IDE files out of version control.
+- 2026-09-27: Pinned both dependencies, implemented strict parser corpus audit with SHA-256 manifest, parsed all `train` replays, and passed the soccar mesh smoke test. Phase 0 complete.

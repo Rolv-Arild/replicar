@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boxcars = "=0.11.5"
+rocketsim = { git = "https://github.com/ZealanL/RocketSim.git", rev = "79f4d22fc533614d540b88457a96352c17da6b73" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
