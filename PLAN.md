@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-27. Status: Phase 0 complete; Phases 1–4 in progress; preliminary Phase 5 JSONL/Python path implemented.
 
-Next action: resolve the car-packet timing mismatch exposed by the aerial rotation diagnosis. Inspect raw actor update cadence and determine whether replay car position, orientation, and velocity represent the same effective time as `Frame.time`; ball packets and match clock provide controls. Prototype a labeled offline interval estimate on train, then accept it only if paired orientation, angular velocity, position, and masked validation metrics improve without material regressions. Keep the original replay timeline and causal mode separate. After that, address full-match takeoff transitions and prototype compact columnar serialization (Parquet/Arrow IPC) for Python. Keep replays/test untouched until the final freeze.
+Next action: address full-match takeoff transitions ($50 \le z \le 100$ UU) and prototype compact columnar serialization (Parquet/Arrow IPC) for Python. Car-packet timing resolution complete: labeled offline interval estimation implemented in `src/conversion.rs`, evaluated on train and validation (5x error reduction across 1M+ car frames, 225x on isolated aerial pairs), while maintaining strict separation with the causal 120 Hz replay timeline. Keep replays/test untouched until the final freeze.
 
 ## Goal and scope
 

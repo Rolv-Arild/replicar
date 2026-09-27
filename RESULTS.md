@@ -445,3 +445,68 @@ The reviewed reports are `target/train-reviewed.json` and `target/validation-rev
    - On the ground (over 55% of car updates), physical wheel contact and steering simulation reduce angular velocity error by more than half (**0.150 vs 0.324 rad/s** on validation).
    - In airborne flight, holding the prior angular velocity slightly outperforms the converter's full-match forward simulation (0.825 vs 0.887 rad/s on validation). This differs from the isolated one-car inversion diagnostic above, which uses the future endpoint directly.
    - In transition zones ($50 \le z \le 100$ UU), contact and takeoff impulses create the largest instantaneous angular discrepancies (2.00 vs 0.67 rad/s on validation).
+
+## Car-packet timing resolution and discrete physics quantization (2026-09-27)
+
+### Background and raw actor cadence analysis
+
+Earlier investigation into aerial rotation fidelity revealed a ~0.50 scale factor between observed rotation and integration over nominal frame deltas ($\Delta t = 	ext{Frame.time}_i - 	ext{Frame.time}_{i-1} pprox 0.0333$ s). To determine whether this was a clock discrepancy, network jitter, or physics quantization, we inspected the raw actor update cadence across the training corpus using server-authoritative controls:
+
+1. **Ball packets and match clock:**
+   - Comparing consecutive ball rigid body packets against nominal frame delta yielded a median scale of **0.999** (almost exactly 4 discrete 120 Hz ticks per frame).
+   - Server match clock countdowns (SecondsRemaining) matched elapsed replay time within network quantization (.000$ s median).
+   - Ball packets and match clock are server-authoritative and advance synchronously with Frame.time.
+
+2. **Car rigid body updates and client network replication:**
+   - Cars are replicated client objects. While replay frames advance at ~30 Hz (averaging ~4 ticks per frame), consecutive car rigid body updates reflect discrete game engine ticks ( \in \{1, \dots, 8\}$).
+   - Distribution of discrete ticks between consecutive car updates on 
+eplays/train (192,274 samples):
+     - =2$ ticks: **53.0%** (101,866)
+     - =7$ ticks: **11.1%** (21,323)
+     - =1$ tick: **10.3%** (19,842)
+     - =4$ ticks: **8.0%** (15,338)
+     - =8$ ticks: **5.2%** (10,051)
+     - =3$ ticks: **3.9%** (7,527)
+     - =5, 6$ ticks: **6.8%** (13,167)
+   - Pairs commonly alternate between =2$ and =6$ or =7$ ticks, summing to ~8 ticks over 2 frames ($pprox 4$ ticks/frame average).
+   - When a client packet representing 2 physics ticks is compared against a 4-tick RocketSim step or nominal frame linear extrapolation ($\Delta t pprox 0.0333$ s), an apparent translation error of ~16.7 UU at 1000 UU/s is artificially recorded.
+
+### Offline interval formulation
+
+To isolate client replication quantization without distorting causal simulation, we implemented an offline interval estimator:
+\Delta t_{	ext{eff}} = rac{(\mathbf{p}_1 - \mathbf{p}_0) \cdot ar{\mathbf{v}}}{\|ar{\mathbf{v}}\|^2}, \quad k_{	ext{eff}} = \mathrm{round}(\Delta t_{	ext{eff}} \cdot 120)
+	ext{effective\_seconds} = rac{k_{	ext{eff}}}{120}, \quad 	ext{scale} = rac{	ext{effective\_seconds}}{\Delta t_{	ext{nominal}}}
+
+- Implemented in src/conversion.rs as estimate_car_packet_interval(...) -> Option<OfflineIntervalEstimate>.
+- Low speeds ($\|ar{\mathbf{v}}\| < 100$ UU/s) fall back to rounded nominal frame delta.
+- Exposed on PositionResidual as offline_interval: Option<OfflineIntervalEstimate> and offline_extrapolation_error_uu: Option<f32>.
+- **Causal vs Offline Timeline Separation:** Forward simulation in convert_observations remains strictly on the 120 Hz replay timeline (	imeline_tick, stepping 4 ticks per frame) to maintain arena-wide synchronization with the ball, boost pads, and match clock. The offline interval is attached as an offline lookahead and diagnostic metric.
+
+### Corpus benchmarks: Train vs Validation
+
+#### 1. Full-match linear extrapolation error (all car updates)
+
+evaluate_corpus tracks both nominal linear extrapolation error ($\Delta t_{	ext{nominal}}$) and offline linear extrapolation error ($\Delta t_{	ext{eff}}$):
+
+| Split | Metric | Samples | p50 (UU) | p90 (UU) | p99 (UU) | Error Reduction (p50) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| **train** | Nominal Linear Error | 998,830 | 18.43 | 44.46 | 72.04 | Baseline |
+| train | Offline Linear Error | 994,712 | **3.52** | **14.80** | **38.96** | **-80.9% (5.2x reduction)** |
+| **validation** | Nominal Linear Error | 1,056,576 | 17.64 | 43.75 | 71.24 | Baseline |
+| validation | Offline Linear Error | 1,052,177 | **3.51** | **14.59** | **38.33** | **-80.1% (5.0x reduction)** |
+
+#### 2. Isolated aerial pair benchmarks (51,038 air pairs on train)
+
+When tested on isolated aerial pairs where cars are free of ground tire friction:
+- **Linear position error:** drops from 24.81 UU to **0.11 UU** (p50) and 47.04 UU to **1.29 UU** (p90) — a **225x reduction**.
+- **Rotation error:** drops from 3.027° to **0.105°** (p50) and 7.310° to **1.646°** (p90) — a **29x reduction**.
+- **RocketSim aerial step:** isolated RocketSim integration using {	ext{eff}}$ ticks achieves orientation error p50 = **0.088°** (down from 3.062°) and angular velocity error p50 = **0.012 rad/s** (down from 0.025 rad/s).
+
+#### 3. Verification of causal mode and masked metrics
+
+Running evaluate_corpus verified zero regression in causal simulation:
+- 1-step simulated car position error: train p50 = 16.96 UU, validation p50 = 16.39 UU.
+- 1-step simulated car rotation error: train p50 = 1.88°, validation p50 = 1.85°.
+- Masked horizons 1–4 position: train [17.13, 15.66, 16.42, 16.78] UU, validation [16.56, 14.96, 16.19, 15.97] UU.
+- All 60 train and 60 validation replays converted successfully with zero errors. 
+eplays/test remains untouched.

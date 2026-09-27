@@ -19,6 +19,7 @@ struct Samples {
     simulated: Vec<f32>,
     hold: Vec<f32>,
     linear: Vec<f32>,
+    offline_linear: Vec<f32>,
 }
 
 impl Samples {
@@ -33,6 +34,12 @@ impl Samples {
         {
             self.linear.push(value);
         }
+        if let Some(value) = residual
+            .offline_extrapolation_error_uu
+            .filter(|v| v.is_finite())
+        {
+            self.offline_linear.push(value);
+        }
     }
 
     fn summary(&self) -> ErrorSummary {
@@ -40,6 +47,7 @@ impl Samples {
             simulated: quantiles(&self.simulated),
             hold: quantiles(&self.hold),
             linear: quantiles(&self.linear),
+            offline_linear: (!self.offline_linear.is_empty()).then(|| quantiles(&self.offline_linear)),
         }
     }
 
@@ -47,6 +55,7 @@ impl Samples {
         self.simulated.extend_from_slice(&other.simulated);
         self.hold.extend_from_slice(&other.hold);
         self.linear.extend_from_slice(&other.linear);
+        self.offline_linear.extend_from_slice(&other.offline_linear);
     }
 }
 
@@ -80,6 +89,8 @@ struct ErrorSummary {
     simulated: Quantiles,
     hold: Quantiles,
     linear: Quantiles,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offline_linear: Option<Quantiles>,
 }
 
 #[derive(Default)]
@@ -543,6 +554,8 @@ fn add_masked_error(
         hold_angular_velocity_error_rad_per_sec: None,
         altitude_z: Some(position.value[2]),
         is_on_ground: None,
+        offline_interval: None,
+        offline_extrapolation_error_uu: None,
     });
 }
 
