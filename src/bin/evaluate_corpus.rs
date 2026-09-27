@@ -675,6 +675,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if arg == "--no-inferred-jump" {
             options.infer_jump_from_active = false;
             options.gate_jump_on_observed_impulse = false;
+        } else if arg == "--inferred-dodge" {
+            options.infer_dodge_from_active = true;
+            options.gate_dodge_on_observed_impulse = false;
+        } else if arg == "--gated-dodge" {
+            options.infer_dodge_from_active = true;
+            options.gate_dodge_on_observed_impulse = true;
+        } else if arg == "--no-inferred-dodge" {
+            options.infer_dodge_from_active = false;
+            options.gate_dodge_on_observed_impulse = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -687,7 +696,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -920,7 +929,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         report.failures.len(),
         output_path.display()
     );
-    Ok(())}
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

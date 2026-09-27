@@ -53,6 +53,10 @@ pub struct ConvertOptions {
     pub infer_jump_from_active: bool,
     /// Start an inferred jump only while near the ground and before its impulse is observed.
     pub gate_jump_on_observed_impulse: bool,
+    /// Infer dodge flip from odd dodge-component activation and DodgeTorque.
+    pub infer_dodge_from_active: bool,
+    /// Gate dodge impulse so that it only triggers when the impulse has not yet been observed.
+    pub gate_dodge_on_observed_impulse: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -67,6 +71,8 @@ impl Default for ConvertOptions {
             infer_boost_from_active: true,
             infer_jump_from_active: true,
             gate_jump_on_observed_impulse: true,
+            infer_dodge_from_active: true,
+            gate_dodge_on_observed_impulse: true,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -248,6 +254,16 @@ fn jump_impulse_unobserved(car: &observations::Car, frame: usize) -> bool {
             .is_some_and(|velocity| velocity.frame == frame && velocity.value[2] > 150.0)
 }
 
+fn dodge_impulse_unobserved(car: &observations::Car, frame: usize, state: &CarState) -> bool {
+    let airborne = !state.is_on_ground || state.phys.pos.z > 50.0;
+    let velocity_fresh = car
+        .body
+        .linear_velocity
+        .as_ref()
+        .is_some_and(|velocity| velocity.frame == frame);
+    airborne && !velocity_fresh
+}
+
 fn team(index: u8) -> Team {
     if index == 0 { Team::Blue } else { Team::Orange }
 }
@@ -319,6 +335,7 @@ pub fn convert_observations(
     let mut car_slots = Vec::new();
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
+    let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
     let mut frames = Vec::with_capacity(observations.frames.len());
     let mut position_residuals = Vec::new();
     let mut diagnostics = Diagnostics::default();
@@ -478,6 +495,50 @@ pub fn convert_observations(
                     dirty = true;
                 }
             }
+
+            let mut dodge_jump_control = false;
+            let mut dodge_pitch_control = 0.0;
+            let mut dodge_yaw_control = 0.0;
+
+            if options.infer_dodge_from_active {
+                let key = (car.actor_id, car.actor_created_frame);
+                let dodge_raw = car
+                    .inputs
+                    .dodge_active_raw
+                    .as_ref()
+                    .filter(|raw| raw.frame == frame.index)
+                    .map(|raw| raw.value);
+                if let Some(raw) = dodge_raw {
+                    let prev = last_dodge_raw.insert(key, raw);
+                    let activated = match prev {
+                        Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
+                        None => raw % 2 == 1,
+                    };
+                    if activated {
+                        if let Some(torque) = &car.inputs.dodge_torque_replay_units {
+                            let [tx, ty, _] = torque.value;
+                            let pitch = -ty / 2.24;
+                            let yaw = -tx / 2.60;
+                            if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
+                                if !options.gate_dodge_on_observed_impulse
+                                    || dodge_impulse_unobserved(car, frame.index, &state)
+                                {
+                                    dodge_jump_control = true;
+                                    dodge_pitch_control = pitch;
+                                    dodge_yaw_control = yaw;
+                                } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                                    state.has_flipped = true;
+                                    state.is_flipping = true;
+                                    state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
+                                    state.flip_time = 0.0;
+                                    dirty = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if dirty {
                 arena.set_car_state(slot, state);
             }
@@ -496,6 +557,11 @@ pub fn convert_observations(
                     );
                 }
                 controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
+            }
+            if dodge_jump_control {
+                controls.jump = true;
+                controls.pitch = dodge_pitch_control;
+                controls.yaw = dodge_yaw_control;
             }
             arena.set_car_controls(slot, controls);
         }
@@ -596,6 +662,41 @@ mod tests {
         assert!(!jump_impulse_unobserved(&car, 1));
         car.inputs.jump_active_raw.as_mut().unwrap().value = 2;
         assert!(!controls_from_observation(&car, &options).jump);
+    }
+
+    #[test]
+    fn dodge_impulse_unobserved_checks_airborne_and_velocity_freshness() {
+        let mut car = observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: None,
+            player_link_active: false,
+            team: None,
+            body_product_id: None,
+            body: Body::default(),
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs::default(),
+        };
+        let mut sim_state = CarState::default();
+        sim_state.phys.pos.z = 17.0;
+        sim_state.is_on_ground = true;
+
+        assert!(!dodge_impulse_unobserved(&car, 1, &sim_state));
+
+        sim_state.phys.pos.z = 200.0;
+        sim_state.is_on_ground = false;
+        assert!(dodge_impulse_unobserved(&car, 1, &sim_state));
+
+        car.body.linear_velocity = Some(Value {
+            value: [500.0, 0.0, 0.0],
+            frame: 1,
+            source: Source::Replay,
+        });
+        assert!(!dodge_impulse_unobserved(&car, 1, &sim_state));
+
+        car.body.linear_velocity.as_mut().unwrap().frame = 0;
+        assert!(dodge_impulse_unobserved(&car, 1, &sim_state));
     }
 
     #[test]
