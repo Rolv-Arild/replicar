@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 
 use glam::Quat;
 use rocketsim::{
-    Arena, ArenaConfig, ArenaEvent, ArenaState, CarBodyConfig, CarControls, CarState, GameMode,
-    Mat3A, PhysState, Team, Vec3A,
+    Arena, ArenaConfig, ArenaEvent, ArenaState, BoostPadState, CarBodyConfig, CarControls,
+    CarState, GameMode, Mat3A, PhysState, Team, Vec3A,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -57,6 +57,8 @@ pub struct ConvertOptions {
     pub infer_dodge_from_active: bool,
     /// Gate dodge impulse so that it only triggers when the impulse has not yet been observed.
     pub gate_dodge_on_observed_impulse: bool,
+    /// Reconcile boost pad pickups and cooldowns from replay pickup data.
+    pub sync_boost_pad_pickups: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -73,6 +75,7 @@ impl Default for ConvertOptions {
             gate_jump_on_observed_impulse: true,
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
+            sync_boost_pad_pickups: true,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -336,6 +339,8 @@ pub fn convert_observations(
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
+    let mut pad_actor_to_index: HashMap<i32, usize> = HashMap::new();
+    let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut frames = Vec::with_capacity(observations.frames.len());
     let mut position_residuals = Vec::new();
     let mut diagnostics = Diagnostics::default();
@@ -565,6 +570,75 @@ pub fn convert_observations(
             }
             arena.set_car_controls(slot, controls);
         }
+        if options.sync_boost_pad_pickups {
+            for pickup in &frame.pad_pickups {
+                let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {
+                    Some(idx)
+                } else if let Some(instigator_id) = pickup.instigator_car_id {
+                    let car_pos = frame
+                        .cars
+                        .iter()
+                        .find(|c| c.actor_id == instigator_id)
+                        .and_then(|c| c.body.position.as_ref())
+                        .map(|p| vec3(p.value))
+                        .or_else(|| {
+                            actor_slots
+                                .get(&instigator_id)
+                                .map(|&(slot, _)| arena.get_car_state(slot).phys.pos)
+                        });
+                    if let Some(pos) = car_pos {
+                        let mut best_pad = None;
+                        let mut best_dist_sq = f32::INFINITY;
+                        for idx in 0..arena.num_boost_pads() {
+                            let pad_pos = arena.get_boost_pad_config(idx).pos;
+                            let d2 = (pad_pos.x - pos.x).powi(2) + (pad_pos.y - pos.y).powi(2);
+                            if d2 < best_dist_sq {
+                                best_dist_sq = d2;
+                                best_pad = Some(idx);
+                            }
+                        }
+                        if best_dist_sq < 350.0 * 350.0 {
+                            if let Some(idx) = best_pad {
+                                pad_actor_to_index.insert(pickup.pad_actor_id, idx);
+                            }
+                            best_pad
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let prev_counter = last_pad_counter.insert(pickup.pad_actor_id, pickup.picked_up);
+                let changed = prev_counter != Some(pickup.picked_up);
+
+                if changed {
+                    if let Some(idx) = pad_idx {
+                        if pickup.picked_up % 2 == 1 {
+                            let max_cooldown = if arena.get_boost_pad_config(idx).is_big {
+                                10.0
+                            } else {
+                                4.0
+                            };
+                            arena.set_boost_pad_state(
+                                idx,
+                                BoostPadState {
+                                    cooldown: max_cooldown,
+                                },
+                            );
+                        } else if pickup.picked_up == 255 {
+                            arena.set_boost_pad_state(
+                                idx,
+                                BoostPadState { cooldown: 0.0 },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         frames.push(ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -726,5 +800,75 @@ mod tests {
             assert_eq!(actual.hitbox_size, expected.hitbox_size);
         }
         assert!(hitbox_for_body_product(13008).is_none());
+    }
+
+    #[test]
+    fn boost_pad_pickup_reconciliation_tracks_cooldown() {
+        use crate::observations::{Frame, Header, PadPickup};
+
+        let mut options = ConvertOptions::default();
+        options.sync_boost_pad_pickups = true;
+
+        let frames = vec![
+            Frame {
+                index: 0,
+                time: 0.0,
+                delta: 0.033,
+                ball: None,
+                cars: vec![observations::Car {
+                    actor_id: 1,
+                    actor_created_frame: 0,
+                    player_key: Some("player1".to_string()),
+                    player_link_active: true,
+                    team: Some(0),
+                    body_product_id: None,
+                    body: Body {
+                        position: Some(Value {
+                            value: [0.0, -4240.0, 17.0],
+                            frame: 0,
+                            source: Source::Replay,
+                        }),
+                        ..Body::default()
+                    },
+                    boost: Some(Value {
+                        value: 33.0,
+                        frame: 0,
+                        source: Source::Replay,
+                    }),
+                    boost_raw: None,
+                    inputs: observations::Inputs::default(),
+                }],
+                players: Vec::new(),
+                team_scores: [None, None],
+                seconds_remaining: None,
+                overtime: None,
+                game_state: Some(Value {
+                    value: "Active".to_string(),
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                events: Vec::new(),
+                pad_pickups: vec![PadPickup {
+                    pad_actor_id: 50,
+                    pad_actor_name: Some("cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0".to_string()),
+                    instigator_car_id: Some(1),
+                    picked_up: 1,
+                }],
+            },
+        ];
+
+        let replay = ObservedReplay {
+            header: Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+
+        let output = convert_observations(replay, &options).unwrap();
+        let pad_state = output.frames[0].state.boost_pads[0].1;
+        assert_eq!(pad_state.cooldown, 4.0);
     }
 }

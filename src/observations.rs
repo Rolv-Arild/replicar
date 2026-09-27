@@ -125,6 +125,15 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PadPickup {
+    pub pad_actor_id: i32,
+    pub pad_actor_name: Option<String>,
+    pub instigator_car_id: Option<i32>,
+    /// Odd numbers indicate active pickup; 255 indicates respawn / inactive.
+    pub picked_up: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Frame {
     pub index: usize,
     pub time: f32,
@@ -137,6 +146,7 @@ pub struct Frame {
     pub overtime: Option<Value<bool>>,
     pub game_state: Option<Value<String>>,
     pub events: Vec<Event>,
+    pub pad_pickups: Vec<PadPickup>,
 }
 
 /// Choose the replay car that currently represents each known player. A demolished
@@ -201,6 +211,7 @@ enum ActorKind {
     Team(u8),
     Component(ComponentKind),
     GameEvent,
+    Pad(String),
     Other,
 }
 
@@ -277,6 +288,12 @@ fn classify(class: &str) -> ActorKind {
         ActorKind::Component(ComponentKind::FlipCar)
     } else if class.contains("GameEvent_Soccar") {
         ActorKind::GameEvent
+    } else if class.contains("VehiclePickup_Boost") {
+        let name = class
+            .find("VehiclePickup_Boost")
+            .map(|idx| class[idx..].to_owned())
+            .unwrap_or_else(|| class.to_owned());
+        ActorKind::Pad(name)
     } else {
         ActorKind::Other
     }
@@ -430,6 +447,7 @@ impl Tracker {
         names: &[String],
         frame: usize,
         events: &mut Vec<Event>,
+        pad_pickups: &mut Vec<PadPickup>,
     ) {
         match property {
             "TAGame.RBActor_TA:ReplicatedRBState" => {
@@ -560,6 +578,20 @@ impl Tracker {
                     events.push(Event::GoalScoredOn { team: *team });
                 }
             }
+            "TAGame.VehiclePickup_TA:NewReplicatedPickupData" => {
+                if let Attribute::PickupNew(pickup) = attribute {
+                    let pad_actor_name = match self.actors.get(&actor).map(|a| &a.kind) {
+                        Some(ActorKind::Pad(name)) => Some(name.clone()),
+                        _ => None,
+                    };
+                    pad_pickups.push(PadPickup {
+                        pad_actor_id: actor.0,
+                        pad_actor_name,
+                        instigator_car_id: pickup.instigator.map(|id| id.0),
+                        picked_up: pickup.picked_up,
+                    });
+                }
+            }
             "TAGame.PRI_TA:MatchScore" => {
                 self.player_stat(actor, attribute, frame, |s| &mut s.match_score)
             }
@@ -604,7 +636,14 @@ impl Tracker {
         }
     }
 
-    fn snapshot(&mut self, index: usize, time: f32, delta: f32, events: Vec<Event>) -> Frame {
+    fn snapshot(
+        &mut self,
+        index: usize,
+        time: f32,
+        delta: f32,
+        events: Vec<Event>,
+        pad_pickups: Vec<PadPickup>,
+    ) -> Frame {
         if self
             .seconds_remaining
             .as_ref()
@@ -702,6 +741,7 @@ impl Tracker {
             overtime: self.overtime.clone(),
             game_state: self.game_state.clone(),
             events,
+            pad_pickups,
         }
     }
 }
@@ -739,6 +779,7 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
             }
         }
         let mut events = Vec::new();
+        let mut pad_pickups = Vec::new();
         for update in &frame.updated_actors {
             if let Some(property) = prop_name(replay, update.object_id.0) {
                 tracker.observe(
@@ -748,10 +789,11 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
                     &replay.names,
                     index,
                     &mut events,
+                    &mut pad_pickups,
                 );
             }
         }
-        output.push(tracker.snapshot(index, frame.time, frame.delta, events));
+        output.push(tracker.snapshot(index, frame.time, frame.delta, events, pad_pickups));
     }
     Some(ObservedReplay {
         header: Header {

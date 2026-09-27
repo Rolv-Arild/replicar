@@ -471,6 +471,7 @@ fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> Obs
         }
         let previous = masked.frames[index - 1].clone();
         let frame = &mut masked.frames[index];
+        frame.pad_pickups.clear();
         if let Some(previous_ball) = previous.ball {
             frame.ball = Some(previous_ball);
         }
@@ -684,6 +685,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if arg == "--no-inferred-dodge" {
             options.infer_dodge_from_active = false;
             options.gate_dodge_on_observed_impulse = false;
+        } else if arg == "--no-sync-pads" {
+            options.sync_boost_pad_pickups = false;
+        } else if arg == "--sync-pads" {
+            options.sync_boost_pad_pickups = true;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -696,7 +701,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1021,6 +1026,7 @@ mod tests {
                     source: Source::Replay,
                 }),
                 events: Vec::new(),
+                pad_pickups: Vec::new(),
             })
             .collect();
         let original = ObservedReplay {

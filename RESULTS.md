@@ -173,3 +173,48 @@ Gated dodge inference is enabled by default (`infer_dodge_from_active = true`, `
 The generated map covers 213 of 238 `Body` product rows; 11 of the 25 unresolved rows are generic drop or mystery labels, and 14 are named vehicles without a verified assignment in the checked sources. Unknown IDs remain raw and use an Octane fallback if selected by a playing car. The two rare training PRI products 7477 and 7979 were attached to non-playing actors; 7979 is now identified as Stampede, which the official list puts in Merc. All 240 playing train slots and all 240 playing validation slots have mapped IDs. Validation now has 237 Octane, two Plank, and one Hybrid slot. Its four formerly unresolved playing IDs are 25 Road Hog (Octane), 1691 Mantis (Plank), 1919 Centio (Plank), and 10900 Shokunin (Octane).
 
 Compared with the previous eight-ID map, full-corpus train position metrics are unchanged. Validation gains two Plank slots. Four-frame car position median/p90 is unchanged in 1v1 and 2v2 to three decimals; 3v3 moves from 17.221/45.252 to 17.233/45.235 UU. One-step p90 in the Mantis replay improves by 0.008 UU, while the Centio replay worsens by 0.136 UU; other percentiles move in both directions. This is a state-fidelity correction, and the small sample does not establish a broad prediction gain. `--octane-hitbox` reproduces the original all-Octane setup.
+
+
+## Boost pad pickup reconciliation and cooldown tracking
+
+### Replay pickup extraction and spatial matching
+
+Rocket League replays replicate vehicle pickups via TAGame.VehiclePickup_TA:NewReplicatedPickupData, which contains:
+- pad_actor_id: The transient actor ID of the pickup entity.
+- pad_actor_name: Name from the object table (e.g. cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0).
+- instigator_car_id: The actor ID of the car that picked up the pad.
+- picked_up: Counter byte (odd on pickup, 255 on respawn).
+
+In observations.rs, these are captured per frame as pad_pickups: Vec<PadPickup>.
+
+In conversion.rs, when options.sync_boost_pad_pickups is enabled (default 	rue):
+1. **Pad index mapping:** When a pickup counter changes, the instigator car's xy position is matched to the nearest RocketSim boost pad configuration. Because car-to-pad contact distances in replays range from ~120 to ~280 UU, a spatial threshold of 350 UU uniquely resolves the pad. The actor ID mapping is cached for the actor's lifetime.
+2. **Cooldown synchronization:**
+   - On pickup (picked_up % 2 == 1): Sets RocketSim rena.set_boost_pad_state(idx, BoostPadState { cooldown }), with 10.0s for big pads and 4.0s for small pads.
+   - On respawn (picked_up == 255): Resets cooldown = 0.0.
+3. **No future data leakage:** In evaluate_corpus.rs, rame.pad_pickups is explicitly cleared during masked evaluation windows, so pad events are only known when observed before the withheld gap.
+
+### Evaluation metrics and ablation results
+
+All 60 train and 60 validation replays converted with zero failures.
+
+#### Masked boost error on validation: sync pads vs no sync pads
+
+| Horizon | Samples | Pad sync sim p50 / p90 / p99 | No pad sync sim p50 / p90 / p99 | Hold baseline p50 / p90 / p99 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 251 | **0.621** / 12.892 / 100.000 | 0.719 / 12.654 / 100.000 | 6.667 / 32.549 / 100.000 |
+| 2 | 211 | **0.474** / 12.239 / 100.000 | 0.490 / 12.212 / 100.000 | 8.235 / 20.392 / 100.000 |
+| 3 | 253 | **0.621** / 12.680 / 100.000 | 0.850 / 12.490 / 100.000 | 9.020 / 28.627 / 100.000 |
+| 4 | 197 | **0.392** / 12.157 / 100.000 | 0.458 / 12.212 / 100.000 | 7.451 / 15.686 / 100.000 |
+
+Across all horizons, pad synchronization improves median simulated boost error on validation:
+- Horizon 1: 0.719 -> 0.621 boost units (vs hold 6.667, **>10x improvement over hold**).
+- Horizon 2: 0.490 -> 0.474 boost units (vs hold 8.235, **>17x improvement over hold**).
+- Horizon 3: 0.850 -> 0.621 boost units (vs hold 9.020, **>14x improvement over hold**).
+- Horizon 4: 0.458 -> 0.392 boost units (vs hold 7.451, **>19x improvement over hold**).
+
+Car position errors generalize consistently without regression:
+- Train all car position p50 / p90 / p99: 16.96 / 41.99 / 68.01 UU.
+- Validation all car position p50 / p90 / p99: 16.39 / 41.09 / 69.61 UU.
+
+Enabled by default with --sync-pads and ablatable with --no-sync-pads.
