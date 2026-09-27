@@ -61,6 +61,8 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
+    pub infer_air_controls_from_lookahead: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -79,6 +81,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            infer_air_controls_from_lookahead: true,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -140,6 +143,76 @@ pub struct PositionResidual {
     pub simulated_error_uu: f32,
     pub hold_error_uu: f32,
     pub linear_extrapolation_error_uu: Option<f32>,
+}
+
+const PI: f32 = std::f32::consts::PI;
+const TORQUE_APPLY_SCALE: f32 = 2.0 * PI / 65536.0 * 1000.0;
+const TORQUE_PITCH: f32 = 130.0 * TORQUE_APPLY_SCALE;
+const TORQUE_YAW: f32 = 95.0 * TORQUE_APPLY_SCALE;
+const TORQUE_ROLL: f32 = 400.0 * TORQUE_APPLY_SCALE;
+const DAMPING_PITCH: f32 = 30.0 * TORQUE_APPLY_SCALE;
+const DAMPING_YAW: f32 = 20.0 * TORQUE_APPLY_SCALE;
+const DAMPING_ROLL: f32 = 50.0 * TORQUE_APPLY_SCALE;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AirControls {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+}
+
+/// Analytically inverts RocketSim's air torque equations from consecutive angular velocities.
+pub fn solve_inverse_air_controls(
+    rot_mat_start: Mat3A,
+    ang_vel_start: Vec3A,
+    ang_vel_end: Vec3A,
+    dt: f32,
+) -> AirControls {
+    if dt <= 0.0 || !dt.is_finite() {
+        return AirControls::default();
+    }
+
+    let forward = rot_mat_start.x_axis;
+    let right = rot_mat_start.y_axis;
+    let up = rot_mat_start.z_axis;
+
+    let dir_pitch = -right;
+    let dir_yaw = up;
+    let dir_roll = -forward;
+
+    let tau_world = (ang_vel_end - ang_vel_start) / dt;
+
+    let tau_p = dir_pitch.dot(tau_world);
+    let tau_y = dir_yaw.dot(tau_world);
+    let tau_r = dir_roll.dot(tau_world);
+
+    let omega_p = dir_pitch.dot(ang_vel_start);
+    let omega_y = dir_yaw.dot(ang_vel_start);
+    let omega_r = dir_roll.dot(ang_vel_start);
+
+    // Solve pitch: tau_p = u_p * T_p - omega_p * D_p * (1 - |u_p|)
+    let rhs_p = tau_p + omega_p * DAMPING_PITCH;
+    let denom_p = TORQUE_PITCH + rhs_p.signum() * omega_p * DAMPING_PITCH;
+    let pitch = if denom_p.abs() > 1e-4 {
+        (rhs_p / denom_p).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Solve yaw: tau_y = u_y * T_y - omega_y * D_y * (1 - |u_y|)
+    let rhs_y = tau_y + omega_y * DAMPING_YAW;
+    let denom_y = TORQUE_YAW + rhs_y.signum() * omega_y * DAMPING_YAW;
+    let yaw = if denom_y.abs() > 1e-4 {
+        (rhs_y / denom_y).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Solve roll: tau_r = u_r * T_r - omega_r * D_r (no damping reduction in RocketSim)
+    let rhs_r = tau_r + omega_r * DAMPING_ROLL;
+    let roll = (rhs_r / TORQUE_ROLL).clamp(-1.0, 1.0);
+
+    AirControls { pitch, yaw, roll }
 }
 
 fn vec3(value: [f32; 3]) -> Vec3A {
@@ -352,7 +425,7 @@ pub fn convert_observations(
     let mut previous_active = false;
     let mut ball_initialized = false;
 
-    for frame in &observations.frames {
+    for (frame_idx, frame) in observations.frames.iter().enumerate() {
         if !frame.time.is_finite() || frame.time < first_time {
             return Err(ConvertError::InvalidTime {
                 frame: frame.index,
@@ -567,7 +640,42 @@ pub fn convert_observations(
                 controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
             }
             let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
-            if options.infer_air_steer_controls && airborne {
+            let mut air_controls_applied = false;
+            if options.infer_air_controls_from_lookahead && airborne && !dodge_jump_control {
+                if let Some(next_frame) = observations.frames.get(frame_idx + 1) {
+                    let dt = next_frame.time - frame.time;
+                    if dt > 0.0 && dt <= 0.05 {
+                        if let Some(next_car) = next_frame.cars.iter().find(|c| c.actor_id == car.actor_id) {
+                            if let (Some(ang1), Some(ang0), Some(rot0)) = (
+                                &next_car.body.angular_velocity_replay_units,
+                                &car.body.angular_velocity_replay_units,
+                                &car.body.rotation_xyzw,
+                            ) {
+                                if ang1.frame == next_frame.index
+                                    && ang0.frame == frame.index
+                                    && rot0.frame == frame.index
+                                {
+                                    let q0 = Quat::from_xyzw(rot0.value[0], rot0.value[1], rot0.value[2], rot0.value[3]);
+                                    if q0.is_finite() && q0.length_squared() > 0.5 {
+                                        let solved = solve_inverse_air_controls(
+                                            Mat3A::from_quat(q0.normalize()),
+                                            Vec3A::from_array(ang0.value) * 0.01,
+                                            Vec3A::from_array(ang1.value) * 0.01,
+                                            dt,
+                                        );
+                                        controls.pitch = solved.pitch;
+                                        controls.yaw = solved.yaw;
+                                        controls.roll = solved.roll;
+                                        air_controls_applied = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !air_controls_applied && options.infer_air_steer_controls && airborne {
                 controls.yaw = controls.steer;
             }
             if dodge_jump_control {
@@ -955,5 +1063,138 @@ mod tests {
         let (yaw_dis, roll_dis) = (controls_disabled.yaw, controls_disabled.roll);
         assert_eq!(yaw_dis, 0.0);
         assert_eq!(roll_dis, 0.0);
+    }
+    #[test]
+    fn solve_inverse_air_controls_recovers_pure_inputs() {
+        let rot = Mat3A::IDENTITY;
+        // Pitch: dir_pitch = -y_axis. Net torque should change ang_vel.y
+        let dt = 1.0 / 120.0;
+        let omega0 = Vec3A::ZERO;
+        // Applying pitch = 1.0 -> torque = 1.0 * dir_pitch * T_p = -y_axis * 12.463594
+        // Over dt, delta omega is -y_axis * 12.463594 * dt
+        let omega1 = Vec3A::new(0.0, -TORQUE_PITCH * dt, 0.0);
+        let solved = solve_inverse_air_controls(rot, omega0, omega1, dt);
+        assert!((solved.pitch - 1.0).abs() < 1e-3);
+        assert!(solved.yaw.abs() < 1e-3);
+        assert!(solved.roll.abs() < 1e-3);
+
+        // Yaw: dir_yaw = +z_axis. Net torque should change ang_vel.z
+        let omega_yaw = Vec3A::new(0.0, 0.0, TORQUE_YAW * dt);
+        let solved_yaw = solve_inverse_air_controls(rot, omega0, omega_yaw, dt);
+        assert!(solved_yaw.pitch.abs() < 1e-3);
+        assert!((solved_yaw.yaw - 1.0).abs() < 1e-3);
+        assert!(solved_yaw.roll.abs() < 1e-3);
+
+        // Roll: dir_roll = -x_axis. Net torque should change ang_vel.x
+        let omega_roll = Vec3A::new(-TORQUE_ROLL * dt, 0.0, 0.0);
+        let solved_roll = solve_inverse_air_controls(rot, omega0, omega_roll, dt);
+        assert!(solved_roll.pitch.abs() < 1e-3);
+        assert!(solved_roll.yaw.abs() < 1e-3);
+        assert!((solved_roll.roll - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn lookahead_infer_air_controls_populates_pitch_and_roll() {
+        let dt = 0.033;
+        let car0 = observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: Body {
+                position: Some(Value {
+                    value: [0.0, 0.0, 200.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                rotation_xyzw: Some(Value {
+                    value: [0.0, 0.0, 0.0, 1.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                angular_velocity_replay_units: Some(Value {
+                    value: [0.0, 0.0, 0.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                ..Body::default()
+            },
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs::default(),
+        };
+
+        // Frame 1 has angular velocity indicating pitching up
+        let mut car1 = car0.clone();
+        car1.body.position.as_mut().unwrap().frame = 1;
+        car1.body.rotation_xyzw.as_mut().unwrap().frame = 1;
+        car1.body.angular_velocity_replay_units = Some(Value {
+            value: [0.0, -100.0, 0.0], // Replay units: -1.0 rad/s on y-axis -> pitch up
+            frame: 1,
+            source: Source::Replay,
+        });
+
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: vec![
+                observations::Frame {
+                    index: 0,
+                    time: 0.0,
+                    delta: dt,
+                    ball: None,
+                    cars: vec![car0],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: 0,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                },
+                observations::Frame {
+                    index: 1,
+                    time: dt,
+                    delta: dt,
+                    ball: None,
+                    cars: vec![car1],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: 1,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                },
+            ],
+            diagnostics: Default::default(),
+        };
+
+        let mut options = ConvertOptions::default();
+        options.infer_air_controls_from_lookahead = true;
+        let out = convert_observations(replay.clone(), &options).unwrap();
+        let controls0 = out.frames[0].state.cars[0].1.controls;
+        let pitch0 = controls0.pitch;
+        assert!(pitch0 > 0.5, "expected pitch > 0.5, got {pitch0}");
+
+        // When option is disabled, pitch is 0.0
+        options.infer_air_controls_from_lookahead = false;
+        let out_dis = convert_observations(replay, &options).unwrap();
+        let controls0_dis = out_dis.frames[0].state.cars[0].1.controls;
+        let pitch0_dis = controls0_dis.pitch;
+        assert_eq!(pitch0_dis, 0.0);
     }
 }

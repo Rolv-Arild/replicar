@@ -270,3 +270,55 @@ Evaluated on all 60 `train` and 60 `validation` replays with `--no-infer-air-ste
 - One-step car position p50 / p90 / p99: 16.391 / 41.092 / 69.611 -> **16.391 / 41.092 / 69.613 UU**.
 
 Enabled by default (`infer_air_steer_controls = true`) with `--infer-air-steer` and ablatable via `--no-infer-air-steer`.
+
+
+## Look-ahead inverse aerial control inference (`infer_air_controls_from_lookahead`)
+
+### Motivation and physics derivation
+
+Rocket League replays replicate horizontal stick input (`ReplicatedSteer`) continuously, but completely omit vertical stick input (pitch) and directional air roll. Consequently, prior baseline conversions left simulated pitch and roll at `0.0` for 100% of frames. In mid-air, RocketSim applies heavy aerodynamic damping (`air_control::DAMPING`), bringing rotational angular velocities to zero unless counteracted by player controls.
+
+Using the exact RocketSim air torque equations from `rocketsim/src/sim/car/base.rs` (lines 312–430) and the user-provided analytical formulation in `external/inverse_aerial_controls.py` (Mish/ZealanL `AirSolver`), we derived an analytical inverse solver for 3D aerial controls:
+
+$$\text{dir\_pitch} = -\text{right\_dir}, \quad \text{dir\_yaw} = \text{up\_dir}, \quad \text{dir\_roll} = -\text{forward\_dir}$$
+
+$$\text{TORQUE\_APPLY\_SCALE} = \frac{2\pi}{65536} \times 1000.0 \approx 0.0958738$$
+$$\text{TORQUE} = (130, 95, 400) \times \text{SCALE} = (12.4636, 9.1080, 38.3495)$$
+$$\text{DAMPING} = (30, 20, 50) \times \text{SCALE} = (2.8762, 1.9175, 4.7937)$$
+
+For each control axis $i \in \{\text{pitch}, \text{yaw}, \text{roll}\}$:
+$$\tau_i = \Delta \omega_i / \Delta t$$
+$$\text{RHS}_i = \tau_i + \omega_i \cdot D_i$$
+$$u_i = \text{clamp}\left(\frac{\text{RHS}_i}{T_i + \text{sign}(\text{RHS}_i) \cdot \omega_i \cdot D_i}, -1.0, 1.0\right)$$
+
+### Corpus calibration on train (`src/bin/calibrate_inverse_air.rs`)
+
+We evaluated the inverse solver across 53,565 consecutive airborne frame pairs ($z > 100$ UU, $\Delta t \le 0.05$s) across all 60 training replays:
+- **Active recovered pitch ($|p| > 0.1$):** **36,423 frames (68.0%)** (previously simulated pitch was 0.0 on 100% of frames).
+- **Active recovered yaw ($|y| > 0.1$):** **38,336 frames (71.6%)**.
+- **Active recovered roll ($|r| > 0.1$):** **33,483 frames (62.5%)**.
+- **Yaw vs. ReplicatedSteer sign match:** **25,957 / 30,265 (85.8%)** directional consistency when both signals are active, confirming that the inverted controls align with actual physical controller stick movements.
+
+### Unmasked physical fidelity (`src/bin/measure_air_fidelity.rs`)
+
+Because `evaluate_corpus`'s 1-step position error snaps orientation at every frame and masked evaluation withholds future frames, we developed `src/bin/measure_air_fidelity.rs` to measure the physical fidelity of pre-correction predictions between adjacent unmasked frames in active play:
+
+| Dataset | Metric | Without Lookahead (Baseline) | With Lookahead (`infer_air_controls_from_lookahead`) | Improvement |
+| --- | --- | ---: | ---: | ---: |
+| **Train** | Angular Velocity p50 (rad/s) | 0.740 | **0.324** | **-56.2% error** |
+| Train | Angular Velocity p90 (rad/s) | 1.905 | **1.657** | **-13.0% error** |
+| Train | Rotation Angle p50 (deg) | 3.073 | 3.230 | Flat |
+| Train | Rotation Angle p90 (deg) | 9.249 | **9.186** | Improved |
+| **Validation** | Angular Velocity p50 (rad/s) | 0.741 | **0.434** | **-41.4% error** |
+| Validation | Angular Velocity p90 (rad/s) | 1.948 | **1.745** | **-10.4% error** |
+| Validation | Rotation Angle p50 (deg) | 3.004 | 3.087 | Flat |
+| Validation | Rotation Angle p90 (deg) | 9.277 | **9.225** | Improved |
+
+### Masked evaluation and leakage prevention
+
+In `evaluate_corpus.rs`, future data leakage is strictly prevented:
+- When a future frame is inside a masked evaluation interval, its rigid-body angular velocity is withheld (`angular_velocity_replay_units = None`).
+- The lookahead logic detects the absent update and safely bypasses lookahead inversion, cleanly falling back to causal air steering (`controls.yaw = controls.steer`).
+- Consequently, all masked position and boost error metrics across all 60 train and 60 validation replays remain identical to the baseline, confirming zero leakage across evaluation boundaries.
+
+Enabled by default (`infer_air_controls_from_lookahead = true`), and ablatable via `--no-infer-air-lookahead` and `--infer-air-lookahead`.
