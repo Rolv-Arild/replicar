@@ -129,7 +129,7 @@ pub struct PadPickup {
     pub pad_actor_id: i32,
     pub pad_actor_name: Option<String>,
     pub instigator_car_id: Option<i32>,
-    /// Odd numbers indicate active pickup; 255 indicates respawn / inactive.
+    /// Non-255 odd values count pickups; 255 marks available/inactive in the train corpus.
     pub picked_up: u8,
 }
 

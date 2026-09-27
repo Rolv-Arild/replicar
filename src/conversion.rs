@@ -134,7 +134,7 @@ pub struct CarSlot {
     pub hitbox: String,
 }
 
-/// Error before a fresh replay position is used to correct the simulation.
+/// Error before a fresh replay observation is used to correct the simulation.
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionResidual {
     pub frame: usize,
@@ -143,6 +143,26 @@ pub struct PositionResidual {
     pub simulated_error_uu: f32,
     pub hold_error_uu: f32,
     pub linear_extrapolation_error_uu: Option<f32>,
+    pub simulated_velocity_error_uu_per_sec: Option<f32>,
+    pub hold_velocity_error_uu_per_sec: Option<f32>,
+    pub simulated_rotation_error_degrees: Option<f32>,
+    pub hold_rotation_error_degrees: Option<f32>,
+    pub simulated_angular_velocity_error_rad_per_sec: Option<f32>,
+    pub hold_angular_velocity_error_rad_per_sec: Option<f32>,
+    pub altitude_z: Option<f32>,
+    pub is_on_ground: Option<bool>,
+}
+
+pub type KinematicResidual = PositionResidual;
+
+pub fn quaternion(xyzw: [f32; 4]) -> Option<Quat> {
+    let q = Quat::from_xyzw(xyzw[0], xyzw[1], xyzw[2], xyzw[3]);
+    (q.is_finite() && q.length_squared() > 1e-8).then(|| q.normalize())
+}
+
+pub fn rotation_error_degrees(a: Mat3A, b: Mat3A) -> f32 {
+    let trace = a.x_axis.dot(b.x_axis) + a.y_axis.dot(b.y_axis) + a.z_axis.dot(b.z_axis);
+    ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
 const PI: f32 = std::f32::consts::PI;
@@ -224,42 +244,115 @@ fn position_residual(
     actor_id: Option<i32>,
     body: &Body,
     previous: Option<&Body>,
-    predicted: Vec3A,
+    predicted: &PhysState,
+    is_on_ground: Option<bool>,
     frames: &[observations::Frame],
 ) -> Option<PositionResidual> {
     let actual = body
         .position
         .as_ref()
         .filter(|value| value.frame == index)?;
-    let previous = previous?.position.as_ref()?;
-    if previous.frame >= index {
+    let previous_pos = previous?.position.as_ref()?;
+    if previous_pos.frame >= index {
         return None;
     }
-    let dt = frames[index].time - frames[previous.frame].time;
-    if !dt.is_finite() || dt <= 0.0 {
+    let dt = frames[index].time - frames[previous_pos.frame].time;
+    if !dt.is_finite() || dt <= 0.0 || dt > 0.5 {
         return None;
     }
-    let actual = vec3(actual.value);
-    let previous_pos = vec3(previous.value);
-    let previous_body = if let Some(id) = actor_id {
-        frames[index - 1]
-            .cars
-            .iter()
-            .find(|car| car.actor_id == id)
-            .map(|car| &car.body)
-    } else {
-        frames[index - 1].ball.as_ref()
+    let recent = |previous_frame: usize| {
+        previous_frame < index && {
+            let gap = frames[index].time - frames[previous_frame].time;
+            gap.is_finite() && gap > 0.0 && gap <= 0.5
+        }
     };
-    let linear_extrapolation_error_uu = previous_body
+    let actual_pos = vec3(actual.value);
+    let previous_pos_val = vec3(previous_pos.value);
+    let linear_extrapolation_error_uu = previous
         .and_then(|body| body.linear_velocity.as_ref())
-        .map(|velocity| (previous_pos + vec3(velocity.value) * dt - actual).length());
+        .filter(|velocity| recent(velocity.frame))
+        .map(|velocity| (previous_pos_val + vec3(velocity.value) * dt - actual_pos).length());
+
+    let (simulated_velocity_error_uu_per_sec, hold_velocity_error_uu_per_sec) =
+        if let (Some(actual_vel), Some(prev_vel)) = (
+            body.linear_velocity.as_ref().filter(|v| v.frame == index),
+            previous.and_then(|b| b.linear_velocity.as_ref()),
+        ) {
+            if recent(prev_vel.frame) {
+                let actual_v = vec3(actual_vel.value);
+                let prev_v = vec3(prev_vel.value);
+                (
+                    Some((predicted.vel - actual_v).length()),
+                    Some((prev_v - actual_v).length()),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+    let (simulated_rotation_error_degrees, hold_rotation_error_degrees) =
+        if let (Some(actual_rot), Some(prev_rot)) = (
+            body.rotation_xyzw.as_ref().filter(|v| v.frame == index),
+            previous.and_then(|b| b.rotation_xyzw.as_ref()),
+        ) {
+            if recent(prev_rot.frame) {
+                if let (Some(q_act), Some(q_prev)) =
+                    (quaternion(actual_rot.value), quaternion(prev_rot.value))
+                {
+                    let mat_act = Mat3A::from_quat(q_act);
+                    let mat_prev = Mat3A::from_quat(q_prev);
+                    (
+                        Some(rotation_error_degrees(predicted.rot_mat, mat_act)),
+                        Some(rotation_error_degrees(mat_prev, mat_act)),
+                    )
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+    let (simulated_angular_velocity_error_rad_per_sec, hold_angular_velocity_error_rad_per_sec) =
+        if let (Some(actual_ang), Some(prev_ang)) = (
+            body.angular_velocity_replay_units
+                .as_ref()
+                .filter(|v| v.frame == index),
+            previous.and_then(|b| b.angular_velocity_replay_units.as_ref()),
+        ) {
+            if recent(prev_ang.frame) {
+                let actual_w = vec3(actual_ang.value) * 0.01;
+                let prev_w = vec3(prev_ang.value) * 0.01;
+                (
+                    Some((predicted.ang_vel - actual_w).length()),
+                    Some((prev_w - actual_w).length()),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
     Some(PositionResidual {
         frame: index,
         actor_id,
         seconds_since_previous_position: dt,
-        simulated_error_uu: (predicted - actual).length(),
-        hold_error_uu: (previous_pos - actual).length(),
+        simulated_error_uu: (predicted.pos - actual_pos).length(),
+        hold_error_uu: (previous_pos_val - actual_pos).length(),
         linear_extrapolation_error_uu,
+        simulated_velocity_error_uu_per_sec,
+        hold_velocity_error_uu_per_sec,
+        simulated_rotation_error_degrees,
+        hold_rotation_error_degrees,
+        simulated_angular_velocity_error_rad_per_sec,
+        hold_angular_velocity_error_rad_per_sec,
+        altitude_z: Some(actual.value[2]),
+        is_on_ground,
     })
 }
 
@@ -469,7 +562,8 @@ pub fn convert_observations(
                         .frames
                         .get(frame.index.wrapping_sub(1))
                         .and_then(|f| f.ball.as_ref()),
-                    arena.get_ball_state().phys.pos,
+                    &arena.get_ball_state().phys,
+                    None,
                     &observations.frames,
                 ) {
                     position_residuals.push(residual);
@@ -546,12 +640,14 @@ pub fn convert_observations(
                             .find(|previous| previous.actor_id == car.actor_id)
                     })
                     .map(|car| &car.body);
+                let car_state = arena.get_car_state(slot);
                 if let Some(residual) = position_residual(
                     frame.index,
                     Some(car.actor_id),
                     &car.body,
                     previous,
-                    arena.get_car_state(slot).phys.pos,
+                    &car_state.phys,
+                    Some(car_state.is_on_ground),
                     &observations.frames,
                 ) {
                     position_residuals.push(residual);
@@ -596,7 +692,12 @@ pub fn convert_observations(
                         None => raw % 2 == 1,
                     };
                     if activated {
-                        if let Some(torque) = &car.inputs.dodge_torque_replay_units {
+                        if let Some(torque) = car
+                            .inputs
+                            .dodge_torque_replay_units
+                            .as_ref()
+                            .filter(|torque| torque.frame == frame.index)
+                        {
                             let [tx, ty, _] = torque.value;
                             let pitch = -ty / 2.24;
                             let yaw = -tx / 2.60;
@@ -641,11 +742,26 @@ pub fn convert_observations(
             }
             let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
             let mut air_controls_applied = false;
-            if options.infer_air_controls_from_lookahead && airborne && !dodge_jump_control {
+            if options.infer_air_controls_from_lookahead
+                && airborne
+                && !dodge_jump_control
+                && active
+            {
                 if let Some(next_frame) = observations.frames.get(frame_idx + 1) {
                     let dt = next_frame.time - frame.time;
-                    if dt > 0.0 && dt <= 0.05 {
-                        if let Some(next_car) = next_frame.cars.iter().find(|c| c.actor_id == car.actor_id) {
+                    if dt > 0.0
+                        && dt <= 0.05
+                        && next_frame
+                            .game_state
+                            .as_ref()
+                            .is_some_and(|s| s.value == "Active")
+                    {
+                        if let Some(next_car) = next_frame.cars.iter().find(|c| {
+                            c.actor_id == car.actor_id
+                                && c.actor_created_frame == car.actor_created_frame
+                                && c.player_key == car.player_key
+                                && c.player_link_active == car.player_link_active
+                        }) {
                             if let (Some(ang1), Some(ang0), Some(rot0)) = (
                                 &next_car.body.angular_velocity_replay_units,
                                 &car.body.angular_velocity_replay_units,
@@ -654,8 +770,22 @@ pub fn convert_observations(
                                 if ang1.frame == next_frame.index
                                     && ang0.frame == frame.index
                                     && rot0.frame == frame.index
+                                    && car.body.position.as_ref().is_some_and(|p| {
+                                        p.frame == frame.index && p.value[2] > 100.0
+                                    })
+                                    && next_car.body.position.as_ref().is_some_and(|p| {
+                                        p.frame == next_frame.index && p.value[2] > 100.0
+                                    })
+                                    && !next_car.inputs.dodge_active_raw.as_ref().is_some_and(|d| {
+                                        d.frame == next_frame.index && d.value % 2 == 1
+                                    })
                                 {
-                                    let q0 = Quat::from_xyzw(rot0.value[0], rot0.value[1], rot0.value[2], rot0.value[3]);
+                                    let q0 = Quat::from_xyzw(
+                                        rot0.value[0],
+                                        rot0.value[1],
+                                        rot0.value[2],
+                                        rot0.value[3],
+                                    );
                                     if q0.is_finite() && q0.length_squared() > 0.5 {
                                         let solved = solve_inverse_air_controls(
                                             Mat3A::from_quat(q0.normalize()),
@@ -695,6 +825,10 @@ pub fn convert_observations(
                         .iter()
                         .find(|c| c.actor_id == instigator_id)
                         .and_then(|c| c.body.position.as_ref())
+                        .filter(|p| {
+                            p.frame <= frame.index
+                                && frame.time - observations.frames[p.frame].time <= 0.1
+                        })
                         .map(|p| vec3(p.value))
                         .or_else(|| {
                             actor_slots
@@ -704,15 +838,21 @@ pub fn convert_observations(
                     if let Some(pos) = car_pos {
                         let mut best_pad = None;
                         let mut best_dist_sq = f32::INFINITY;
+                        let mut second_dist_sq = f32::INFINITY;
                         for idx in 0..arena.num_boost_pads() {
                             let pad_pos = arena.get_boost_pad_config(idx).pos;
                             let d2 = (pad_pos.x - pos.x).powi(2) + (pad_pos.y - pos.y).powi(2);
                             if d2 < best_dist_sq {
+                                second_dist_sq = best_dist_sq;
                                 best_dist_sq = d2;
                                 best_pad = Some(idx);
+                            } else if d2 < second_dist_sq {
+                                second_dist_sq = d2;
                             }
                         }
-                        if best_dist_sq < 350.0 * 350.0 {
+                        if best_dist_sq < 350.0 * 350.0
+                            && second_dist_sq.sqrt() - best_dist_sq.sqrt() >= 100.0
+                        {
                             if let Some(idx) = best_pad {
                                 pad_actor_to_index.insert(pickup.pad_actor_id, idx);
                             }
@@ -732,7 +872,9 @@ pub fn convert_observations(
 
                 if changed {
                     if let Some(idx) = pad_idx {
-                        if pickup.picked_up % 2 == 1 {
+                        if pickup.picked_up == 255 {
+                            arena.set_boost_pad_state(idx, BoostPadState { cooldown: 0.0 });
+                        } else if pickup.picked_up % 2 == 1 {
                             let max_cooldown = if arena.get_boost_pad_config(idx).is_big {
                                 10.0
                             } else {
@@ -743,11 +885,6 @@ pub fn convert_observations(
                                 BoostPadState {
                                     cooldown: max_cooldown,
                                 },
-                            );
-                        } else if pickup.picked_up == 255 {
-                            arena.set_boost_pad_state(
-                                idx,
-                                BoostPadState { cooldown: 0.0 },
                             );
                         }
                     }
@@ -924,53 +1061,59 @@ mod tests {
         let mut options = ConvertOptions::default();
         options.sync_boost_pad_pickups = true;
 
-        let frames = vec![
-            Frame {
-                index: 0,
-                time: 0.0,
-                delta: 0.033,
-                ball: None,
-                cars: vec![observations::Car {
-                    actor_id: 1,
-                    actor_created_frame: 0,
-                    player_key: Some("player1".to_string()),
-                    player_link_active: true,
-                    team: Some(0),
-                    body_product_id: None,
-                    body: Body {
-                        position: Some(Value {
-                            value: [0.0, -4240.0, 17.0],
-                            frame: 0,
-                            source: Source::Replay,
-                        }),
-                        ..Body::default()
-                    },
-                    boost: Some(Value {
-                        value: 33.0,
+        let mut frames = vec![Frame {
+            index: 0,
+            time: 0.0,
+            delta: 0.033,
+            ball: None,
+            cars: vec![observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("player1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body {
+                    position: Some(Value {
+                        value: [0.0, -4240.0, 17.0],
                         frame: 0,
                         source: Source::Replay,
                     }),
-                    boost_raw: None,
-                    inputs: observations::Inputs::default(),
-                }],
-                players: Vec::new(),
-                team_scores: [None, None],
-                seconds_remaining: None,
-                overtime: None,
-                game_state: Some(Value {
-                    value: "Active".to_string(),
+                    ..Body::default()
+                },
+                boost: Some(Value {
+                    value: 33.0,
                     frame: 0,
                     source: Source::Replay,
                 }),
-                events: Vec::new(),
-                pad_pickups: vec![PadPickup {
-                    pad_actor_id: 50,
-                    pad_actor_name: Some("cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0".to_string()),
-                    instigator_car_id: Some(1),
-                    picked_up: 1,
-                }],
-            },
-        ];
+                boost_raw: None,
+                inputs: observations::Inputs::default(),
+            }],
+            players: Vec::new(),
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: Some(Value {
+                value: "Active".to_string(),
+                frame: 0,
+                source: Source::Replay,
+            }),
+            events: Vec::new(),
+            pad_pickups: vec![PadPickup {
+                pad_actor_id: 50,
+                pad_actor_name: Some(
+                    "cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0".to_string(),
+                ),
+                instigator_car_id: Some(1),
+                picked_up: 1,
+            }],
+        }];
+        let mut reset = frames[0].clone();
+        reset.index = 1;
+        reset.time = 0.033;
+        reset.pad_pickups[0].instigator_car_id = None;
+        reset.pad_pickups[0].picked_up = 255;
+        frames.push(reset);
 
         let replay = ObservedReplay {
             header: Header {
@@ -985,6 +1128,7 @@ mod tests {
         let output = convert_observations(replay, &options).unwrap();
         let pad_state = output.frames[0].state.boost_pads[0].1;
         assert_eq!(pad_state.cooldown, 4.0);
+        assert_eq!(output.frames[1].state.boost_pads[0].1.cooldown, 0.0);
     }
 
     #[test]
@@ -1064,28 +1208,24 @@ mod tests {
         assert_eq!(yaw_dis, 0.0);
         assert_eq!(roll_dis, 0.0);
     }
+
     #[test]
     fn solve_inverse_air_controls_recovers_pure_inputs() {
         let rot = Mat3A::IDENTITY;
-        // Pitch: dir_pitch = -y_axis. Net torque should change ang_vel.y
         let dt = 1.0 / 120.0;
         let omega0 = Vec3A::ZERO;
-        // Applying pitch = 1.0 -> torque = 1.0 * dir_pitch * T_p = -y_axis * 12.463594
-        // Over dt, delta omega is -y_axis * 12.463594 * dt
         let omega1 = Vec3A::new(0.0, -TORQUE_PITCH * dt, 0.0);
         let solved = solve_inverse_air_controls(rot, omega0, omega1, dt);
         assert!((solved.pitch - 1.0).abs() < 1e-3);
         assert!(solved.yaw.abs() < 1e-3);
         assert!(solved.roll.abs() < 1e-3);
 
-        // Yaw: dir_yaw = +z_axis. Net torque should change ang_vel.z
         let omega_yaw = Vec3A::new(0.0, 0.0, TORQUE_YAW * dt);
         let solved_yaw = solve_inverse_air_controls(rot, omega0, omega_yaw, dt);
         assert!(solved_yaw.pitch.abs() < 1e-3);
         assert!((solved_yaw.yaw - 1.0).abs() < 1e-3);
         assert!(solved_yaw.roll.abs() < 1e-3);
 
-        // Roll: dir_roll = -x_axis. Net torque should change ang_vel.x
         let omega_roll = Vec3A::new(-TORQUE_ROLL * dt, 0.0, 0.0);
         let solved_roll = solve_inverse_air_controls(rot, omega0, omega_roll, dt);
         assert!(solved_roll.pitch.abs() < 1e-3);
@@ -1126,12 +1266,11 @@ mod tests {
             inputs: observations::Inputs::default(),
         };
 
-        // Frame 1 has angular velocity indicating pitching up
         let mut car1 = car0.clone();
         car1.body.position.as_mut().unwrap().frame = 1;
         car1.body.rotation_xyzw.as_mut().unwrap().frame = 1;
         car1.body.angular_velocity_replay_units = Some(Value {
-            value: [0.0, -100.0, 0.0], // Replay units: -1.0 rad/s on y-axis -> pitch up
+            value: [0.0, -100.0, 0.0],
             frame: 1,
             source: Source::Replay,
         });
@@ -1190,11 +1329,170 @@ mod tests {
         let pitch0 = controls0.pitch;
         assert!(pitch0 > 0.5, "expected pitch > 0.5, got {pitch0}");
 
-        // When option is disabled, pitch is 0.0
+        let mut stopped = replay.clone();
+        stopped.frames[1].game_state.as_mut().unwrap().value = "Inactive".to_string();
+        let stopped_out = convert_observations(stopped, &options).unwrap();
+        let stopped_pitch = stopped_out.frames[0].state.cars[0].1.controls.pitch;
+        assert_eq!(stopped_pitch, 0.0);
+
+        let mut replacement = replay.clone();
+        replacement.frames[1].cars[0].actor_created_frame = 1;
+        let replacement_out = convert_observations(replacement, &options).unwrap();
+        let replacement_pitch = replacement_out.frames[0].state.cars[0].1.controls.pitch;
+        assert_eq!(replacement_pitch, 0.0);
+
         options.infer_air_controls_from_lookahead = false;
         let out_dis = convert_observations(replay, &options).unwrap();
         let controls0_dis = out_dis.frames[0].state.cars[0].1.controls;
         let pitch0_dis = controls0_dis.pitch;
         assert_eq!(pitch0_dis, 0.0);
+    }
+
+    #[test]
+    fn position_residual_calculates_kinematics() {
+        let frame0 = observations::Frame {
+            index: 0,
+            time: 0.0,
+            delta: 0.033,
+            ball: None,
+            cars: vec![],
+            players: vec![],
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: None,
+            events: vec![],
+            pad_pickups: vec![],
+        };
+        let frame1 = observations::Frame {
+            index: 1,
+            time: 0.033,
+            delta: 0.033,
+            ball: None,
+            cars: vec![],
+            players: vec![],
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: None,
+            events: vec![],
+            pad_pickups: vec![],
+        };
+        let frames = vec![frame0, frame1];
+
+        let prev_body = Body {
+            position: Some(Value {
+                value: [0.0, 0.0, 100.0],
+                frame: 0,
+                source: Source::Replay,
+            }),
+            rotation_xyzw: Some(Value {
+                value: [0.0, 0.0, 0.0, 1.0],
+                frame: 0,
+                source: Source::Replay,
+            }),
+            linear_velocity: Some(Value {
+                value: [100.0, 0.0, 0.0],
+                frame: 0,
+                source: Source::Replay,
+            }),
+            angular_velocity_replay_units: Some(Value {
+                value: [0.0, 0.0, 0.0],
+                frame: 0,
+                source: Source::Replay,
+            }),
+            ..Body::default()
+        };
+
+        let curr_body = Body {
+            position: Some(Value {
+                value: [10.0, 0.0, 100.0],
+                frame: 1,
+                source: Source::Replay,
+            }),
+            rotation_xyzw: Some(Value {
+                value: [0.0, 0.0, 0.7071068, 0.7071068],
+                frame: 1,
+                source: Source::Replay,
+            }),
+            linear_velocity: Some(Value {
+                value: [150.0, 0.0, 0.0],
+                frame: 1,
+                source: Source::Replay,
+            }),
+            angular_velocity_replay_units: Some(Value {
+                value: [0.0, 0.0, 100.0],
+                frame: 1,
+                source: Source::Replay,
+            }),
+            ..Body::default()
+        };
+
+        let mut predicted = BallState::default().phys;
+        predicted.pos = Vec3A::new(12.0, 0.0, 100.0);
+        predicted.vel = Vec3A::new(140.0, 0.0, 0.0);
+        predicted.rot_mat = Mat3A::IDENTITY;
+        predicted.ang_vel = Vec3A::new(0.0, 0.0, 0.5);
+
+        let residual = position_residual(
+            1,
+            Some(1),
+            &curr_body,
+            Some(&prev_body),
+            &predicted,
+            Some(false),
+            &frames,
+        )
+        .expect("residual");
+
+        assert!((residual.simulated_error_uu - 2.0).abs() < 1e-3);
+        assert!((residual.hold_error_uu - 10.0).abs() < 1e-3);
+        assert!((residual.simulated_velocity_error_uu_per_sec.unwrap() - 10.0).abs() < 1e-3);
+        assert!((residual.hold_velocity_error_uu_per_sec.unwrap() - 50.0).abs() < 1e-3);
+        assert!((residual.simulated_rotation_error_degrees.unwrap() - 90.0).abs() < 0.1);
+        assert!((residual.hold_rotation_error_degrees.unwrap() - 90.0).abs() < 0.1);
+        assert!(
+            (residual
+                .simulated_angular_velocity_error_rad_per_sec
+                .unwrap()
+                - 0.5)
+                .abs()
+                < 1e-3
+        );
+        assert!((residual.hold_angular_velocity_error_rad_per_sec.unwrap() - 1.0).abs() < 1e-3);
+        assert_eq!(residual.altitude_z, Some(100.0));
+        assert_eq!(residual.is_on_ground, Some(false));
+
+        let mut frames = frames;
+        frames[1].time = 0.8;
+        let mut third = frames[1].clone();
+        third.index = 2;
+        third.time = 1.0;
+        frames.push(third);
+        let mut stale_previous = prev_body.clone();
+        stale_previous.position.as_mut().unwrap().frame = 1;
+        let mut fresh_actual = curr_body.clone();
+        fresh_actual.position.as_mut().unwrap().frame = 2;
+        fresh_actual.linear_velocity.as_mut().unwrap().frame = 2;
+        fresh_actual.rotation_xyzw.as_mut().unwrap().frame = 2;
+        fresh_actual
+            .angular_velocity_replay_units
+            .as_mut()
+            .unwrap()
+            .frame = 2;
+        let stale = position_residual(
+            2,
+            Some(1),
+            &fresh_actual,
+            Some(&stale_previous),
+            &predicted,
+            Some(false),
+            &frames,
+        )
+        .unwrap();
+        assert!(stale.simulated_velocity_error_uu_per_sec.is_none());
+        assert!(stale.simulated_rotation_error_degrees.is_none());
+        assert!(stale.simulated_angular_velocity_error_rad_per_sec.is_none());
+        assert!(stale.linear_extrapolation_error_uu.is_none());
     }
 }

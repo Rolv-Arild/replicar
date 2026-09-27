@@ -1,8 +1,8 @@
 # Reconstruction measurements
 
-Last updated: 2026-09-27. These are development baselines for the current converter, not a final accuracy claim. The ignored machine-readable reports are `target/train-conversion-metrics.json` and `target/validation-conversion-metrics.json`. Each report includes every replay's SHA-256, dependencies, seed, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
+Last updated: 2026-09-27. These are development measurements, not a final accuracy claim. Current reviewed machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
-These tables include the actor-lifetime and inactive-owner fix, inferred boost input, active-pawn demolition correction, primary-car selection when an old demolished actor overlaps a replacement, loadout-derived hitboxes, motion-gated jump input, and motion-gated dodge flip inference. The no-dodge ablation reports remain locally under `target/*-conversion-metrics-gated-jump.json` / `target/*-conversion-metrics-gated-jump-fixed-mask.json`; reproduce them with `--no-inferred-dodge`. Raw ungated dodge reports are `target/*-inferred-dodge-metrics.json`; reproduce them with `--inferred-dodge`. The no-boost ablation reports remain locally under `target/*-conversion-metrics-no-boost.json`; reproduce them with `--no-inferred-boost`. The previous no-jump default reports are `target/*-conversion-metrics-before-gated-jump.json`; reproduce them with `--no-inferred-jump`. Earlier reports remain under `target/*-conversion-metrics-before-identity.json`, `target/*-conversion-metrics-before-demo-ghost-fix.json`, `target/*-conversion-metrics-before-hitboxes.json`, and `target/*-conversion-metrics-before-item-catalog.json` where available.
+The early sections record historical experiments with actor-lifetime, boost, demolition, hitbox, jump, and dodge inference. The later reviewed sections use corrected pad handling, guarded aerial lookahead, and field-specific kinematic residuals. Historical ablation reports remain under `target/*-conversion-metrics*.json`; their figures should be read with the implementation described beside them.
 
 ## Protocol
 
@@ -52,17 +52,38 @@ The evaluator withholds fresh car boost amounts during the same four-frame rigid
 
 Each entry is sample count and absolute boost error quantiles (p50 / p90 / p99) on the 0–100 boost scale.
 
-| Split | Horizon | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |\n| --- | ---: | ---: | ---: | ---: |\n| train | 1 | 220 | 0.59 / 12.16 / 88.95 | 7.84 / 14.12 / 95.69 |\n| train | 2 | 209 | 0.92 / 12.48 / 100.00 | 8.63 / 16.47 / 100.00 |\n| train | 3 | 214 | 0.52 / 12.16 / 96.08 | 7.84 / 17.65 / 100.00 |\n| train | 4 | 202 | 0.65 / 12.75 / 97.65 | 8.24 / 22.75 / 100.00 |\n| validation | 1 | 251 | 0.72 / 12.65 / 100.00 | 6.67 / 32.55 / 100.00 |\n| validation | 2 | 211 | 0.49 / 12.21 / 100.00 | 8.24 / 20.39 / 100.00 |\n| validation | 3 | 253 | 0.85 / 12.49 / 100.00 | 9.02 / 28.63 / 100.00 |\n| validation | 4 | 197 | 0.47 / 12.21 / 100.00 | 7.45 / 15.69 / 100.00 |
+| Split | Horizon | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |
+| --- | ---: | ---: | ---: | ---: |
+| train | 1 | 220 | 0.59 / 12.16 / 88.95 | 7.84 / 14.12 / 95.69 |
+| train | 2 | 209 | 0.92 / 12.48 / 100.00 | 8.63 / 16.47 / 100.00 |
+| train | 3 | 214 | 0.52 / 12.16 / 96.08 | 7.84 / 17.65 / 100.00 |
+| train | 4 | 202 | 0.65 / 12.75 / 97.65 | 8.24 / 22.75 / 100.00 |
+| validation | 1 | 251 | 0.72 / 12.65 / 100.00 | 6.67 / 32.55 / 100.00 |
+| validation | 2 | 211 | 0.49 / 12.21 / 100.00 | 8.24 / 20.39 / 100.00 |
+| validation | 3 | 253 | 0.85 / 12.49 / 100.00 | 9.02 / 28.63 / 100.00 |
+| validation | 4 | 197 | 0.47 / 12.21 / 100.00 | 7.45 / 15.69 / 100.00 |
 
 ### Boost error by game size at horizon 4
 
-| Split | Game size | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |\n| --- | --- | ---: | ---: | ---: |\n| train | 1v1 | 39 | 0.57 / 17.25 / 97.65 | 11.37 / 17.25 / 97.65 |\n| train | 2v2 | 47 | 0.64 / 12.46 / 76.86 | 8.24 / 12.16 / 92.55 |\n| train | 3v3 | 116 | 0.76 / 12.26 / 100.00 | 7.45 / 44.31 / 100.00 |\n| validation | 1v1 | 36 | 1.06 / 13.18 / 100.00 | 9.02 / 74.51 / 100.00 |\n| validation | 2v2 | 71 | 0.33 / 12.16 / 100.00 | 6.67 / 12.94 / 100.00 |\n| validation | 3v3 | 90 | 0.49 / 12.21 / 85.10 | 7.06 / 16.86 / 100.00 |
+| Split | Game size | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |
+| --- | --- | ---: | ---: | ---: |
+| train | 1v1 | 39 | 0.57 / 17.25 / 97.65 | 11.37 / 17.25 / 97.65 |
+| train | 2v2 | 47 | 0.64 / 12.46 / 76.86 | 8.24 / 12.16 / 92.55 |
+| train | 3v3 | 116 | 0.76 / 12.26 / 100.00 | 7.45 / 44.31 / 100.00 |
+| validation | 1v1 | 36 | 1.06 / 13.18 / 100.00 | 9.02 / 74.51 / 100.00 |
+| validation | 2v2 | 71 | 0.33 / 12.16 / 100.00 | 6.67 / 12.94 / 100.00 |
+| validation | 3v3 | 90 | 0.49 / 12.21 / 85.10 | 7.06 / 16.86 / 100.00 |
 
 ### Alternate mask schedule (`--mask-seed 239847`) on validation
 
 An independent check using the deterministic pseudo-random offset schedule confirms the boost metrics:
 
-| Horizon | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |\n| ---: | ---: | ---: | ---: |\n| 1 | 191 | 0.46 / 12.16 / 27.83 | 8.63 / 17.25 / 100.00 |\n| 2 | 223 | 0.49 / 12.16 / 100.00 | 7.45 / 14.51 / 100.00 |\n| 3 | 223 | 0.47 / 12.16 / 100.00 | 7.84 / 17.65 / 100.00 |\n| 4 | 189 | 0.64 / 12.16 / 83.92 | 8.63 / 15.29 / 100.00 |
+| Horizon | Samples | RocketSim p50 / p90 / p99 | Hold p50 / p90 / p99 |
+| ---: | ---: | ---: | ---: |
+| 1 | 191 | 0.46 / 12.16 / 27.83 | 8.63 / 17.25 / 100.00 |
+| 2 | 223 | 0.49 / 12.16 / 100.00 | 7.45 / 14.51 / 100.00 |
+| 3 | 223 | 0.47 / 12.16 / 100.00 | 7.84 / 17.65 / 100.00 |
+| 4 | 189 | 0.64 / 12.16 / 83.92 | 8.63 / 15.29 / 100.00 |
 
 At horizon 4 by game size with `--mask-seed 239847`: 1v1 (43 samples) RocketSim 0.64 / 12.16 / 100.00 vs Hold 8.63 / 33.33 / 100.00; 2v2 (58 samples) RocketSim 0.59 / 12.16 / 44.90 vs Hold 7.06 / 12.55 / 41.57; 3v3 (88 samples) RocketSim 0.64 / 12.16 / 21.45 vs Hold 10.20 / 15.29 / 100.00.
 
@@ -109,7 +130,13 @@ With gated dodge inference, car linear velocity median dropped from 51.9 / 43.3 
 `evaluate_corpus --mask-seed 239847` uses each replay's SHA-256 and a fixed seed to select one four-frame gap at a different deterministic offset in every 100-frame block. Reports are `target/train-conversion-metrics-alt-mask.json` and `target/validation-conversion-metrics.json`. All 60 replays converted in each split with zero failures; the `test` split remains sealed. At horizon 4, car position RocketSim median/p90 versus constant-velocity extrapolation (UU) with gated dodge is:
 
 | Split | Size | RocketSim | Linear |
-| --- | --- | ---: | ---: |\n| train | 1v1 | 17.3 / 47.4 | 27.5 / 66.8 |\n| train | 2v2 | 16.2 / 39.8 | 26.4 / 62.9 |\n| train | 3v3 | 18.1 / 47.3 | 30.2 / 65.8 |\n| validation | 1v1 | 15.8 / 41.8 | 24.7 / 61.7 |\n| validation | 2v2 | 15.1 / 38.7 | 26.3 / 64.2 |\n| validation | 3v3 | 16.1 / 42.2 | 28.6 / 64.1 |
+| --- | --- | ---: | ---: |
+| train | 1v1 | 17.3 / 47.4 | 27.5 / 66.8 |
+| train | 2v2 | 16.2 / 39.8 | 26.4 / 62.9 |
+| train | 3v3 | 18.1 / 47.3 | 30.2 / 65.8 |
+| validation | 1v1 | 15.8 / 41.8 | 24.7 / 61.7 |
+| validation | 2v2 | 15.1 / 38.7 | 26.3 / 64.2 |
+| validation | 3v3 | 16.1 / 42.2 | 28.6 / 64.1 |
 
 Under this independent schedule, validation horizon-4 car position p90 improved from 42.01 to 41.8 UU in 1v1, from 39.77 to 38.7 UU in 2v2, and from 45.30 to 42.2 UU in 3v3 (-3.1 UU!).
 
@@ -131,7 +158,7 @@ Inspection across all 60 training replays identified 14,090 dodge counter activa
    - When a fresh rigid-body packet arrives at dodge activation frame $F$ (`linear_velocity.frame == F`):
      - The velocity change from frame $F-1$ to $F$ along the dodge direction has median **+461.25 UU/s** (interquartile range +365.4 to +524.8 UU/s).
      - The velocity change from frame $F$ to $F+1$ has median **+3.61 UU/s**.
-   - This proves that when velocity is freshly reported at the activation frame, the ~500 UU/s linear dodge impulse has **already taken effect** in the replay observation.
+     - This indicates that when velocity is freshly reported at the activation frame, the linear dodge impulse has usually already taken effect in the replay observation.
    - Injecting an active jump control into RocketSim while linear velocity is already present causes an immediate, duplicate 500 UU/s impulse, blowing out velocity and position prediction on subsequent frames.
 
 3. **Motion-gated flip rule:**
@@ -168,7 +195,17 @@ Gated dodge inference is enabled by default (`infer_dodge_from_active = true`, `
 
 `TAGame.PRI_TA:ClientLoadouts` supplies a body product ID for each team. The extractor preserves both values on each player and attaches the currently selected one to a linked car. The user's August 2026 `items.csv` supplies product names; [Rocket League's official hitbox list](https://www.epicgames.com/help/c-37599050/c-32343914/a20257614?lang=en-US), additional [Season 22](https://www.rocketleague.com/news/rocket-league-season-22-training-rivalries-and-rewards) and [Season 23](https://www.rocketleague.com/news/hit-the-pitch-for-the-world-cup-in-rocket-league-season-23) announcements, and a localized official listing supply families. RocketSim's dedicated Psyclops preset covers that special body. The checked-in inputs, aliases, source URLs, generator, and unresolved rows are documented in [data/README.md](data/README.md). RocketSim's matching preset is used at car-slot creation.
 
-| Product ID | Body | Hitbox | Playing slots in train |\n| ---: | --- | --- | ---: |\n| 21 | Backfire | Octane | 1 |\n| 22 | Breakout | Breakout | 1 |\n| 23 | Octane | Octane | 53 |\n| 26 | Gizmo | Octane | 1 |\n| 403 | Dominus | Dominus | 5 |\n| 4284 | Fennec | Octane | 178 |\n| 7012 | Tesla Cybertruck | Hybrid | 1 |\n| 7477 | Nomad GXT | Merc | 0 |\n| 7979 | Stampede | Merc | 0 |
+| Product ID | Body | Hitbox | Playing slots in train |
+| ---: | --- | --- | ---: |
+| 21 | Backfire | Octane | 1 |
+| 22 | Breakout | Breakout | 1 |
+| 23 | Octane | Octane | 53 |
+| 26 | Gizmo | Octane | 1 |
+| 403 | Dominus | Dominus | 5 |
+| 4284 | Fennec | Octane | 178 |
+| 7012 | Tesla Cybertruck | Hybrid | 1 |
+| 7477 | Nomad GXT | Merc | 0 |
+| 7979 | Stampede | Merc | 0 |
 
 The generated map covers 213 of 238 `Body` product rows; 11 of the 25 unresolved rows are generic drop or mystery labels, and 14 are named vehicles without a verified assignment in the checked sources. Unknown IDs remain raw and use an Octane fallback if selected by a playing car. The two rare training PRI products 7477 and 7979 were attached to non-playing actors; 7979 is now identified as Stampede, which the official list puts in Merc. All 240 playing train slots and all 240 playing validation slots have mapped IDs. Validation now has 237 Octane, two Plank, and one Hybrid slot. Its four formerly unresolved playing IDs are 25 Road Hog (Octane), 1691 Mantis (Plank), 1919 Centio (Plank), and 10900 Shokunin (Octane).
 
@@ -183,39 +220,39 @@ Rocket League replays replicate vehicle pickups via TAGame.VehiclePickup_TA:NewR
 - pad_actor_id: The transient actor ID of the pickup entity.
 - pad_actor_name: Name from the object table (e.g. cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0).
 - instigator_car_id: The actor ID of the car that picked up the pad.
-- picked_up: Counter byte (odd on pickup, 255 on respawn).
+- picked_up: Pickup counter byte; non-255 train values were odd, while 255 marked an available/inactive pickup and had no instigator.
 
 In observations.rs, these are captured per frame as pad_pickups: Vec<PadPickup>.
 
-In conversion.rs, when options.sync_boost_pad_pickups is enabled (default 	rue):
-1. **Pad index mapping:** When a pickup counter changes, the instigator car's xy position is matched to the nearest RocketSim boost pad configuration. Because car-to-pad contact distances in replays range from ~120 to ~280 UU, a spatial threshold of 350 UU uniquely resolves the pad. The actor ID mapping is cached for the actor's lifetime.
+In conversion.rs, when options.sync_boost_pad_pickups is enabled (default true):
+1. **Pad index mapping:** On an instigator event, the car's xy position is matched to the nearest RocketSim pad within 350 UU, provided the next nearest candidate is at least 100 UU farther away. Positions older than 0.1s are not used. The mapping is cached for that pad actor.
 2. **Cooldown synchronization:**
-   - On pickup (picked_up % 2 == 1): Sets RocketSim rena.set_boost_pad_state(idx, BoostPadState { cooldown }), with 10.0s for big pads and 4.0s for small pads.
-   - On respawn (picked_up == 255): Resets cooldown = 0.0.
-3. **No future data leakage:** In evaluate_corpus.rs, rame.pad_pickups is explicitly cleared during masked evaluation windows, so pad events are only known when observed before the withheld gap.
+   - On `picked_up == 255`: Resets cooldown to zero. This case is checked first because 255 is odd.
+   - On any other odd pickup counter: Sets RocketSim cooldown to 10.0s for big pads or 4.0s for small pads.
+3. **No future data leakage:** In evaluate_corpus.rs, frame.pad_pickups is explicitly cleared during masked evaluation windows, so pad events are only known when observed before the withheld gap.
 
 ### Evaluation metrics and ablation results
 
-All 60 train and 60 validation replays converted with zero failures.
+After fixing the 255 sentinel order and tightening spatial mapping, the default and `--no-sync-pads` pipelines each converted all 60 validation replays without failures. The same four-frame mask was used in both runs.
 
 #### Masked boost error on validation: sync pads vs no sync pads
 
 | Horizon | Samples | Pad sync sim p50 / p90 / p99 | No pad sync sim p50 / p90 / p99 | Hold baseline p50 / p90 / p99 |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 251 | **0.621** / 12.892 / 100.000 | 0.719 / 12.654 / 100.000 | 6.667 / 32.549 / 100.000 |
-| 2 | 211 | **0.474** / 12.239 / 100.000 | 0.490 / 12.212 / 100.000 | 8.235 / 20.392 / 100.000 |
-| 3 | 253 | **0.621** / 12.680 / 100.000 | 0.850 / 12.490 / 100.000 | 9.020 / 28.627 / 100.000 |
-| 4 | 197 | **0.392** / 12.157 / 100.000 | 0.458 / 12.212 / 100.000 | 7.451 / 15.686 / 100.000 |
+| 1 | 251 | **0.556** / 12.810 / 100.000 | 0.719 / **12.654** / 100.000 | 6.667 / 32.549 / 100.000 |
+| 2 | 211 | **0.392** / **12.157** / 100.000 | 0.490 / 12.212 / 100.000 | 8.235 / 20.392 / 100.000 |
+| 3 | 253 | **0.588** / **12.190** / 100.000 | 0.850 / 12.490 / 100.000 | 9.020 / 28.627 / 100.000 |
+| 4 | 197 | **0.327** / **12.157** / 100.000 | 0.458 / 12.212 / 100.000 | 7.451 / 15.686 / 100.000 |
 
 Across all horizons, pad synchronization improves median simulated boost error on validation:
-- Horizon 1: 0.719 -> 0.621 boost units (vs hold 6.667, **>10x improvement over hold**).
-- Horizon 2: 0.490 -> 0.474 boost units (vs hold 8.235, **>17x improvement over hold**).
-- Horizon 3: 0.850 -> 0.621 boost units (vs hold 9.020, **>14x improvement over hold**).
-- Horizon 4: 0.458 -> 0.392 boost units (vs hold 7.451, **>19x improvement over hold**).
+- Horizon 1: 0.719 -> 0.556 boost units; p90 slightly worsens (12.654 -> 12.810).
+- Horizon 2: 0.490 -> 0.392 boost units.
+- Horizon 3: 0.850 -> 0.588 boost units.
+- Horizon 4: 0.458 -> 0.327 boost units.
 
 Car position errors generalize consistently without regression:
 - Train all car position p50 / p90 / p99: 16.96 / 41.99 / 68.01 UU.
-- Validation all car position p50 / p90 / p99: 16.39 / 41.09 / 69.61 UU.
+- Validation all car position p50 / p90 / p99: 16.39 / 41.09 / 69.56 UU.
 
 Enabled by default with --sync-pads and ablatable with --no-sync-pads.
 
@@ -278,7 +315,7 @@ Enabled by default (`infer_air_steer_controls = true`) with `--infer-air-steer` 
 
 Rocket League replays replicate horizontal stick input (`ReplicatedSteer`) continuously, but completely omit vertical stick input (pitch) and directional air roll. Consequently, prior baseline conversions left simulated pitch and roll at `0.0` for 100% of frames. In mid-air, RocketSim applies heavy aerodynamic damping (`air_control::DAMPING`), bringing rotational angular velocities to zero unless counteracted by player controls.
 
-Using the exact RocketSim air torque equations from `rocketsim/src/sim/car/base.rs` (lines 312–430) and the user-provided analytical formulation in `external/inverse_aerial_controls.py` (Mish/ZealanL `AirSolver`), we derived an analytical inverse solver for 3D aerial controls:
+Using RocketSim's air torque and damping equations from `rocketsim/src/sim/car/base.rs` and the local analytical formulation in `external/inverse_aerial_controls.py`, we estimate model-equivalent 3D aerial controls. These estimates use the next replay frame; they are not observed player inputs and are intended for offline conversion.
 
 $$\text{dir\_pitch} = -\text{right\_dir}, \quad \text{dir\_yaw} = \text{up\_dir}, \quad \text{dir\_roll} = -\text{forward\_dir}$$
 
@@ -293,32 +330,79 @@ $$u_i = \text{clamp}\left(\frac{\text{RHS}_i}{T_i + \text{sign}(\text{RHS}_i) \c
 
 ### Corpus calibration on train (`src/bin/calibrate_inverse_air.rs`)
 
-We evaluated the inverse solver across 53,565 consecutive airborne frame pairs ($z > 100$ UU, $\Delta t \le 0.05$s) across all 60 training replays:
-- **Active recovered pitch ($|p| > 0.1$):** **36,423 frames (68.0%)** (previously simulated pitch was 0.0 on 100% of frames).
-- **Active recovered yaw ($|y| > 0.1$):** **38,336 frames (71.6%)**.
-- **Active recovered roll ($|r| > 0.1$):** **33,483 frames (62.5%)**.
-- **Yaw vs. ReplicatedSteer sign match:** **25,957 / 30,265 (85.8%)** directional consistency when both signals are active, confirming that the inverted controls align with actual physical controller stick movements.
+The original calibration tool estimated nonzero pitch on 36,423 of 53,565 airborne frame pairs (68.0%), yaw on 38,336 (71.6%), and roll on 33,483 (62.5%). Of 30,265 pairs with an active steer signal, estimated yaw had the same sign in 25,957 (85.8%). This is a consistency check, not independent controller ground truth. The calibration tool does not yet apply all continuity guards used by conversion.
 
 ### Unmasked physical fidelity (`src/bin/measure_air_fidelity.rs`)
 
-Because `evaluate_corpus`'s 1-step position error snaps orientation at every frame and masked evaluation withholds future frames, we developed `src/bin/measure_air_fidelity.rs` to measure the physical fidelity of pre-correction predictions between adjacent unmasked frames in active play:
+`measure_air_fidelity` now samples all 60 replays per split, matches each primary replay car to its RocketSim slot, requires the same car lifetime and fresh airborne endpoints, and uses an isolated one-car simulation from each starting packet. This directly tests one-step control inversion with the future endpoint available. It does not include full match collisions or test causal prediction.
 
 | Dataset | Metric | Without Lookahead (Baseline) | With Lookahead (`infer_air_controls_from_lookahead`) | Improvement |
 | --- | --- | ---: | ---: | ---: |
-| **Train** | Angular Velocity p50 (rad/s) | 0.740 | **0.324** | **-56.2% error** |
-| Train | Angular Velocity p90 (rad/s) | 1.905 | **1.657** | **-13.0% error** |
-| Train | Rotation Angle p50 (deg) | 3.073 | 3.230 | Flat |
-| Train | Rotation Angle p90 (deg) | 9.249 | **9.186** | Improved |
-| **Validation** | Angular Velocity p50 (rad/s) | 0.741 | **0.434** | **-41.4% error** |
-| Validation | Angular Velocity p90 (rad/s) | 1.948 | **1.745** | **-10.4% error** |
-| Validation | Rotation Angle p50 (deg) | 3.004 | 3.087 | Flat |
-| Validation | Rotation Angle p90 (deg) | 9.277 | **9.225** | Improved |
+| **Train (52,864 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.529 / 1.342 | **0.026 / 0.857** | Lower angular error |
+| Train | Rotation p50 / p90 (deg) | **2.769 / 7.062** | 3.064 / 7.684 | Higher rotation error |
+| **Validation (55,321 pairs)** | Angular velocity p50 / p90 (rad/s) | 0.479 / 1.316 | **0.030 / 0.878** | Lower angular error |
+| Validation | Rotation p50 / p90 (deg) | **2.758 / 7.226** | 3.038 / 7.788 | Higher rotation error |
 
 ### Masked evaluation and leakage prevention
 
 In `evaluate_corpus.rs`, future data leakage is strictly prevented:
-- When a future frame is inside a masked evaluation interval, its rigid-body angular velocity is withheld (`angular_velocity_replay_units = None`).
-- The lookahead logic detects the absent update and safely bypasses lookahead inversion, cleanly falling back to causal air steering (`controls.yaw = controls.steer`).
-- Consequently, all masked position and boost error metrics across all 60 train and 60 validation replays remain identical to the baseline, confirming zero leakage across evaluation boundaries.
+- Within a masked interval, `masked_observations` carries forward the prior rigid-body value and its original frame provenance. The lookahead solver requires a fresh next-frame packet, so it falls back to inferred aerial steering at that boundary.
+- The converter also requires active play at both endpoints, the same car actor lifetime and owner, fresh positions above 100 UU, and no fresh next-frame dodge activation. These guards reduced unmasked angular fidelity in some cases but avoid inferring air controls from a contact, respawn, or play-state transition.
+- A 60-replay validation ablation against `--no-infer-air-lookahead` produced identical masked car-position counts and p50/p90/p99 at horizons 1–4. Unmasked one-step car angular velocity p50 improved from 0.3985 to 0.3664 rad/s with lookahead; p90 improved from 2.5413 to 2.5277. Unmasked car-position quantiles changed by at most 0.001 UU. This establishes equality for the current four-frame mask, not for every possible masking protocol.
 
 Enabled by default (`infer_air_controls_from_lookahead = true`), and ablatable via `--no-infer-air-lookahead` and `--infer-air-lookahead`.
+
+
+## One-step pre-correction kinematic residuals
+
+### Methodology and scope
+
+The primary unmasked conversion pipeline (`convert_observations` / `convert_bytes`) steps RocketSim forward tick-by-tick between network observations. At each frame $F$ where a fresh rigid-body packet arrives (`actual.frame == F`), the simulation state immediately prior to applying the observation's rigid-body correction represents RocketSim's uncorrected 1-step prediction.
+
+`src/conversion.rs` now records pre-correction kinematic residuals on `PositionResidual` for every fresh update in active play ($dt \le 0.5$s, primary linked cars for vehicles):
+1. **Linear velocity error (UU/s):** Euclidean distance between pre-correction simulated velocity and fresh replay velocity, compared against a hold-last-observed-velocity baseline.
+2. **Rotation error (degrees):** Geodesic angular distance $\theta = \arccos((\text{Tr}(R_{\text{sim}}^T R_{\text{replay}}) - 1) / 2)$ between pre-correction simulated orientation matrix and replay orientation matrix, invariant to quaternion sign ambiguities ($q \equiv -q$).
+3. **Angular velocity error (rad/s):** Euclidean distance between pre-correction simulated angular velocity and replay angular velocity (scaled by 0.01 to convert from replay units to rad/s).
+4. **Altitude stratification:** Cars are categorized by altitude: `ground` ($z < 50$ UU), `air` ($z > 100$ UU), and `transition` ($50 \le z \le 100$ UU).
+
+`src/bin/evaluate_corpus.rs` pools and reports these quantiles across the entire corpus. All 60 train and 60 validation replays converted with zero failures.
+
+The reviewed reports are `target/train-reviewed.json` and `target/validation-reviewed.json`, with validation ablations in `target/validation-reviewed-no-pads.json` and `target/validation-reviewed-no-lookahead.json`. These ignored files can be regenerated with the corresponding `evaluate_corpus` flags. The table reflects the final guarded converter and field-specific freshness limits.
+
+### Aggregate 1-step kinematics: Train vs Validation
+
+| Split | Body | Kinematic Field | Samples | RocketSim p50 / p90 / p99 | Hold Baseline p50 / p90 / p99 | Error Reduction (p50) |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| **train** | ball | Linear velocity (UU/s) | 504,518 | **5.39** / 15.52 / 1,237.34 | 21.66 / 37.39 / 2,321.68 | **-75.1%** |
+| train | ball | Rotation (degrees) | 504,522 | **2.78** / 5.73 / 11.39 | 10.87 / 17.19 / 22.92 | **-74.4%** |
+| train | ball | Angular velocity (rad/s) | 504,518 | 0.00 / 0.00 / 4.33 | 0.00 / 0.00 / 6.43 | Neutral |
+| train | car | Linear velocity (UU/s) | 998,544 | **22.03** / 108.04 / 578.43 | 82.26 / 329.00 / 820.30 | **-73.2%** |
+| train | car | Rotation (degrees) | 998,832 | **1.88** / 8.86 / 22.06 | 8.03 / 28.34 / 39.47 | **-76.5%** |
+| train | car | Angular velocity (rad/s) | 998,544 | **0.372** / 2.552 / 5.782 | 0.514 / 2.086 / 5.556 | **-27.7%** |
+| **validation** | ball | Linear velocity (UU/s) | 543,265 | **5.39** / 15.22 / 1,240.70 | 21.58 / 36.95 / 2,325.30 | **-75.0%** |
+| validation | ball | Rotation (degrees) | 543,266 | **2.82** / 5.73 / 10.91 | 10.13 / 17.19 / 22.92 | **-72.2%** |
+| validation | ball | Angular velocity (rad/s) | 543,265 | 0.00 / 0.00 / 4.38 | 0.00 / 0.00 / 6.46 | Neutral |
+| validation | car | Linear velocity (UU/s) | 1,056,312 | **21.63** / 107.82 / 571.12 | 81.61 / 326.69 / 810.86 | **-73.5%** |
+| validation | car | Rotation (degrees) | 1,056,577 | **1.85** / 8.75 / 21.95 | 7.92 / 28.10 / 39.12 | **-76.6%** |
+| validation | car | Angular velocity (rad/s) | 1,056,312 | **0.366** / 2.530 / 5.780 | 0.506 / 2.073 / 5.548 | **-27.6%** |
+
+### 1-step car angular velocity error by altitude
+
+| Split | Altitude Region | Samples | RocketSim p50 / p90 / p99 (rad/s) | Hold Baseline p50 / p90 / p99 (rad/s) |
+| --- | --- | ---: | ---: | ---: |
+| **train** | Ground ($z < 50$ UU) | 557,448 | **0.152** / 1.121 / 2.657 | 0.330 / 1.651 / 5.245 |
+| train | Transition ($50 \le z \le 100$ UU) | 142,390 | 2.013 / 4.616 / 6.638 | **0.688** / 2.789 / 5.679 |
+| train | Air ($z > 100$ UU) | 298,706 | 0.891 / 2.994 / 6.560 | **0.826** / 2.449 / 6.099 |
+| **validation** | Ground ($z < 50$ UU) | 593,612 | **0.150** / 1.127 / 2.673 | 0.324 / 1.642 / 5.235 |
+| validation | Transition ($50 \le z \le 100$ UU) | 148,464 | 1.999 / 4.661 / 6.785 | **0.671** / 2.804 / 5.650 |
+| validation | Air ($z > 100$ UU) | 314,236 | 0.887 / 2.979 / 6.495 | **0.825** / 2.444 / 6.074 |
+
+### Key takeaways and diagnostics
+
+1. **Substantial kinematic prediction gains over hold:**
+   - On over 1 million car frame updates, RocketSim reduces median orientation error from ~8.0 degrees to **1.85 degrees (-76.6% error)** and linear velocity error from ~82 UU/s to **21.6 UU/s (-73.5% error)**.
+   - For the ball, linear velocity error is reduced by **75%** (5.39 vs 21.58 UU/s) and rotation error by **72%** (2.82 vs 10.12 deg).
+2. **Ground vs airborne dynamics:**
+   - On the ground (over 55% of car updates), physical wheel contact and steering simulation reduce angular velocity error by more than half (**0.150 vs 0.324 rad/s** on validation).
+   - In airborne flight, holding the prior angular velocity slightly outperforms the converter's full-match forward simulation (0.825 vs 0.887 rad/s on validation). This differs from the isolated one-car inversion diagnostic above, which uses the future endpoint directly.
+   - In transition zones ($50 \le z \le 100$ UU), contact and takeoff impulses create the largest instantaneous angular discrepancies (2.00 vs 0.67 rad/s on validation).

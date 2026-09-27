@@ -6,10 +6,9 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use glam::Quat;
 use replay_to_rocketsim::conversion::{
     CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
-    convert_observations,
+    convert_observations, quaternion, rotation_error_degrees,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
 use rocketsim::{ArenaEvent, Mat3A, PhysState};
@@ -190,6 +189,32 @@ struct KinematicsByBody {
 }
 
 impl KinematicsByBody {
+    fn add_residual(&mut self, residual: &PositionResidual) {
+        let samples = if residual.actor_id.is_none() {
+            &mut self.ball
+        } else {
+            &mut self.car
+        };
+        if let (Some(sim), Some(hold)) = (
+            residual.simulated_velocity_error_uu_per_sec,
+            residual.hold_velocity_error_uu_per_sec,
+        ) {
+            samples.linear_velocity_uu_per_second.add(sim, hold);
+        }
+        if let (Some(sim), Some(hold)) = (
+            residual.simulated_rotation_error_degrees,
+            residual.hold_rotation_error_degrees,
+        ) {
+            samples.rotation_degrees.add(sim, hold);
+        }
+        if let (Some(sim), Some(hold)) = (
+            residual.simulated_angular_velocity_error_rad_per_sec,
+            residual.hold_angular_velocity_error_rad_per_sec,
+        ) {
+            samples.angular_velocity_radians_per_second.add(sim, hold);
+        }
+    }
+
     fn extend(&mut self, other: &Self) {
         self.ball.extend(&other.ball);
         self.car.extend(&other.car);
@@ -222,6 +247,7 @@ struct ReplayReport {
     default_hitbox_players: usize,
     car_slots: Vec<CarSlot>,
     position_uu: BodySummary,
+    kinematics: KinematicsByBodySummary,
 }
 
 #[derive(Serialize)]
@@ -244,6 +270,9 @@ struct Report {
     failures: Vec<Failure>,
     by_game_size: BTreeMap<String, BodySummary>,
     all: BodySummary,
+    one_step_kinematics_by_game_size: BTreeMap<String, KinematicsByBodySummary>,
+    one_step_kinematics_all: KinematicsByBodySummary,
+    one_step_car_angular_by_altitude: BTreeMap<String, FieldSummary>,
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
@@ -383,16 +412,6 @@ fn valid_masked_interval(
     active(index) && active(previous_frame) && dt.is_finite() && dt > 0.0 && dt <= 0.5
 }
 
-fn quaternion(xyzw: [f32; 4]) -> Option<Quat> {
-    let q = Quat::from_xyzw(xyzw[0], xyzw[1], xyzw[2], xyzw[3]);
-    (q.is_finite() && q.length_squared() > 1e-8).then(|| q.normalize())
-}
-
-fn rotation_error_degrees(a: Mat3A, b: Mat3A) -> f32 {
-    let trace = a.x_axis.dot(b.x_axis) + a.y_axis.dot(b.y_axis) + a.z_axis.dot(b.z_axis);
-    ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
-}
-
 fn add_masked_kinematics(
     samples: &mut KinematicSamples,
     actual: &Body,
@@ -447,7 +466,6 @@ impl MaskSchedule {
     fn horizon(self, index: usize) -> Option<usize> {
         let offset = index % 100;
         let start = if let Some(seed) = self.seed {
-            // SplitMix64 gives a stable independent offset for each replay and block.
             let mut value = seed ^ self.replay_hash ^ (index / 100) as u64;
             value = value.wrapping_add(0x9e3779b97f4a7c15);
             value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -517,6 +535,14 @@ fn add_masked_error(
         simulated_error_uu: distance(predicted, position.value),
         hold_error_uu: distance(previous.value, position.value),
         linear_extrapolation_error_uu: linear,
+        simulated_velocity_error_uu_per_sec: None,
+        hold_velocity_error_uu_per_sec: None,
+        simulated_rotation_error_degrees: None,
+        hold_rotation_error_degrees: None,
+        simulated_angular_velocity_error_rad_per_sec: None,
+        hold_angular_velocity_error_rad_per_sec: None,
+        altitude_z: Some(position.value[2]),
+        is_on_ground: None,
     });
 }
 
@@ -718,6 +744,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let replay_paths = paths(&root)?;
     let mut groups: BTreeMap<String, ByBody> = BTreeMap::new();
     let mut all = ByBody::default();
+    let mut one_step_kinematics_groups: BTreeMap<String, KinematicsByBody> = BTreeMap::new();
+    let mut one_step_kinematics_all = KinematicsByBody::default();
+    let mut one_step_car_angular_by_altitude: BTreeMap<String, FieldSamples> = BTreeMap::new();
     let mut report = Report {
         schema_version: 1,
         split_directory: root.display().to_string(),
@@ -731,6 +760,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         failures: Vec::new(),
         by_game_size: BTreeMap::new(),
         all: all.summary(),
+        one_step_kinematics_by_game_size: BTreeMap::new(),
+        one_step_kinematics_all: one_step_kinematics_all.summary(),
+        one_step_car_angular_by_altitude: BTreeMap::new(),
         masked_position_uu_by_horizon_frames: BTreeMap::new(),
         masked_by_game_size: BTreeMap::new(),
         masked_kinematics_by_horizon_frames: BTreeMap::new(),
@@ -755,10 +787,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             Ok(conversion) => {
                 let mut own = ByBody::default();
+                let mut own_kinematics = KinematicsByBody::default();
                 for residual in &conversion.position_residuals {
                     own.add(residual);
+                    own_kinematics.add_residual(residual);
                     groups.entry(size.clone()).or_default().add(residual);
+                    one_step_kinematics_groups
+                        .entry(size.clone())
+                        .or_default()
+                        .add_residual(residual);
                     all.add(residual);
+                    one_step_kinematics_all.add_residual(residual);
+
+                    if residual.actor_id.is_some() {
+                        if let (Some(alt), Some(sim_ang), Some(hold_ang)) = (
+                            residual.altitude_z,
+                            residual.simulated_angular_velocity_error_rad_per_sec,
+                            residual.hold_angular_velocity_error_rad_per_sec,
+                        ) {
+                            let altitude = if alt < 50.0 {
+                                "ground"
+                            } else if alt > 100.0 {
+                                "air"
+                            } else {
+                                "transition"
+                            };
+                            one_step_car_angular_by_altitude
+                                .entry(altitude.to_owned())
+                                .or_default()
+                                .add(sim_ang, hold_ang);
+                        }
+                    }
+
                     let regret = residual
                         .linear_extrapolation_error_uu
                         .map(|linear| residual.simulated_error_uu - linear);
@@ -795,7 +855,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match convert_observations(masked, &options) {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
-                        let mut own_kinematics = BTreeMap::new();
+                        let mut own_masked_kinematics = BTreeMap::new();
                         let mut own_boost = BTreeMap::new();
                         let mut own_angular_by_altitude = BTreeMap::new();
                         masked_metrics(
@@ -803,7 +863,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &masked_conversion,
                             schedule,
                             &mut own_masked,
-                            &mut own_kinematics,
+                            &mut own_masked_kinematics,
                             &mut own_boost,
                             &mut own_angular_by_altitude,
                         );
@@ -825,7 +885,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .or_default()
                                 .extend(&samples);
                         }
-                        for (horizon, samples) in own_kinematics {
+                        for (horizon, samples) in own_masked_kinematics {
                             kinematics_by_horizon
                                 .entry(horizon)
                                 .or_default()
@@ -869,6 +929,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     default_hitbox_players: conversion.diagnostics.default_hitbox_players,
                     car_slots: conversion.car_slots.clone(),
                     position_uu: own.summary(),
+                    kinematics: own_kinematics.summary(),
                 });
             }
             Err(error) => report.failures.push(Failure {
@@ -883,6 +944,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|(size, samples)| (size, samples.summary()))
         .collect();
     report.all = all.summary();
+    report.one_step_kinematics_by_game_size = one_step_kinematics_groups
+        .into_iter()
+        .map(|(size, samples)| (size, samples.summary()))
+        .collect();
+    report.one_step_kinematics_all = one_step_kinematics_all.summary();
+    report.one_step_car_angular_by_altitude = one_step_car_angular_by_altitude
+        .into_iter()
+        .map(|(alt, samples)| (alt, samples.summary()))
+        .collect();
     report.masked_position_uu_by_horizon_frames = masked_by_horizon
         .into_iter()
         .map(|(horizon, samples)| (horizon, samples.summary()))
@@ -942,12 +1012,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         report.failures.len(),
         output_path.display()
     );
+    if let (Some(sim_ang), Some(hold_ang)) = (
+        report
+            .one_step_kinematics_all
+            .car
+            .angular_velocity_radians_per_second
+            .simulated
+            .p50,
+        report
+            .one_step_kinematics_all
+            .car
+            .angular_velocity_radians_per_second
+            .hold
+            .p50,
+    ) {
+        println!("1-step car ang_vel rad/s: sim p50={sim_ang:.4}, hold p50={hold_ang:.4}");
+    }
+    if let (Some(sim_rot), Some(hold_rot)) = (
+        report
+            .one_step_kinematics_all
+            .car
+            .rotation_degrees
+            .simulated
+            .p50,
+        report.one_step_kinematics_all.car.rotation_degrees.hold.p50,
+    ) {
+        println!("1-step car rotation deg: sim p50={sim_rot:.2}, hold p50={hold_rot:.2}");
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Quat;
 
     #[test]
     fn rotation_error_handles_quaternion_sign_and_ninety_degree_turn() {
