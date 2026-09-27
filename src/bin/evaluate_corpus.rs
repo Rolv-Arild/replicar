@@ -248,6 +248,8 @@ struct Report {
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
     masked_kinematics_by_game_size: BTreeMap<String, BTreeMap<usize, KinematicsByBodySummary>>,
+    masked_boost_by_horizon_frames: BTreeMap<usize, FieldSummary>,
+    masked_boost_by_game_size: BTreeMap<String, BTreeMap<usize, FieldSummary>>,
     masked_car_angular_by_altitude: BTreeMap<String, FieldSummary>,
     worst_car_regret_uu: Vec<OutlierRecord>,
 }
@@ -479,6 +481,8 @@ fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> Obs
                 .find(|prior| prior.actor_id == car.actor_id)
             {
                 car.body = prior.body.clone();
+                car.boost = prior.boost.clone();
+                car.boost_raw = prior.boost_raw.clone();
             }
         }
     }
@@ -521,6 +525,7 @@ fn masked_metrics(
     schedule: MaskSchedule,
     result: &mut BTreeMap<usize, ByBody>,
     kinematics: &mut BTreeMap<usize, KinematicsByBody>,
+    boost: &mut BTreeMap<usize, FieldSamples>,
     car_angular_by_altitude: &mut BTreeMap<String, FieldSamples>,
 ) {
     let slots: BTreeMap<_, _> = conversion
@@ -537,6 +542,7 @@ fn masked_metrics(
         let state = &conversion.frames[index].state;
         let by_body = result.entry(horizon).or_default();
         let by_kinematics = kinematics.entry(horizon).or_default();
+        let by_boost = boost.entry(horizon).or_default();
         if let (Some(actual), Some(stale)) = (&original_frame.ball, &masked_frame.ball) {
             add_masked_error(
                 &mut by_body.ball,
@@ -585,6 +591,16 @@ fn masked_metrics(
                 &predicted.phys,
                 &original.frames,
             );
+            if let (Some(actual), Some(previous)) = (&car.boost, &stale.boost) {
+                if actual.frame == index
+                    && valid_masked_interval(index, previous.frame, &original.frames)
+                {
+                    by_boost.add(
+                        (predicted.boost - actual.value).abs(),
+                        (previous.value - actual.value).abs(),
+                    );
+                }
+            }
             if let (Some(position), Some(actual), Some(previous)) = (
                 &car.body.position,
                 &car.body.angular_velocity_replay_units,
@@ -684,7 +700,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         schema_version: 1,
         split_directory: root.display().to_string(),
         metric: "pre-correction position error (UU) on fresh replay positions after an active simulation interval; quantiles pool samples within each group",
-        masked_metric: "every 100-frame block masks four consecutive ball/car body frames; default start offset 1 or replay-hash/seed-derived offset when mask_seed is set; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
+        masked_metric: "every 100-frame block masks four consecutive ball/car body and car boost frames; default start offset 1 or replay-hash/seed-derived offset when mask_seed is set; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
         mask_seed,
         boxcars_version: "0.11.5",
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
@@ -697,6 +713,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         masked_by_game_size: BTreeMap::new(),
         masked_kinematics_by_horizon_frames: BTreeMap::new(),
         masked_kinematics_by_game_size: BTreeMap::new(),
+        masked_boost_by_horizon_frames: BTreeMap::new(),
+        masked_boost_by_game_size: BTreeMap::new(),
         masked_car_angular_by_altitude: BTreeMap::new(),
         worst_car_regret_uu: Vec::new(),
     };
@@ -705,6 +723,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut kinematics_by_horizon: BTreeMap<usize, KinematicsByBody> = BTreeMap::new();
     let mut kinematics_by_size: BTreeMap<String, BTreeMap<usize, KinematicsByBody>> =
         BTreeMap::new();
+    let mut boost_by_horizon: BTreeMap<usize, FieldSamples> = BTreeMap::new();
+    let mut boost_by_size: BTreeMap<String, BTreeMap<usize, FieldSamples>> = BTreeMap::new();
     let mut car_angular_by_altitude: BTreeMap<String, FieldSamples> = BTreeMap::new();
     for (index, (size, path)) in replay_paths.iter().enumerate() {
         match fs::read(path)
@@ -754,6 +774,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
                         let mut own_kinematics = BTreeMap::new();
+                        let mut own_boost = BTreeMap::new();
                         let mut own_angular_by_altitude = BTreeMap::new();
                         masked_metrics(
                             &conversion.observations,
@@ -761,6 +782,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             schedule,
                             &mut own_masked,
                             &mut own_kinematics,
+                            &mut own_boost,
                             &mut own_angular_by_altitude,
                         );
                         for (altitude, samples) in own_angular_by_altitude {
@@ -787,6 +809,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .or_default()
                                 .extend(&samples);
                             kinematics_by_size
+                                .entry(size.clone())
+                                .or_default()
+                                .entry(horizon)
+                                .or_default()
+                                .extend(&samples);
+                        }
+                        for (horizon, samples) in own_boost {
+                            boost_by_horizon
+                                .entry(horizon)
+                                .or_default()
+                                .extend(&samples);
+                            boost_by_size
                                 .entry(size.clone())
                                 .or_default()
                                 .entry(horizon)
@@ -859,6 +893,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         })
         .collect();
+    report.masked_boost_by_horizon_frames = boost_by_horizon
+        .into_iter()
+        .map(|(horizon, samples)| (horizon, samples.summary()))
+        .collect();
+    report.masked_boost_by_game_size = boost_by_size
+        .into_iter()
+        .map(|(size, by_horizon)| {
+            (
+                size,
+                by_horizon
+                    .into_iter()
+                    .map(|(horizon, samples)| (horizon, samples.summary()))
+                    .collect(),
+            )
+        })
+        .collect();
     report.masked_car_angular_by_altitude = car_angular_by_altitude
         .into_iter()
         .map(|(altitude, samples)| (altitude, samples.summary()))
@@ -870,8 +920,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         report.failures.len(),
         output_path.display()
     );
-    Ok(())
-}
+    Ok(())}
 
 #[cfg(test)]
 mod tests {
@@ -907,5 +956,121 @@ mod tests {
                 assert!(selected[3].0 % 100 <= 98);
             }
         }
+    }
+
+    #[test]
+    fn masked_observations_withhold_car_boost_while_preserving_activation() {
+        use replay_to_rocketsim::observations::{
+            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
+        };
+
+        let schedule = MaskSchedule {
+            seed: None,
+            replay_hash: 0,
+        };
+        let frames = (0..6)
+            .map(|index| Frame {
+                index,
+                time: index as f32 * 0.033,
+                delta: 0.033,
+                ball: None,
+                cars: vec![Car {
+                    actor_id: 1,
+                    actor_created_frame: 0,
+                    player_key: Some("player1".to_string()),
+                    player_link_active: true,
+                    team: Some(0),
+                    body_product_id: None,
+                    body: replay_to_rocketsim::observations::Body::default(),
+                    boost: Some(Value {
+                        value: 50.0 + index as f32,
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    boost_raw: Some(Value {
+                        value: (100 + index) as u8,
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    inputs: Inputs {
+                        boost_active_raw: Some(Value {
+                            value: (index % 2) as u8,
+                            frame: index,
+                            source: Source::Replay,
+                        }),
+                        ..Inputs::default()
+                    },
+                }],
+                players: Vec::new(),
+                team_scores: [None, None],
+                seconds_remaining: None,
+                overtime: None,
+                game_state: Some(Value {
+                    value: "Active".to_string(),
+                    frame: index,
+                    source: Source::Replay,
+                }),
+                events: Vec::new(),
+            })
+            .collect();
+        let original = ObservedReplay {
+            header: Header {
+                game_type: "Soccar".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let masked = masked_observations(&original, schedule);
+
+        assert_eq!(masked.frames[0].cars[0].boost.as_ref().unwrap().frame, 0);
+        assert_eq!(masked.frames[0].cars[0].boost.as_ref().unwrap().value, 50.0);
+        assert_eq!(
+            masked.frames[0].cars[0]
+                .inputs
+                .boost_active_raw
+                .as_ref()
+                .unwrap()
+                .frame,
+            0
+        );
+
+        for h in 1..=4 {
+            let car = &masked.frames[h].cars[0];
+            assert_eq!(
+                car.boost.as_ref().unwrap().frame,
+                0,
+                "horizon {h} boost frame should be 0"
+            );
+            assert_eq!(
+                car.boost.as_ref().unwrap().value,
+                50.0,
+                "horizon {h} boost value should be 50.0"
+            );
+            assert_eq!(car.boost_raw.as_ref().unwrap().frame, 0);
+            assert_eq!(car.boost_raw.as_ref().unwrap().value, 100);
+            assert_eq!(
+                car.inputs.boost_active_raw.as_ref().unwrap().frame,
+                h,
+                "horizon {h} activation frame"
+            );
+            assert_eq!(
+                car.inputs.boost_active_raw.as_ref().unwrap().value,
+                (h % 2) as u8
+            );
+        }
+
+        assert_eq!(masked.frames[5].cars[0].boost.as_ref().unwrap().frame, 5);
+        assert_eq!(masked.frames[5].cars[0].boost.as_ref().unwrap().value, 55.0);
+        assert_eq!(
+            masked.frames[5].cars[0]
+                .inputs
+                .boost_active_raw
+                .as_ref()
+                .unwrap()
+                .frame,
+            5
+        );
     }
 }
