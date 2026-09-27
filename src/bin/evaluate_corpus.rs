@@ -6,11 +6,12 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use glam::Quat;
 use replay_to_rocketsim::conversion::{
     ConversionOutput, ConvertOptions, PositionResidual, convert_bytes, convert_observations,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
-use rocketsim::ArenaEvent;
+use rocketsim::{ArenaEvent, Mat3A, PhysState};
 use serde::Serialize;
 
 #[derive(Default)]
@@ -116,6 +117,97 @@ struct BodySummary {
     car: ErrorSummary,
 }
 
+#[derive(Default)]
+struct FieldSamples {
+    simulated: Vec<f32>,
+    hold: Vec<f32>,
+}
+
+impl FieldSamples {
+    fn add(&mut self, simulated: f32, hold: f32) {
+        if simulated.is_finite() && hold.is_finite() {
+            self.simulated.push(simulated);
+            self.hold.push(hold);
+        }
+    }
+
+    fn extend(&mut self, other: &Self) {
+        self.simulated.extend_from_slice(&other.simulated);
+        self.hold.extend_from_slice(&other.hold);
+    }
+
+    fn summary(&self) -> FieldSummary {
+        FieldSummary {
+            simulated: quantiles(&self.simulated),
+            hold: quantiles(&self.hold),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct FieldSummary {
+    simulated: Quantiles,
+    hold: Quantiles,
+}
+
+#[derive(Default)]
+struct KinematicSamples {
+    linear_velocity_uu_per_second: FieldSamples,
+    rotation_degrees: FieldSamples,
+    angular_velocity_radians_per_second: FieldSamples,
+}
+
+impl KinematicSamples {
+    fn extend(&mut self, other: &Self) {
+        self.linear_velocity_uu_per_second
+            .extend(&other.linear_velocity_uu_per_second);
+        self.rotation_degrees.extend(&other.rotation_degrees);
+        self.angular_velocity_radians_per_second
+            .extend(&other.angular_velocity_radians_per_second);
+    }
+
+    fn summary(&self) -> KinematicSummary {
+        KinematicSummary {
+            linear_velocity_uu_per_second: self.linear_velocity_uu_per_second.summary(),
+            rotation_degrees: self.rotation_degrees.summary(),
+            angular_velocity_radians_per_second: self.angular_velocity_radians_per_second.summary(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct KinematicSummary {
+    linear_velocity_uu_per_second: FieldSummary,
+    rotation_degrees: FieldSummary,
+    angular_velocity_radians_per_second: FieldSummary,
+}
+
+#[derive(Default)]
+struct KinematicsByBody {
+    ball: KinematicSamples,
+    car: KinematicSamples,
+}
+
+impl KinematicsByBody {
+    fn extend(&mut self, other: &Self) {
+        self.ball.extend(&other.ball);
+        self.car.extend(&other.car);
+    }
+
+    fn summary(&self) -> KinematicsByBodySummary {
+        KinematicsByBodySummary {
+            ball: self.ball.summary(),
+            car: self.car.summary(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct KinematicsByBodySummary {
+    ball: KinematicSummary,
+    car: KinematicSummary,
+}
+
 #[derive(Serialize)]
 struct ReplayReport {
     path: String,
@@ -150,6 +242,8 @@ struct Report {
     all: BodySummary,
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
+    masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
+    masked_kinematics_by_game_size: BTreeMap<String, BTreeMap<usize, KinematicsByBodySummary>>,
     worst_car_regret_uu: Vec<OutlierRecord>,
 }
 
@@ -264,6 +358,78 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+fn valid_masked_interval(
+    index: usize,
+    previous_frame: usize,
+    frames: &[replay_to_rocketsim::observations::Frame],
+) -> bool {
+    if previous_frame >= index {
+        return false;
+    }
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let dt = frames[index].time - frames[previous_frame].time;
+    active(index) && active(previous_frame) && dt.is_finite() && dt > 0.0 && dt <= 0.5
+}
+
+fn quaternion(xyzw: [f32; 4]) -> Option<Quat> {
+    let q = Quat::from_xyzw(xyzw[0], xyzw[1], xyzw[2], xyzw[3]);
+    (q.is_finite() && q.length_squared() > 1e-8).then(|| q.normalize())
+}
+
+fn rotation_error_degrees(a: Mat3A, b: Mat3A) -> f32 {
+    let trace = a.x_axis.dot(b.x_axis) + a.y_axis.dot(b.y_axis) + a.z_axis.dot(b.z_axis);
+    ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+fn add_masked_kinematics(
+    samples: &mut KinematicSamples,
+    actual: &Body,
+    stale: &Body,
+    index: usize,
+    predicted: &PhysState,
+    frames: &[replay_to_rocketsim::observations::Frame],
+) {
+    if let (Some(actual), Some(previous)) = (&actual.linear_velocity, &stale.linear_velocity) {
+        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
+            samples.linear_velocity_uu_per_second.add(
+                distance(predicted.vel.to_array(), actual.value),
+                distance(previous.value, actual.value),
+            );
+        }
+    }
+    if let (Some(actual), Some(previous)) = (&actual.rotation_xyzw, &stale.rotation_xyzw) {
+        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
+            if let (Some(actual), Some(previous)) =
+                (quaternion(actual.value), quaternion(previous.value))
+            {
+                let actual = Mat3A::from_quat(actual);
+                samples.rotation_degrees.add(
+                    rotation_error_degrees(predicted.rot_mat, actual),
+                    rotation_error_degrees(Mat3A::from_quat(previous), actual),
+                );
+            }
+        }
+    }
+    if let (Some(actual), Some(previous)) = (
+        &actual.angular_velocity_replay_units,
+        &stale.angular_velocity_replay_units,
+    ) {
+        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
+            let actual = actual.value.map(|axis| axis * 0.01);
+            let previous = previous.value.map(|axis| axis * 0.01);
+            samples.angular_velocity_radians_per_second.add(
+                distance(predicted.ang_vel.to_array(), actual),
+                distance(previous, actual),
+            );
+        }
+    }
+}
+
 fn masked_observations(original: &ObservedReplay) -> ObservedReplay {
     let mut masked = original.clone();
     for index in 1..masked.frames.len() {
@@ -299,22 +465,10 @@ fn add_masked_error(
     let (Some(position), Some(previous)) = (&actual.position, &stale.position) else {
         return;
     };
-    if position.frame != index || previous.frame >= index {
-        return;
-    }
-    let active = |frame: usize| {
-        frames[frame]
-            .game_state
-            .as_ref()
-            .is_some_and(|state| state.value == "Active")
-    };
-    if !active(index) || !active(previous.frame) {
+    if position.frame != index || !valid_masked_interval(index, previous.frame, frames) {
         return;
     }
     let dt = frames[index].time - frames[previous.frame].time;
-    if !dt.is_finite() || dt <= 0.0 || dt > 0.5 {
-        return;
-    }
     let linear = stale.linear_velocity.as_ref().map(|velocity| {
         let extrapolated =
             std::array::from_fn(|axis| previous.value[axis] + velocity.value[axis] * dt);
@@ -334,6 +488,7 @@ fn masked_metrics(
     original: &ObservedReplay,
     conversion: &ConversionOutput,
     result: &mut BTreeMap<usize, ByBody>,
+    kinematics: &mut BTreeMap<usize, KinematicsByBody>,
 ) {
     let slots: BTreeMap<_, _> = conversion
         .car_slots
@@ -349,6 +504,7 @@ fn masked_metrics(
         let masked_frame = &conversion.observations.frames[index];
         let state = &conversion.frames[index].state;
         let by_body = result.entry(horizon).or_default();
+        let by_kinematics = kinematics.entry(horizon).or_default();
         if let (Some(actual), Some(stale)) = (&original_frame.ball, &masked_frame.ball) {
             add_masked_error(
                 &mut by_body.ball,
@@ -356,6 +512,14 @@ fn masked_metrics(
                 stale,
                 index,
                 state.ball.phys.pos.to_array(),
+                &original.frames,
+            );
+            add_masked_kinematics(
+                &mut by_kinematics.ball,
+                actual,
+                stale,
+                index,
+                &state.ball.phys,
                 &original.frames,
             );
         }
@@ -379,6 +543,14 @@ fn masked_metrics(
                 &stale.body,
                 index,
                 predicted.phys.pos.to_array(),
+                &original.frames,
+            );
+            add_masked_kinematics(
+                &mut by_kinematics.car,
+                &car.body,
+                &stale.body,
+                index,
+                &predicted.phys,
                 &original.frames,
             );
         }
@@ -430,7 +602,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         schema_version: 1,
         split_directory: root.display().to_string(),
         metric: "pre-correction position error (UU) on fresh replay positions after an active simulation interval; quantiles pool samples within each group",
-        masked_metric: "every 100-frame block masks ball/car body fields at offsets 1 through 4; compare uncorrected output with fresh original positions in Active phase and a <=0.5 second gap",
+        masked_metric: "every 100-frame block masks ball/car body fields at offsets 1 through 4; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
         boxcars_version: "0.11.5",
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
@@ -440,10 +612,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         all: all.summary(),
         masked_position_uu_by_horizon_frames: BTreeMap::new(),
         masked_by_game_size: BTreeMap::new(),
+        masked_kinematics_by_horizon_frames: BTreeMap::new(),
+        masked_kinematics_by_game_size: BTreeMap::new(),
         worst_car_regret_uu: Vec::new(),
     };
     let mut masked_by_horizon: BTreeMap<usize, ByBody> = BTreeMap::new();
     let mut masked_by_size: BTreeMap<String, BTreeMap<usize, ByBody>> = BTreeMap::new();
+    let mut kinematics_by_horizon: BTreeMap<usize, KinematicsByBody> = BTreeMap::new();
+    let mut kinematics_by_size: BTreeMap<String, BTreeMap<usize, KinematicsByBody>> =
+        BTreeMap::new();
     for (index, (size, path)) in replay_paths.iter().enumerate() {
         match fs::read(path)
             .map_err(|error| error.to_string())
@@ -479,10 +656,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 match convert_observations(masked, &options) {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
+                        let mut own_kinematics = BTreeMap::new();
                         masked_metrics(
                             &conversion.observations,
                             &masked_conversion,
                             &mut own_masked,
+                            &mut own_kinematics,
                         );
                         for (horizon, samples) in own_masked {
                             masked_by_horizon
@@ -490,6 +669,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .or_default()
                                 .extend(&samples);
                             masked_by_size
+                                .entry(size.clone())
+                                .or_default()
+                                .entry(horizon)
+                                .or_default()
+                                .extend(&samples);
+                        }
+                        for (horizon, samples) in own_kinematics {
+                            kinematics_by_horizon
+                                .entry(horizon)
+                                .or_default()
+                                .extend(&samples);
+                            kinematics_by_size
                                 .entry(size.clone())
                                 .or_default()
                                 .entry(horizon)
@@ -544,6 +735,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         })
         .collect();
+    report.masked_kinematics_by_horizon_frames = kinematics_by_horizon
+        .into_iter()
+        .map(|(horizon, samples)| (horizon, samples.summary()))
+        .collect();
+    report.masked_kinematics_by_game_size = kinematics_by_size
+        .into_iter()
+        .map(|(size, by_horizon)| {
+            (
+                size,
+                by_horizon
+                    .into_iter()
+                    .map(|(horizon, samples)| (horizon, samples.summary()))
+                    .collect(),
+            )
+        })
+        .collect();
     fs::write(&output_path, serde_json::to_vec_pretty(&report)?)?;
     println!(
         "{} successes, {} failures -> {}",
@@ -552,4 +759,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         output_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_error_handles_quaternion_sign_and_ninety_degree_turn() {
+        let identity = Mat3A::IDENTITY;
+        let negated_identity = quaternion([0.0, 0.0, 0.0, -1.0]).unwrap();
+        assert!(rotation_error_degrees(identity, Mat3A::from_quat(negated_identity)) < 0.01);
+        let quarter_turn = Mat3A::from_quat(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        assert!((rotation_error_degrees(identity, quarter_turn) - 90.0).abs() < 0.01);
+        assert!(quaternion([0.0; 4]).is_none());
+    }
 }

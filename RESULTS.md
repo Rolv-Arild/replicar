@@ -43,3 +43,32 @@ One-step simulated car p99 errors are now below linear extrapolation in all thre
 ## Boost activation check
 
 On `train`, 2,818 of 2,824 short observed boost-amount intervals ending in an odd-to-even boost activation counter transition showed boost depletion. On `validation`, 3,011 of 3,014 did. This supports interpreting odd counter values as active boost input. At the time of that ablation, enabling the signal improved four-frame validation car median/p90 from 16.0/46.8 to 15.4/45.7 UU in 1v1, 16.1/41.3 to 16.0/40.0 in 2v2, and 17.7/47.0 to 17.4/46.8 in 3v3. The initial small one-step p99 regression was overtaken by the later actor fixes above. The counter interpretation is an inference, not a direct action field.
+
+## Four-frame masked kinematics
+
+The same mask now measures fresh linear velocity (UU/s), rotation angle (degrees), and angular velocity (radians/s). Each field uses its own last unmasked observation and is counted only when that field is fresh in the original frame and its observation gap is at most 0.5 seconds in active play. The comparison baseline holds that field's last value. Replay angular velocity is scaled by 0.01 before comparison. The primary-car filter applies; sample counts can differ because replay rigid-body velocity fields are optional.
+
+Validation results at mask horizon 4 are below. Each value is median / p90 error. All 60 validation replays converted without failure. The train report also shows lower RocketSim median and p90 than hold for every listed field and game size.
+
+| Size | Body | Field | RocketSim | Hold | Samples |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1v1 | ball | Velocity (UU/s) | 5.46 / 21.77 | 86.99 / 347.79 | 1,720 |
+| 1v1 | ball | Rotation (degrees) | 2.86 / 5.78 | 40.11 / 51.57 | 1,720 |
+| 1v1 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.14 | 1,720 |
+| 1v1 | car | Velocity (UU/s) | 53.22 / 287.07 | 180.27 / 648.79 | 1,592 |
+| 1v1 | car | Rotation (degrees) | 4.51 / 29.06 | 20.32 / 59.16 | 1,592 |
+| 1v1 | car | Angular velocity (rad/s) | 0.99 / 3.62 | 1.28 / 4.19 | 1,592 |
+| 2v2 | ball | Velocity (UU/s) | 5.44 / 21.65 | 86.79 / 527.24 | 1,733 |
+| 2v2 | ball | Rotation (degrees) | 2.86 / 5.73 | 40.11 / 51.57 | 1,733 |
+| 2v2 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 1.65 | 1,733 |
+| 2v2 | car | Velocity (UU/s) | 45.40 / 242.76 | 198.85 / 628.28 | 3,201 |
+| 2v2 | car | Rotation (degrees) | 3.19 / 25.68 | 17.53 / 53.98 | 3,203 |
+| 2v2 | car | Angular velocity (rad/s) | 0.61 / 3.34 | 1.09 / 3.59 | 3,201 |
+| 3v3 | ball | Velocity (UU/s) | 5.46 / 25.90 | 88.73 / 987.46 | 1,945 |
+| 3v3 | ball | Rotation (degrees) | 2.86 / 6.81 | 43.31 / 51.57 | 1,945 |
+| 3v3 | ball | Angular velocity (rad/s) | 0.00 / 0.07 | 0.00 / 2.70 | 1,945 |
+| 3v3 | car | Velocity (UU/s) | 41.28 / 219.47 | 209.35 / 641.28 | 5,605 |
+| 3v3 | car | Rotation (degrees) | 3.04 / 22.94 | 17.53 / 52.84 | 5,606 |
+| 3v3 | car | Angular velocity (rad/s) | 0.54 / 3.22 | 1.09 / 3.52 | 5,605 |
+
+Car angular velocity has the smallest gain, especially near p90. Missing jump and aerial controls and hitbox mismatch are plausible contributors, but the current report does not isolate them. Ball angular velocity median is zero in both systems because many sampled intervals contain no change; its p90 is more informative. This is a short-horizon comparison with replay packets, not a guarantee that all unobserved state is correct.
