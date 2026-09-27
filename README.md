@@ -30,7 +30,7 @@ arrays = load_numpy("target/example.jsonl")  # requires NumPy
 print(arrays["car_position"].shape)  # frames × car slots × XYZ
 ```
 
-`iter_frames` streams rich records with only Python's standard library. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car positions and velocities, car boost and presence, team scores, and match clock. It uses NaN for absent numeric observations and a mask for absent cars. Use the streaming records for the complete state, action provenance, statistics, and events.
+`iter_frames` streams rich records with only Python's standard library. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car position, rotation and velocity, car boost, demo state, controls, boost pads, team scores, and match clock. It uses NaN for absent numeric observations and a mask for car slots missing from a RocketSim snapshot. Array control channels are in `control_axes_order` and `control_buttons_order`; they include inferred boost. Use the streaming records for original action counters and field provenance, complete state, statistics, and events.
 
 JSONL is intentionally inspectable and currently large: one 12,292-frame training replay produced 115 MB. A compact columnar format and a truly streaming Rust conversion API are planned. The current Rust converter retains all snapshots in memory before writing.
 

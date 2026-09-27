@@ -19,8 +19,29 @@ class LoaderTest(unittest.TestCase):
             "timeline_tick": 10,
             "state": {
                 "arena_tick": 8,
-                "ball": {"physics": {"position": [1, 2, 3], "linear_velocity": [4, 5, 6]}},
-                "cars": [{"slot": 3, "physics": {"position": [7, 8, 9], "linear_velocity": [1, 0, 0]}, "boost": 33.3}],
+                "ball": {"physics": {
+                    "position": [1, 2, 3],
+                    "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    "linear_velocity": [4, 5, 6],
+                    "angular_velocity": [0, 0, 1],
+                }},
+                "cars": [{
+                    "slot": 3,
+                    "physics": {
+                        "position": [7, 8, 9],
+                        "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                        "linear_velocity": [1, 0, 0],
+                        "angular_velocity": [0, 0, 2],
+                    },
+                    "controls": {
+                        "throttle": 1.0, "steer": -0.5, "pitch": 0.0,
+                        "yaw": 0.0, "roll": 0.0,
+                        "jump": False, "boost": True, "handbrake": False,
+                    },
+                    "boost": 33.3,
+                    "is_demoed": False,
+                }],
+                "boost_pads": [{"position": [10, 20, 0], "is_big": True, "is_active": False, "cooldown": 2.0}],
             },
             "observations": {
                 "team_scores": [{"value": 2, "frame": 0, "source": "replay"}, None],
@@ -38,6 +59,12 @@ class LoaderTest(unittest.TestCase):
                 self.skipTest("NumPy is not installed")
             self.assertEqual(arrays["car_position"].shape, (1, 1, 3))
             self.assertEqual(arrays["car_position"][0, 0].tolist(), [7, 8, 9])
+            self.assertEqual(arrays["ball_angular_velocity"][0].tolist(), [0, 0, 1])
+            self.assertEqual(arrays["car_rotation_columns"].shape, (1, 1, 3, 3))
+            self.assertEqual(arrays["control_axes_order"], ("throttle", "steer", "pitch", "yaw", "roll"))
+            self.assertTrue(arrays["control_buttons"][0, 0, 1])
+            self.assertEqual(arrays["boost_pad_position"].tolist(), [[10, 20, 0]])
+            self.assertFalse(arrays["boost_pad_active"][0, 0])
             self.assertEqual(arrays["scores"][0, 0], 2)
             self.assertTrue(arrays["car_present"][0, 0])
             self.assertTrue(__import__("numpy").isnan(arrays["scores"][0, 1]))
