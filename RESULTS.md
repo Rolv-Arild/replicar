@@ -370,6 +370,28 @@ I ported the aerial orientation formula from `AirSolver.cpp` into `measure_air_f
 
 The supplied aerial formula improves angular-velocity fit over replay-only steering, but the current RocketSim-specific inverse is better at p50 and p90 on both splits. Neither inferred method improves isolated rotation error. Because both formulas use the next state, the low angular error is an offline fit, not evidence that they recover the player's actual stick input or improve masked forward prediction. Keep recorded replay controls as observations; use inverse estimates only for missing channels with provenance, and do not replace the current aerial formula on these results.
 
+## Aerial rotation and replay-packet timing diagnosis
+
+The inverse controls greatly reduce isolated next-packet angular-velocity error but increase orientation error. `src/bin/diagnose_air_rotation.rs` tests whether adjacent observed positions, orientations, and velocities describe motion over the elapsed replay-frame time. It uses active, unchanged primary car lifetimes with fresh fields at both ends, airborne positions above 100 UU, no fresh dodge activation, and $0 < \Delta t \le 0.05$s. For each pair, it projects observed displacement onto mean linear velocity and observed quaternion rotation onto mean world angular velocity. A scale of 1 means motion consistent with the full replay timestamp gap; a scale of 0.5 means the observed motion is half that implied by the reported velocity over that gap. The projection is a diagnostic, not a verified packet timestamp.
+
+| Split | Nominal four-tick car translation scale p50 | Car rotation scale p50 | Ball translation scale p50 | Same-frame car/car scale difference p50 |
+| --- | ---: | ---: | ---: | ---: |
+| Train | 0.500 (47,431 pairs) | 0.511 (44,749 pairs) | 0.999 (448,308 pairs) | 0.001 (95,314 comparisons) |
+| Validation | 0.500 (45,507 pairs) | 0.507 (42,801 pairs) | 0.997 (425,566 pairs) | 0.001 (89,268 comparisons) |
+
+The nominal frame gap is usually four RocketSim ticks. Individual replays contain other projected factors, including approximately 1.0 and 1.75; the tool reports per-replay medians. `RecordFPS` is 30 in the inspected examples, and the match clock decrements about once per replay second even where car motion scale is 0.5. Ball packets track the nominal time much more closely. This points to car-specific packet or field timing/velocity semantics, but does not yet distinguish them from replication interpolation or another encoding rule. Applying a uniform half-time correction would hurt some replay intervals.
+
+As a cross-field check, the tool estimates an effective interval from fresh car position and velocity, then integrates the *same pair's* mean angular velocity for that interval without using its target orientation to choose the interval. On pairs with a finite position-derived scale from 0.25 to 2.5:
+
+| Split | Pairs | Full replay-gap rotation error p50 / p90 | Position-scaled rotation error p50 / p90 | Angular versus translation scale difference p50 / p90 |
+| --- | ---: | ---: | ---: | ---: |
+| Train | 47,227 | 2.904° / 6.726° | **0.105° / 1.549°** | 0.014 / 0.166 (44,456 pairs) |
+| Validation | 48,646 | 2.881° / 6.798° | **0.097° / 1.560°** | 0.015 / 0.170 (45,687 pairs) |
+
+This strongly links the orientation regression to a mismatch between the replay-frame gap and car motion implied by packet velocities. The diagnostic uses the next position and velocity, so it is **offline** and cannot be cited as causal masked-prediction improvement. It also does not establish the physical cause or justify changing the converter's 120 Hz replay timeline. The next experiment is to inspect raw actor update cadence, establish a packet-time model, and validate an explicit offline correction across all relevant state fields before enabling it.
+
+The isolated RocketSim test also depends on its initial hidden car state. With `measure_air_fidelity --preserve-car-state`, the validation replay-only/current-inverse rotation p50 changes from 2.930° to 3.077° (the default isolated setup gives 2.731° to 3.011°), while p90 changes from 8.714° to 8.213°. Retaining simulated jump/flip flags changes the absolute errors and narrows the median regression, but does not remove it. This option is diagnostic; the converter was not changed.
+
 ## One-step pre-correction kinematic residuals
 
 ### Methodology and scope
