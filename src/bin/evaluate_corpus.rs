@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use glam::Quat;
 use replay_to_rocketsim::conversion::{
-    ConversionOutput, ConvertOptions, PositionResidual, convert_bytes, convert_observations,
+    CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
+    convert_observations,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
 use rocketsim::{ArenaEvent, Mat3A, PhysState};
@@ -218,6 +219,8 @@ struct ReplayReport {
     unlinked_car_frames: usize,
     shadowed_car_frames: usize,
     active_pawn_demo_corrections: usize,
+    default_hitbox_players: usize,
+    car_slots: Vec<CarSlot>,
     position_uu: BodySummary,
 }
 
@@ -586,10 +589,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     for arg in args {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
+        } else if arg == "--octane-hitbox" {
+            options.use_loadout_hitboxes = false;
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--octane-hitbox]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -704,6 +709,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     active_pawn_demo_corrections: conversion
                         .diagnostics
                         .active_pawn_demo_corrections,
+                    default_hitbox_players: conversion.diagnostics.default_hitbox_players,
+                    car_slots: conversion.car_slots.clone(),
                     position_uu: own.summary(),
                 });
             }

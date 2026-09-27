@@ -87,6 +87,8 @@ pub struct Car {
     /// Whether the current pawn-to-player link is active. A known owner is retained when it goes inactive.
     pub player_link_active: bool,
     pub team: Option<u8>,
+    /// Car-body product ID from this player's loadout for the current team.
+    pub body_product_id: Option<Value<u32>>,
     pub body: Body,
     pub boost: Option<Value<f32>>,
     pub boost_raw: Option<Value<u8>>,
@@ -109,6 +111,8 @@ pub struct Player {
     pub key: String,
     pub name: Option<String>,
     pub team: Option<u8>,
+    /// Blue and orange car-body product IDs; the selected body can differ by team.
+    pub body_product_ids: [Option<Value<u32>>; 2],
     pub stats: PlayerStats,
 }
 
@@ -230,6 +234,7 @@ struct TrackedPlayer {
     player_id: Option<i32>,
     name: Option<String>,
     team_actor: Option<ActorId>,
+    body_product_ids: [Option<Value<u32>>; 2],
     stats: PlayerStats,
 }
 
@@ -546,6 +551,16 @@ impl Tracker {
             "TAGame.PRI_TA:MatchScore" => {
                 self.player_stat(actor, attribute, frame, |s| &mut s.match_score)
             }
+            "TAGame.PRI_TA:ClientLoadouts" => {
+                if let (Some(player), Attribute::TeamLoadout(loadouts)) =
+                    (self.players.get_mut(&actor), attribute)
+                {
+                    player.body_product_ids = [
+                        Some(Value::replay(loadouts.blue.body, frame)),
+                        Some(Value::replay(loadouts.orange.body, frame)),
+                    ];
+                }
+            }
             "TAGame.PRI_TA:MatchGoals" => {
                 self.player_stat(actor, attribute, frame, |s| &mut s.goals)
             }
@@ -613,6 +628,7 @@ impl Tracker {
                         .unwrap_or_else(|| format!("actor:{}", actor.0)),
                     name: tracked.name.clone(),
                     team,
+                    body_product_ids: tracked.body_product_ids.clone(),
                     stats: tracked.stats.clone(),
                 }
             })
@@ -620,22 +636,38 @@ impl Tracker {
         players.sort_by_key(|player| player.actor_id);
         let player_lookup: HashMap<_, _> = players
             .iter()
-            .map(|player| (ActorId(player.actor_id), (player.key.clone(), player.team)))
+            .map(|player| {
+                (
+                    ActorId(player.actor_id),
+                    (
+                        player.key.clone(),
+                        player.team,
+                        player.body_product_ids.clone(),
+                    ),
+                )
+            })
             .collect();
         let mut cars: Vec<_> = self
             .cars
             .iter()
             .map(|(actor, tracked)| {
-                let (player_key, team) = tracked
+                let (player_key, team, body_product_id) = tracked
                     .player_actor
                     .and_then(|id| player_lookup.get(&id))
-                    .map_or((None, None), |(key, team)| (Some(key.clone()), *team));
+                    .map_or((None, None, None), |(key, team, ids)| {
+                        (
+                            Some(key.clone()),
+                            *team,
+                            team.and_then(|side| ids[usize::from(side)].clone()),
+                        )
+                    });
                 Car {
                     actor_id: actor.0,
                     actor_created_frame: tracked.created_frame,
                     player_key,
                     player_link_active: tracked.player_link_active,
                     team,
+                    body_product_id,
                     body: tracked.body.clone(),
                     boost: tracked.boost.clone(),
                     boost_raw: tracked.boost_raw.clone(),

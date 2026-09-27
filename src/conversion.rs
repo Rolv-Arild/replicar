@@ -48,6 +48,8 @@ pub struct ConvertOptions {
     pub seed: u64,
     /// Interpret odd boost-component ReplicatedActive bytes as active boost input.
     pub infer_boost_from_active: bool,
+    /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
+    pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
     pub max_gap_ticks: u64,
 }
@@ -58,6 +60,7 @@ impl Default for ConvertOptions {
             collision_meshes: PathBuf::from("collision_meshes"),
             seed: 0,
             infer_boost_from_active: true,
+            use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
     }
@@ -104,6 +107,8 @@ pub struct CarSlot {
     pub slot: usize,
     pub player_key: String,
     pub team: u8,
+    /// Body product ID available when this RocketSim slot was created.
+    pub body_product_id: Option<u32>,
     pub hitbox: String,
 }
 
@@ -222,6 +227,20 @@ fn team(index: u8) -> Team {
     if index == 0 { Team::Blue } else { Team::Orange }
 }
 
+/// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
+/// Names come from game-extracted product metadata; hitbox families follow Epic's
+/// Rocket League car-hitbox list. Unknown IDs retain the Octane fallback.
+fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
+    Some(match id {
+        21 | 23 | 26 | 4284 => ("octane", CarBodyConfig::OCTANE),
+        22 => ("breakout", CarBodyConfig::BREAKOUT),
+        403 => ("dominus", CarBodyConfig::DOMINUS),
+        7012 => ("hybrid", CarBodyConfig::HYBRID),
+        7477 => ("merc", CarBodyConfig::MERC),
+        _ => return None,
+    })
+}
+
 /// Parse and convert a soccar replay. The returned frame and observation vectors align by index.
 pub fn convert_bytes(
     bytes: &[u8],
@@ -333,16 +352,23 @@ pub fn convert_observations(
                     actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
                     Some((slot, car.actor_created_frame == frame.index))
                 } else if let Some(team_idx) = car.team {
-                    let slot = arena.add_car(team(team_idx), CarBodyConfig::OCTANE);
+                    let body_product_id = car.body_product_id.as_ref().map(|v| v.value);
+                    let known_hitbox = body_product_id
+                        .filter(|_| options.use_loadout_hitboxes)
+                        .and_then(hitbox_for_body_product);
+                    let (hitbox, config) =
+                        known_hitbox.unwrap_or(("octane", CarBodyConfig::OCTANE));
+                    let slot = arena.add_car(team(team_idx), config);
                     slots.insert(key.clone(), slot);
                     car_slots.push(CarSlot {
                         slot,
                         player_key: key.clone(),
                         team: team_idx,
-                        hitbox: "octane".to_owned(),
+                        body_product_id,
+                        hitbox: hitbox.to_owned(),
                     });
                     actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
-                    diagnostics.default_hitbox_players += 1;
+                    diagnostics.default_hitbox_players += usize::from(known_hitbox.is_none());
                     Some((slot, true))
                 } else {
                     None
@@ -457,5 +483,24 @@ mod tests {
         assert!(apply_body(&mut state, &body, 3, false));
         assert_eq!(state.pos, Vec3A::new(1.0, 2.0, 3.0));
         assert_eq!(state.ang_vel.z, 1.0);
+    }
+
+    #[test]
+    fn known_body_products_select_their_rocketsim_hitbox() {
+        for (product, name, expected) in [
+            (21, "octane", CarBodyConfig::OCTANE),
+            (22, "breakout", CarBodyConfig::BREAKOUT),
+            (23, "octane", CarBodyConfig::OCTANE),
+            (26, "octane", CarBodyConfig::OCTANE),
+            (403, "dominus", CarBodyConfig::DOMINUS),
+            (4284, "octane", CarBodyConfig::OCTANE),
+            (7012, "hybrid", CarBodyConfig::HYBRID),
+            (7477, "merc", CarBodyConfig::MERC),
+        ] {
+            let (actual_name, actual) = hitbox_for_body_product(product).unwrap();
+            assert_eq!(actual_name, name);
+            assert_eq!(actual.hitbox_size, expected.hitbox_size);
+        }
+        assert!(hitbox_for_body_product(7979).is_none());
     }
 }

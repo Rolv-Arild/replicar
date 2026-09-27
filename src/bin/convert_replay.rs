@@ -22,10 +22,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     for arg in args {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
+        } else if arg == "--octane-hitbox" {
+            options.use_loadout_hitboxes = false;
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes] [--no-inferred-boost]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl> [collision_meshes] [--no-inferred-boost] [--octane-hitbox]".into());
         }
     }
     if let Some(path) = mesh_path {

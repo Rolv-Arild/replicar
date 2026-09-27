@@ -130,3 +130,77 @@ fn live_car_wins_over_retired_car_with_same_player() {
     assert!(output.diagnostics.shadowed_car_frames > 0);
     assert!(output.diagnostics.active_pawn_demo_corrections > 0);
 }
+
+#[test]
+fn replay_loadout_products_select_hitboxes_and_preserve_unknown_ids() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let meshes = root.join("collision_meshes");
+    if !meshes.join("soccar").is_dir() {
+        eprintln!("skipping loadout corpus test: local meshes missing");
+        return;
+    }
+    for (replay, product, expected_hitbox) in [
+        (
+            "replays/train/1v1/00a63e6c-8033-40f8-a423-5b713f323dab.replay",
+            403,
+            Some("dominus"),
+        ),
+        (
+            "replays/train/2v2/00b6999f-908b-47b3-a571-b1104b33bbd1.replay",
+            7012,
+            Some("hybrid"),
+        ),
+        (
+            "replays/train/1v1/00a29646-cf56-4e3b-b6e1-76ae43c3e8d6.replay",
+            7477,
+            None,
+        ),
+        (
+            "replays/train/1v1/00a362b5-877b-4ae4-b98e-08f089ade825.replay",
+            7979,
+            None,
+        ),
+    ] {
+        let path = root.join(replay);
+        if !path.is_file() {
+            eprintln!("skipping missing local replay: {}", path.display());
+            continue;
+        }
+        let output = convert_bytes(
+            &fs::read(&path).unwrap(),
+            &ConvertOptions {
+                collision_meshes: meshes.clone(),
+                ..ConvertOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            output
+                .observations
+                .frames
+                .iter()
+                .any(|frame| frame.players.iter().any(|player| player
+                    .body_product_ids
+                    .iter()
+                    .flatten()
+                    .any(|value| value.value == product)))
+        );
+        if let Some(expected_hitbox) = expected_hitbox {
+            assert!(
+                output.car_slots.iter().any(|slot| {
+                    slot.body_product_id == Some(product) && slot.hitbox == expected_hitbox
+                }),
+                "{replay}: product {product} did not select {expected_hitbox}; slots={:?}",
+                output.car_slots
+            );
+        } else {
+            assert!(
+                output
+                    .car_slots
+                    .iter()
+                    .all(|slot| slot.body_product_id != Some(product)),
+                "{replay}: expected body product {product} only on a PRI without a playing car"
+            );
+        }
+    }
+}
