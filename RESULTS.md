@@ -73,6 +73,34 @@ Validation results at mask horizon 4 are below. Each value is median / p90 error
 
 Car angular velocity has the smallest gain, especially near p90. Missing jump and aerial controls and hitbox mismatch are plausible contributors, but the current report does not isolate them. Ball angular velocity median is zero in both systems because many sampled intervals contain no change; its p90 is more informative. This is a short-horizon comparison with replay packets, not a guarantee that all unobserved state is correct.
 
+## Rotation calibration and independent mask
+
+`cargo run --release --bin calibrate_rotation -- replays/train` compared fresh car angular-velocity packets against the quaternion change over short active-play intervals. On 367,746 ground intervals, the world-frame interpretation had median/p90 vector error 0.31/1.14 rad/s, versus 0.33/1.86 when rotated from car-local coordinates and 3.75/6.06 when negated. On 262,200 air intervals, the corresponding errors were 0.62/2.64, 4.20/9.76, and 7.26/12.49 rad/s. The median direction alignment of world-frame angular velocity with quaternion motion was approximately 1.00 in both groups. This confirms the existing 0.01 scale and world-coordinate mapping; the remaining masked error is unlikely to come from a coordinate transform. The comparison uses two packet endpoints, so it also includes real within-interval acceleration.
+
+`evaluate_corpus --mask-seed 239847` uses each replay's SHA-256 and a fixed seed to select one four-frame gap at a different deterministic offset in every 100-frame block. This is an independent check on the original fixed offsets 1–4. Reports are `target/train-conversion-metrics-alt-mask.json` and `target/validation-conversion-metrics-alt-mask.json`. All 60 replays converted in each split with zero failures; the `test` split remains sealed. At horizon 4, car position RocketSim median/p90 versus constant-velocity extrapolation (UU) was:
+
+| Split | Size | RocketSim | Linear |
+| --- | --- | ---: | ---: |
+| train | 1v1 | 17.3 / 47.4 | 27.5 / 66.8 |
+| train | 2v2 | 16.2 / 39.8 | 26.4 / 62.9 |
+| train | 3v3 | 18.1 / 47.3 | 30.2 / 65.8 |
+| validation | 1v1 | 15.9 / 43.7 | 24.7 / 61.7 |
+| validation | 2v2 | 15.9 / 41.2 | 26.3 / 64.2 |
+| validation | 3v3 | 17.0 / 46.6 | 28.6 / 64.1 |
+
+The alternate mask also groups fresh car angular-velocity targets by observed height. Values below are median/p90 absolute vector errors in rad/s, pooled across game sizes and mask horizons. `ground` means car center below 50 UU; `air` means above 100 UU; `transition` is between those thresholds. These are height groups, not verified contact states.
+
+| Split | Height | Samples | RocketSim | Hold |
+| --- | --- | ---: | ---: | ---: |
+| train | ground | 21,914 | 0.20 / 1.17 | 0.53 / 2.21 |
+| train | transition | 5,631 | 1.95 / 4.61 | 0.95 / 3.96 |
+| train | air | 12,080 | 1.30 / 3.31 | 1.15 / 3.31 |
+| validation | ground | 23,638 | 0.20 / 1.17 | 0.52 / 2.23 |
+| validation | transition | 5,962 | 1.84 / 4.67 | 0.94 / 4.01 |
+| validation | air | 12,599 | 1.25 / 3.25 | 1.13 / 3.36 |
+
+Ground steering accounts for the aggregate angular-velocity gain. Near takeoff the simulator is worse than the held baseline, and airborne median error is also higher. Missing jump, dodge, and aerial controls are the next concrete hypothesis to test. A read-only train replay audit found that `ReplicatedActive` jump and dodge bytes increment across adjacent frames and dodge updates can coincide with `DodgeTorque`; they are activation evidence, not a demonstrated held-button state. Exact input timing and duration remain unknown, so those counters are still preserved as observations rather than sent directly to RocketSim controls.
+
 ## Loadout body products and hitboxes
 
 `TAGame.PRI_TA:ClientLoadouts` supplies a body product ID for each team. The extractor preserves both values on each player and attaches the currently selected one to a linked car. The user's August 2026 `items.csv` supplies product names; [Rocket League's official hitbox list](https://www.epicgames.com/help/c-37599050/c-32343914/a20257614?lang=en-US), additional [Season 22](https://www.rocketleague.com/news/rocket-league-season-22-training-rivalries-and-rewards) and [Season 23](https://www.rocketleague.com/news/hit-the-pitch-for-the-world-cup-in-rocket-league-season-23) announcements, and a localized official listing supply families. RocketSim's dedicated Psyclops preset covers that special body. The checked-in inputs, aliases, source URLs, generator, and unresolved rows are documented in [data/README.md](data/README.md). RocketSim's matching preset is used at car-slot creation.

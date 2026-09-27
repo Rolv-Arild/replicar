@@ -236,6 +236,7 @@ struct Report {
     split_directory: String,
     metric: &'static str,
     masked_metric: &'static str,
+    mask_seed: Option<u64>,
     boxcars_version: &'static str,
     rocketsim_revision: &'static str,
     options: ConvertOptions,
@@ -247,6 +248,7 @@ struct Report {
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
     masked_kinematics_by_game_size: BTreeMap<String, BTreeMap<usize, KinematicsByBodySummary>>,
+    masked_car_angular_by_altitude: BTreeMap<String, FieldSummary>,
     worst_car_regret_uu: Vec<OutlierRecord>,
 }
 
@@ -433,10 +435,36 @@ fn add_masked_kinematics(
     }
 }
 
-fn masked_observations(original: &ObservedReplay) -> ObservedReplay {
+#[derive(Clone, Copy)]
+struct MaskSchedule {
+    seed: Option<u64>,
+    replay_hash: u64,
+}
+
+impl MaskSchedule {
+    fn horizon(self, index: usize) -> Option<usize> {
+        let offset = index % 100;
+        let start = if let Some(seed) = self.seed {
+            // SplitMix64 gives a stable independent offset for each replay and block.
+            let mut value = seed ^ self.replay_hash ^ (index / 100) as u64;
+            value = value.wrapping_add(0x9e3779b97f4a7c15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+            value ^= value >> 31;
+            1 + (value % 95) as usize
+        } else {
+            1
+        };
+        (start..start + 4)
+            .contains(&offset)
+            .then(|| offset - start + 1)
+    }
+}
+
+fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> ObservedReplay {
     let mut masked = original.clone();
     for index in 1..masked.frames.len() {
-        if !(1..=4).contains(&(index % 100)) {
+        if schedule.horizon(index).is_none() {
             continue;
         }
         let previous = masked.frames[index - 1].clone();
@@ -490,8 +518,10 @@ fn add_masked_error(
 fn masked_metrics(
     original: &ObservedReplay,
     conversion: &ConversionOutput,
+    schedule: MaskSchedule,
     result: &mut BTreeMap<usize, ByBody>,
     kinematics: &mut BTreeMap<usize, KinematicsByBody>,
+    car_angular_by_altitude: &mut BTreeMap<String, FieldSamples>,
 ) {
     let slots: BTreeMap<_, _> = conversion
         .car_slots
@@ -499,10 +529,9 @@ fn masked_metrics(
         .map(|slot| (slot.player_key.as_str(), slot.slot))
         .collect();
     for index in 1..original.frames.len() {
-        let horizon = index % 100;
-        if !(1..=4).contains(&horizon) {
+        let Some(horizon) = schedule.horizon(index) else {
             continue;
-        }
+        };
         let original_frame = &original.frames[index];
         let masked_frame = &conversion.observations.frames[index];
         let state = &conversion.frames[index].state;
@@ -556,6 +585,37 @@ fn masked_metrics(
                 &predicted.phys,
                 &original.frames,
             );
+            if let (Some(position), Some(actual), Some(previous)) = (
+                &car.body.position,
+                &car.body.angular_velocity_replay_units,
+                &stale.body.angular_velocity_replay_units,
+            ) {
+                if position.frame == index
+                    && actual.frame == index
+                    && valid_masked_interval(index, previous.frame, &original.frames)
+                {
+                    let altitude = if position.value[2] < 50.0 {
+                        "ground"
+                    } else if position.value[2] > 100.0 {
+                        "air"
+                    } else {
+                        "transition"
+                    };
+                    car_angular_by_altitude
+                        .entry(altitude.to_owned())
+                        .or_default()
+                        .add(
+                            distance(
+                                predicted.phys.ang_vel.to_array(),
+                                actual.value.map(|axis| axis * 0.01),
+                            ),
+                            distance(
+                                previous.value.map(|axis| axis * 0.01),
+                                actual.value.map(|axis| axis * 0.01),
+                            ),
+                        );
+                }
+            }
         }
     }
 }
@@ -586,15 +646,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut options = ConvertOptions::default();
     let mut meshes = None;
-    for arg in args {
+    let mut mask_seed = None;
+    while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
+        } else if arg == "--mask-seed" {
+            mask_seed = Some(
+                args.next()
+                    .ok_or("--mask-seed requires a u64 value")?
+                    .to_string_lossy()
+                    .parse::<u64>()?,
+            );
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--octane-hitbox]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -607,7 +675,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         schema_version: 1,
         split_directory: root.display().to_string(),
         metric: "pre-correction position error (UU) on fresh replay positions after an active simulation interval; quantiles pool samples within each group",
-        masked_metric: "every 100-frame block masks ball/car body fields at offsets 1 through 4; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
+        masked_metric: "every 100-frame block masks four consecutive ball/car body frames; default start offset 1 or replay-hash/seed-derived offset when mask_seed is set; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
+        mask_seed,
         boxcars_version: "0.11.5",
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
@@ -619,6 +688,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         masked_by_game_size: BTreeMap::new(),
         masked_kinematics_by_horizon_frames: BTreeMap::new(),
         masked_kinematics_by_game_size: BTreeMap::new(),
+        masked_car_angular_by_altitude: BTreeMap::new(),
         worst_car_regret_uu: Vec::new(),
     };
     let mut masked_by_horizon: BTreeMap<usize, ByBody> = BTreeMap::new();
@@ -626,6 +696,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut kinematics_by_horizon: BTreeMap<usize, KinematicsByBody> = BTreeMap::new();
     let mut kinematics_by_size: BTreeMap<String, BTreeMap<usize, KinematicsByBody>> =
         BTreeMap::new();
+    let mut car_angular_by_altitude: BTreeMap<String, FieldSamples> = BTreeMap::new();
     for (index, (size, path)) in replay_paths.iter().enumerate() {
         match fs::read(path)
             .map_err(|error| error.to_string())
@@ -657,17 +728,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
-                let masked = masked_observations(&conversion.observations);
+                let replay_hash = u64::from_str_radix(
+                    conversion
+                        .source_sha256
+                        .as_deref()
+                        .and_then(|hash| hash.get(..16))
+                        .ok_or("missing replay SHA-256")?,
+                    16,
+                )?;
+                let schedule = MaskSchedule {
+                    seed: mask_seed,
+                    replay_hash,
+                };
+                let masked = masked_observations(&conversion.observations, schedule);
                 match convert_observations(masked, &options) {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
                         let mut own_kinematics = BTreeMap::new();
+                        let mut own_angular_by_altitude = BTreeMap::new();
                         masked_metrics(
                             &conversion.observations,
                             &masked_conversion,
+                            schedule,
                             &mut own_masked,
                             &mut own_kinematics,
+                            &mut own_angular_by_altitude,
                         );
+                        for (altitude, samples) in own_angular_by_altitude {
+                            car_angular_by_altitude
+                                .entry(altitude)
+                                .or_default()
+                                .extend(&samples);
+                        }
                         for (horizon, samples) in own_masked {
                             masked_by_horizon
                                 .entry(horizon)
@@ -758,6 +850,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         })
         .collect();
+    report.masked_car_angular_by_altitude = car_angular_by_altitude
+        .into_iter()
+        .map(|(altitude, samples)| (altitude, samples.summary()))
+        .collect();
     fs::write(&output_path, serde_json::to_vec_pretty(&report)?)?;
     println!(
         "{} successes, {} failures -> {}",
@@ -780,5 +876,27 @@ mod tests {
         let quarter_turn = Mat3A::from_quat(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
         assert!((rotation_error_degrees(identity, quarter_turn) - 90.0).abs() < 0.01);
         assert!(quaternion([0.0; 4]).is_none());
+    }
+
+    #[test]
+    fn mask_schedule_selects_four_consecutive_frames_per_block() {
+        for seed in [None, Some(42)] {
+            let schedule = MaskSchedule {
+                seed,
+                replay_hash: 0x1234,
+            };
+            for block in 0..20 {
+                let selected: Vec<_> = (block * 100..(block + 1) * 100)
+                    .filter_map(|index| schedule.horizon(index).map(|h| (index, h)))
+                    .collect();
+                assert_eq!(selected.len(), 4);
+                assert_eq!(
+                    selected.iter().map(|(_, h)| *h).collect::<Vec<_>>(),
+                    [1, 2, 3, 4]
+                );
+                assert!(selected[0].0 % 100 >= 1);
+                assert!(selected[3].0 % 100 <= 98);
+            }
+        }
     }
 }
