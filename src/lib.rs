@@ -15,4 +15,5 @@ pub mod audit;
 pub mod conversion;
 pub mod observations;
 pub mod parquet_export;
+pub mod restoration;
 pub mod serialization;

@@ -139,7 +139,7 @@ pub struct ConversionSummary {
     pub diagnostics: Diagnostics,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarSlot {
     pub slot: usize,
     pub player_key: String,

@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use rocketsim::{ArenaEvent, BallState, CarControls, CarState, PhysState, Vec3A};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::conversion::{
     ConversionOutput, ConversionSummary, ConvertOptions, ConvertedFrame, PositionResidual, SimEvent,
@@ -17,7 +17,7 @@ fn xyz(v: Vec3A) -> [f32; 3] {
     v.to_array()
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PhysicsRecord {
     pub position: [f32; 3],
     /// RocketSim basis columns: forward, right, up.
@@ -41,7 +41,7 @@ impl From<&PhysState> for PhysicsRecord {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ControlsRecord {
     pub throttle: f32,
     pub steer: f32,
@@ -68,7 +68,7 @@ impl From<&CarControls> for ControlsRecord {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BallRecord {
     pub physics: PhysicsRecord,
     pub tick_count_since_kickoff: u64,
@@ -99,7 +99,7 @@ impl From<&BallState> for BallRecord {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CarRecord {
     pub slot: usize,
     pub team: u8,
@@ -172,7 +172,7 @@ impl CarRecord {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PadRecord {
     pub position: [f32; 3],
     pub is_big: bool,
@@ -180,12 +180,39 @@ pub struct PadRecord {
     pub is_active: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StateRecord {
     pub arena_tick: u64,
     pub ball: BallRecord,
     pub cars: Vec<CarRecord>,
     pub boost_pads: Vec<PadRecord>,
+}
+
+impl StateRecord {
+    /// Capture the soccar RocketSim state represented by a replay frame.
+    pub fn from_arena_state(state: &rocketsim::ArenaState) -> Self {
+        Self {
+            arena_tick: state.tick_count,
+            ball: (&state.ball).into(),
+            cars: state
+                .cars
+                .iter()
+                .map(|(info, car)| {
+                    CarRecord::from_state(info.idx, if info.team.is_blue() { 0 } else { 1 }, car)
+                })
+                .collect(),
+            boost_pads: state
+                .boost_pads
+                .iter()
+                .map(|(config, state)| PadRecord {
+                    position: xyz(config.pos),
+                    is_big: config.is_big,
+                    cooldown: state.cooldown,
+                    is_active: state.is_active(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -321,35 +348,12 @@ fn frame_line<'a>(
     observed: &'a observations::Frame,
     residuals: &'a [PositionResidual],
 ) -> FrameLine<'a> {
-    let state = StateRecord {
-        arena_tick: converted.state.tick_count,
-        ball: (&converted.state.ball).into(),
-        cars: converted
-            .state
-            .cars
-            .iter()
-            .map(|(info, car)| {
-                CarRecord::from_state(info.idx, if info.team.is_blue() { 0 } else { 1 }, car)
-            })
-            .collect(),
-        boost_pads: converted
-            .state
-            .boost_pads
-            .iter()
-            .map(|(config, state)| PadRecord {
-                position: xyz(config.pos),
-                is_big: config.is_big,
-                cooldown: state.cooldown,
-                is_active: state.is_active(),
-            })
-            .collect(),
-    };
     FrameLine {
         record_type: "frame",
         frame: converted.replay_frame,
         replay_time: converted.replay_time,
         timeline_tick: converted.timeline_tick,
-        state,
+        state: StateRecord::from_arena_state(&converted.state),
         observations: observed,
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
         position_residuals: residuals,
