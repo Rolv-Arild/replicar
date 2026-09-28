@@ -4,14 +4,15 @@ use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use replay_to_rocketsim::conversion::{
     CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
     convert_observations, quaternion, rotation_error_degrees,
 };
-use replay_to_rocketsim::observations::{Body, ObservedReplay};
-use rocketsim::{ArenaEvent, Mat3A, PhysState};
+use replay_to_rocketsim::observations::{Body, Inputs, ObservedReplay, PadPickup};
+use rocketsim::{ArenaEvent, CarControls, CarState, Mat3A, PhysState};
 use serde::Serialize;
 
 #[derive(Default)]
@@ -161,6 +162,122 @@ impl FieldSamples {
 struct FieldSummary {
     simulated: Quantiles,
     hold: Quantiles,
+}
+
+#[derive(Serialize)]
+struct TraceControls {
+    throttle: f32,
+    steer: f32,
+    pitch: f32,
+    yaw: f32,
+    roll: f32,
+    jump: bool,
+    boost: bool,
+    handbrake: bool,
+}
+
+impl From<CarControls> for TraceControls {
+    fn from(value: CarControls) -> Self {
+        Self {
+            throttle: value.throttle,
+            steer: value.steer,
+            pitch: value.pitch,
+            yaw: value.yaw,
+            roll: value.roll,
+            jump: value.jump,
+            boost: value.boost,
+            handbrake: value.handbrake,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TraceSimCar {
+    position: [f32; 3],
+    rotation_basis: [[f32; 3]; 3],
+    linear_velocity: [f32; 3],
+    angular_velocity: [f32; 3],
+    is_on_ground: bool,
+    wheel_contact_count: usize,
+    world_contact: bool,
+    is_jumping: bool,
+    is_flipping: bool,
+    controls_for_next_interval: TraceControls,
+}
+
+impl From<&CarState> for TraceSimCar {
+    fn from(state: &CarState) -> Self {
+        Self {
+            position: state.phys.pos.to_array(),
+            rotation_basis: [
+                state.phys.rot_mat.x_axis.to_array(),
+                state.phys.rot_mat.y_axis.to_array(),
+                state.phys.rot_mat.z_axis.to_array(),
+            ],
+            linear_velocity: state.phys.vel.to_array(),
+            angular_velocity: state.phys.ang_vel.to_array(),
+            is_on_ground: state.is_on_ground,
+            wheel_contact_count: state.wheels_with_contact.iter().filter(|&&v| v).count(),
+            world_contact: state.world_contact_normal.is_some(),
+            is_jumping: state.is_jumping,
+            is_flipping: state.is_flipping,
+            controls_for_next_interval: state.controls.into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MaskedRotationTrace {
+    replay_path: String,
+    replay_sha256: String,
+    frame: usize,
+    replay_time: f32,
+    replay_delta: f32,
+    horizon: usize,
+    timeline_tick: u64,
+    arena_tick: u64,
+    actor_id: i32,
+    actor_created_frame: usize,
+    masked_actor_lifetime_match: bool,
+    player_key: String,
+    team: Option<u8>,
+    slot: usize,
+    rotation_source_frame: Option<usize>,
+    rotation_source_gap_seconds: Option<f32>,
+    observed_body: Body,
+    masked_body: Body,
+    observed_inputs_at_target: Inputs,
+    observed_inputs_before_interval: Option<Inputs>,
+    observed_pad_pickups_at_target: Vec<PadPickup>,
+    previous_simulated: Option<TraceSimCar>,
+    predicted: TraceSimCar,
+    simulated_event_kinds_in_interval: Vec<&'static str>,
+    rotation_error_degrees: Option<f32>,
+    hold_rotation_error_degrees: Option<f32>,
+    angular_error_radians_per_second: Option<f32>,
+    position_error_uu: Option<f32>,
+}
+
+fn car_event_kinds(
+    events: &[replay_to_rocketsim::conversion::SimEvent],
+    slot: usize,
+) -> Vec<&'static str> {
+    events
+        .iter()
+        .filter_map(|event| match event.event {
+            ArenaEvent::CarHitWorld(value) if value.car_idx == slot => Some("sim_car_hit_world"),
+            ArenaEvent::CarHitBall(value) if value.car_idx == slot => Some("sim_car_hit_ball"),
+            ArenaEvent::CarHitCar(value)
+                if value.bumper_car_idx == slot || value.victim_car_idx == slot =>
+            {
+                Some("sim_car_hit_car")
+            }
+            ArenaEvent::CarPickupBoost(value) if value.car_idx == slot => {
+                Some("sim_car_pickup_boost")
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -630,6 +747,9 @@ fn masked_metrics(
     original: &ObservedReplay,
     conversion: &ConversionOutput,
     schedule: MaskSchedule,
+    replay_path: &Path,
+    replay_sha256: &str,
+    mut rotation_traces: Option<&mut Vec<MaskedRotationTrace>>,
     result: &mut BTreeMap<usize, ByBody>,
     kinematics: &mut BTreeMap<usize, KinematicsByBody>,
     boost: &mut BTreeMap<usize, FieldSamples>,
@@ -698,6 +818,105 @@ fn masked_metrics(
                 &predicted.phys,
                 &original.frames,
             );
+            if let Some(traces) = rotation_traces.as_deref_mut() {
+                let rotation_errors = match (&car.body.rotation_xyzw, &stale.body.rotation_xyzw) {
+                    (Some(actual), Some(previous))
+                        if actual.frame == index
+                            && valid_masked_interval(index, previous.frame, &original.frames) =>
+                    {
+                        quaternion(actual.value)
+                            .zip(quaternion(previous.value))
+                            .map(|(actual_q, previous_q)| {
+                                let actual_mat = Mat3A::from_quat(actual_q);
+                                (
+                                    rotation_error_degrees(predicted.phys.rot_mat, actual_mat),
+                                    rotation_error_degrees(
+                                        Mat3A::from_quat(previous_q),
+                                        actual_mat,
+                                    ),
+                                )
+                            })
+                    }
+                    _ => None,
+                };
+                let previous_simulated = conversion.frames[index - 1]
+                    .state
+                    .cars
+                    .iter()
+                    .find(|(info, _)| info.idx == *slot)
+                    .map(|(_, state)| TraceSimCar::from(state));
+                let previous_car = original.frames[index - 1].cars.iter().find(|prior| {
+                    prior.actor_id == car.actor_id
+                        && prior.actor_created_frame == car.actor_created_frame
+                });
+                let angular_error_radians_per_second = car
+                    .body
+                    .angular_velocity_replay_units
+                    .as_ref()
+                    .zip(stale.body.angular_velocity_replay_units.as_ref())
+                    .filter(|(actual, previous)| {
+                        actual.frame == index
+                            && valid_masked_interval(index, previous.frame, &original.frames)
+                    })
+                    .map(|(actual, _)| {
+                        distance(
+                            predicted.phys.ang_vel.to_array(),
+                            actual.value.map(|axis| axis * 0.01),
+                        )
+                    });
+                let position_error_uu = car
+                    .body
+                    .position
+                    .as_ref()
+                    .zip(stale.body.position.as_ref())
+                    .filter(|(actual, previous)| {
+                        actual.frame == index
+                            && valid_masked_interval(index, previous.frame, &original.frames)
+                    })
+                    .map(|(actual, _)| distance(predicted.phys.pos.to_array(), actual.value));
+                let rotation_source_frame =
+                    stale.body.rotation_xyzw.as_ref().map(|value| value.frame);
+                traces.push(MaskedRotationTrace {
+                    replay_path: replay_path.display().to_string(),
+                    replay_sha256: replay_sha256.to_owned(),
+                    frame: index,
+                    replay_time: original_frame.time,
+                    replay_delta: original_frame.delta,
+                    horizon,
+                    timeline_tick: conversion.frames[index].timeline_tick,
+                    arena_tick: state.tick_count,
+                    actor_id: car.actor_id,
+                    actor_created_frame: car.actor_created_frame,
+                    masked_actor_lifetime_match: stale.actor_created_frame
+                        == car.actor_created_frame,
+                    player_key: car.player_key.clone().unwrap_or_default(),
+                    team: car.team,
+                    slot: *slot,
+                    rotation_source_frame,
+                    rotation_source_gap_seconds: rotation_source_frame
+                        .map(|source| original_frame.time - original.frames[source].time),
+                    observed_body: car.body.clone(),
+                    masked_body: stale.body.clone(),
+                    observed_inputs_at_target: car.inputs.clone(),
+                    observed_inputs_before_interval: previous_car.map(|car| car.inputs.clone()),
+                    observed_pad_pickups_at_target: original_frame
+                        .pad_pickups
+                        .iter()
+                        .filter(|pickup| pickup.instigator_car_id == Some(car.actor_id))
+                        .cloned()
+                        .collect(),
+                    previous_simulated,
+                    predicted: TraceSimCar::from(predicted),
+                    simulated_event_kinds_in_interval: car_event_kinds(
+                        &conversion.frames[index].simulated_events,
+                        *slot,
+                    ),
+                    rotation_error_degrees: rotation_errors.map(|(sim, _)| sim),
+                    hold_rotation_error_degrees: rotation_errors.map(|(_, hold)| hold),
+                    angular_error_radians_per_second,
+                    position_error_uu,
+                });
+            }
             if let (Some(actual), Some(previous)) = (&car.boost, &stale.boost) {
                 if actual.frame == index
                     && valid_masked_interval(index, previous.frame, &original.frames)
@@ -744,6 +963,16 @@ fn masked_metrics(
 }
 
 fn paths(root: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
+    if root.is_file() {
+        if !root.extension().is_some_and(|ext| ext == "replay") {
+            return Err("single-file input must have a .replay extension".into());
+        }
+        let size = root
+            .parent()
+            .and_then(Path::file_name)
+            .ok_or("missing game-size directory")?;
+        return Ok(vec![(size.to_string_lossy().into_owned(), root.to_owned())]);
+    }
     let mut result = Vec::new();
     for size in ["1v1", "2v2", "3v3"] {
         for entry in fs::read_dir(root.join(size))? {
@@ -770,6 +999,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let mut meshes = None;
     let mut mask_seed = None;
+    let mut rotation_trace_path = None;
     while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
@@ -820,16 +1050,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .to_string_lossy()
                     .parse::<u64>()?,
             );
+        } else if arg == "--rotation-trace" {
+            rotation_trace_path = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--rotation-trace requires a JSONL output path")?,
+            ));
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
         options.collision_meshes = meshes;
     }
     let replay_paths = paths(&root)?;
+    let mut rotation_trace = if let Some(path) = rotation_trace_path {
+        Some(BufWriter::new(fs::File::create(path)?))
+    } else {
+        None
+    };
     let mut groups: BTreeMap<String, ByBody> = BTreeMap::new();
     let mut all = ByBody::default();
     let mut one_step_kinematics_groups: BTreeMap<String, KinematicsByBody> = BTreeMap::new();
@@ -960,15 +1200,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let mut own_masked_kinematics = BTreeMap::new();
                         let mut own_boost = BTreeMap::new();
                         let mut own_angular_by_altitude = BTreeMap::new();
+                        let mut own_rotation_traces = Vec::new();
                         masked_metrics(
                             &conversion.observations,
                             &masked_conversion,
                             schedule,
+                            path,
+                            conversion.source_sha256.as_deref().unwrap_or_default(),
+                            rotation_trace.as_ref().map(|_| &mut own_rotation_traces),
                             &mut own_masked,
                             &mut own_masked_kinematics,
                             &mut own_boost,
                             &mut own_angular_by_altitude,
                         );
+                        if let Some(writer) = &mut rotation_trace {
+                            for trace in own_rotation_traces {
+                                serde_json::to_writer(&mut *writer, &trace)?;
+                                writer.write_all(b"\n")?;
+                            }
+                        }
                         own_masked_kinematics_report = own_masked_kinematics
                             .iter()
                             .map(|(&horizon, samples)| (horizon, samples.summary()))
@@ -1117,6 +1367,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|(altitude, samples)| (altitude, samples.summary()))
         .collect();
     fs::write(&output_path, serde_json::to_vec_pretty(&report)?)?;
+    if let Some(writer) = &mut rotation_trace {
+        writer.flush()?;
+    }
     println!(
         "{} successes, {} failures -> {}",
         report.replays.len(),

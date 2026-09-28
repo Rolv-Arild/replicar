@@ -16,6 +16,15 @@ The CLI accepts an optional third argument for the mesh directory. Use an `.json
 
 To reproduce the development accuracy report, run `cargo run --release --bin evaluate_corpus -- replays/train target/train-conversion-metrics.json` and use `replays/validation` for the held-out development check. The evaluator records one-step pre-correction residuals and four-frame masked predictions for position, linear velocity, rotation, angular velocity, and boost against hold or linear baselines. It evaluates the active primary car when multiple actors share a player. Pass `--no-inferred-boost` for the boost-input ablation or `--octane-hitbox` to use the original all-Octane setup. `convert_replay` accepts the same flags. `calibrate_boost replays/train` reports the evidence for interpreting the boost activation counter. `audit_packet_timing` reports raw car/ball update gaps separately from motion-derived intervals; see `RESULTS.md` for its train/validation protocol. Keep `replays/test` for the final frozen evaluation.
 
+For a frame-level masked rotation investigation, pass one train replay and `--rotation-trace`:
+
+```powershell
+$replay = "replays/train/1v1/00a0da63-492e-4ab7-8a07-16cd5d14dcb4.replay"
+cargo run --release --bin evaluate_corpus -- $replay target/one-replay-report.json --rotation-trace target/one-replay-trace.jsonl
+```
+
+Each JSONL row describes a masked primary-car frame, including fresh versus held body fields and source frames, observed controls, simulated states and interval events, and per-frame errors. Rotation errors are null when the frame has no eligible fresh target packet. The trace uses the evaluator's own mask schedule and can also be produced for a whole split. See `RESULTS.md` for inspected windows and limitations.
+
 State position and linear velocity use Rocket League unreal units (UU and UU/s); state angular velocity uses radians/s. Rotation is three RocketSim basis columns. The timeline is rounded to 120 Hz from the replay's first timestamp. RocketSim's arena tick advances only during continuous `Active` intervals, so it can differ from the timeline tick. Simulated events and unobserved state fields are estimates, not replay truth.
 
 ```python

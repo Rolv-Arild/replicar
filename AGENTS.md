@@ -16,6 +16,7 @@ These instructions apply throughout this repository. The user wants a reliable c
 - Keep RocketSim's 120 Hz simulation timeline separate from replay packet cadence and offline motion-derived intervals. Do not treat a fitted interval or rounded tick count as an observed packet timestamp.
 - Compare changes on matched samples against a meaningful baseline. Report counts, p50/p90/p99, per-game-size and per-replay behavior, and material regressions. A fit that uses the target value to choose its parameters is not a prediction result. Label any use of future observations; distinguish offline reconstruction from causal masked prediction.
 - Investigate outliers on train, decide using validation, and document unsuccessful experiments. Do not enable a physics or timing correction solely because a pooled median improves.
+- For material masked-prediction errors or regressions, inspect short train windows frame by frame before attributing a cause. Check the original and withheld field source frames, controls available before each simulated interval, actor lifetime, contact/event provenance, and the error trajectory across the window. Confirm that trace sample keys match the aggregate evaluator; include counterexamples when a proposed correction helps some windows and harms others.
 
 ## Working practice
 
