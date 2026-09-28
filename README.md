@@ -1,6 +1,6 @@
 # Replay to RocketSim
 
-This Rust project parses Rocket League soccar replays with `boxcars` and reconstructs one RocketSim state per replay network frame. It also retains replay observations that sit outside RocketSim state: score, clock, player statistics, observed actions, and events. See [PLAN.md](PLAN.md) for the field map and open work, and [RESULTS.md](RESULTS.md) for measured accuracy.
+This Rust project parses Rocket League soccar replays with `boxcars` and reconstructs one RocketSim state per replay network frame. It also retains replay observations that sit outside RocketSim state: score, clock, player statistics, observed actions, and events. See [PLAN.md](PLAN.md) for the field map and open work, [RESULTS.md](RESULTS.md) for measured accuracy, and [AGENTS.md](AGENTS.md) for contributor and agent guidance.
 
 ## Setup and conversion
 
