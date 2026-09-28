@@ -63,6 +63,10 @@ pub struct ConvertOptions {
     pub infer_air_steer_controls: bool,
     /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
     pub infer_air_controls_from_lookahead: bool,
+    /// Include 50–100 UU airborne packets in the offline aerial inverse diagnostic.
+    pub infer_transition_air_lookahead: bool,
+    /// Compensate RocketSim air damping in the low-air transition band without future packets.
+    pub compensate_transition_air_damping: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -82,6 +86,8 @@ impl Default for ConvertOptions {
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
             infer_air_controls_from_lookahead: true,
+            infer_transition_air_lookahead: false,
+            compensate_transition_air_damping: false,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -522,7 +528,11 @@ fn dodge_impulse_unobserved(car: &observations::Car, frame: usize, state: &CarSt
 }
 
 fn team(index: u8) -> Team {
-    if index == 0 { Team::Blue } else { Team::Orange }
+    if index == 0 {
+        Team::Blue
+    } else {
+        Team::Orange
+    }
 }
 
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
@@ -826,6 +836,11 @@ pub fn convert_observations(
                 controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
             }
             let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
+            let min_lookahead_z = if options.infer_transition_air_lookahead {
+                50.0
+            } else {
+                100.0
+            };
             let mut air_controls_applied = false;
             if options.infer_air_controls_from_lookahead
                 && airborne
@@ -856,10 +871,10 @@ pub fn convert_observations(
                                     && ang0.frame == frame.index
                                     && rot0.frame == frame.index
                                     && car.body.position.as_ref().is_some_and(|p| {
-                                        p.frame == frame.index && p.value[2] > 100.0
+                                        p.frame == frame.index && p.value[2] > min_lookahead_z
                                     })
                                     && next_car.body.position.as_ref().is_some_and(|p| {
-                                        p.frame == next_frame.index && p.value[2] > 100.0
+                                        p.frame == next_frame.index && p.value[2] > min_lookahead_z
                                     })
                                     && !next_car.inputs.dodge_active_raw.as_ref().is_some_and(|d| {
                                         d.frame == next_frame.index && d.value % 2 == 1
@@ -890,6 +905,20 @@ pub fn convert_observations(
                 }
             }
 
+            if !air_controls_applied
+                && options.compensate_transition_air_damping
+                && airborne
+                && !dodge_jump_control
+                && (50.0..=100.0).contains(&state.phys.pos.z)
+            {
+                let angular = state.phys.ang_vel;
+                let solved =
+                    solve_inverse_air_controls(state.phys.rot_mat, angular, angular, 1.0 / 120.0);
+                controls.pitch = solved.pitch;
+                controls.yaw = solved.yaw;
+                controls.roll = solved.roll;
+                air_controls_applied = true;
+            }
             if !air_controls_applied && options.infer_air_steer_controls && airborne {
                 controls.yaw = controls.steer;
             }
@@ -1617,25 +1646,21 @@ mod tests {
         );
         assert!(slow_est.is_none());
 
-        assert!(
-            estimate_car_packet_interval(
-                [0.0, 0.0, 0.0],
-                [10.0, 0.0, 0.0],
-                [300.0, 0.0, 0.0],
-                [300.0, 0.0, 0.0],
-                -0.03,
-            )
-            .is_none()
-        );
-        assert!(
-            estimate_car_packet_interval(
-                [0.0, 0.0, 0.0],
-                [10.0, 0.0, 0.0],
-                [300.0, 0.0, 0.0],
-                [300.0, 0.0, 0.0],
-                0.6,
-            )
-            .is_none()
-        );
+        assert!(estimate_car_packet_interval(
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [300.0, 0.0, 0.0],
+            [300.0, 0.0, 0.0],
+            -0.03,
+        )
+        .is_none());
+        assert!(estimate_car_packet_interval(
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [300.0, 0.0, 0.0],
+            [300.0, 0.0, 0.0],
+            0.6,
+        )
+        .is_none());
     }
 }

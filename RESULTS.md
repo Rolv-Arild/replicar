@@ -516,3 +516,34 @@ All 60 train and 60 validation replays parsed. The following validation numbers 
 | 3v3 | 525,412 | 18.87 / 45.05 · 12.97 / 38.22 · 12.43 / 38.26 | 148,491 | 3.33 / 9.43 · 2.76 / 9.15 · 2.70 / 9.19 |
 
 Relative to the frozen model, validation replay median position improves on 11 replays, worsens on 3, and is unchanged on 46; air rotation improves on 10, worsens on 2, and is unchanged on 48. The largest added regression versus frozen is 0.13 UU in replay median position. Relative to nominal time, **8/60 validation replay median positions and 7/60 air rotations still regress**. For the eight original position failures, the selector cuts the worst replay median regression from 8.58 to 1.05 UU, but does not eliminate it. The 1v1/3v3 pooled p90 position and rotation also rise slightly over frozen. Validation position p99 is 73.50/68.54/72.18 UU with nominal time, 89.61/75.71/95.57 UU with frozen scale, and 89.14/75.65/95.54 UU with the selector across 1v1/2v2/3v3. Train results have the same directional pooled median gains but are descriptive because the frozen scale was derived from train. This selector therefore remains diagnostic and is **not enabled in conversion**. A later timing correction needs paired masked RocketSim validation, contact and long-gap analysis, and no material per-replay regression; the 120 Hz replay timeline remains unchanged. `replays/test` remains sealed.
+
+## Low-air transition diagnosis and control ablations (2026-09-28)
+
+`evaluate_corpus` now subdivides field-fresh one-step car angular residuals whose **current observed center height is 50–100 UU**. Origin is the preceding observed position carried in the previous replay frame; `sim_ground`/`sim_air` is RocketSim's pre-correction ground flag. The event labels mean a fresh odd replay jump, double-jump, or dodge component packet within the preceding 0.15 s, searched with the same actor lifetime; they are packet proxies, not verified player inputs. The categories are separate marginal views, so their counts should not be added together. Each metric compares the same fresh angular packets with the pre-correction simulator and held previous observed angular velocity.
+
+| Validation context | Paired samples | RocketSim / hold p50 (rad/s) |
+| --- | ---: | ---: |
+| Origin below 50 UU | 19,265 | 1.490 / 1.649 |
+| Origin already 50–100 UU | 119,381 | 2.116 / 0.523 |
+| Origin above 100 UU | 9,818 | 0.692 / 0.947 |
+| RocketSim airborne | 139,221 | 2.088 / 0.634 |
+| No recent jump or dodge packet | 121,847 | 1.770 / 0.545 |
+| Recent jump packet | 6,045 | 0.840 / 0.882 |
+| Recent dodge packet | 19,754 | 3.244 / 2.936 |
+
+The corresponding train split has 114,598/142,390 samples already in the band, 133,217/142,390 simulated airborne, and 117,127/142,390 without a recent jump or dodge packet. Thus the large transition-band error is mostly **persistent low-air motion**, rather than a single takeoff impulse. This is an inference from the marginal groups; collision proximity and the exact replay input remain unobserved.
+
+Two opt-in ablations were fixed on train and then checked on all 60 validation replays, with the default converter unchanged:
+
+1. `--infer-transition-air-lookahead` lowers the existing offline inverse-control height guard from 100 to 50 UU while retaining its fresh adjacent endpoint, active-play, actor-lifetime, and dodge guards. Validation transition angular p50/p90/p99 changes from 1.999/4.661/6.785 to 1.986/4.643/6.783 rad/s. Overall one-step angular p50 improves in all 60 replays, but overall rotation p50 worsens in 42/60, and all four masked angular horizons are unchanged. The inverse uses the future angular endpoint; this result measures offline fit, not causal prediction.
+2. `--compensate-transition-air-damping` uses current simulated orientation and angular velocity to solve RocketSim aerial controls for zero angular acceleration while airborne at 50–100 UU. It uses no future packet values. Validation transition angular p50/p90/p99 changes from 1.999/4.661/6.785 to **1.657/4.633/6.764** rad/s (train 2.013/4.616/6.638 to 1.668/4.589/6.616). Overall validation one-step angular p90 improves from 2.528 to 2.495 rad/s, and rotation p90 improves from 8.750 to 8.458 degrees; both p90 fields improve in all 60 validation replays. But rotation p50 rises from 1.855 to 1.873 degrees and worsens in 55/60 replay medians.
+
+The causal damping ablation also has a consistent masked tradeoff at horizon four:
+
+| Validation size | Angular p50 / p90: default → damping (rad/s) | Rotation p50 / p90: default → damping (degrees) |
+| --- | --- | --- |
+| 1v1 | 0.893 / 4.053 → 0.925 / 3.896 | 4.142 / 25.239 → 4.255 / 23.045 |
+| 2v2 | 0.577 / 3.581 → 0.582 / 3.474 | 3.028 / 20.812 → 3.116 / 19.675 |
+| 3v3 | 0.519 / 3.347 → 0.543 / 3.307 | 2.899 / 18.923 → 2.974 / 18.437 |
+
+Both ablations remain **off by default** because neither improves typical and tail masked errors together. The damping controls are physically motivated simulator compensation, not recovered player inputs. The diagnostic does not establish that RocketSim damping is the only cause; raw car packet timing, wheel contact, and unobserved pitch/roll remain possible contributors. Reproduce ignored reports with `cargo run --release --bin evaluate_corpus -- replays/<split> target/<split>-takeoff-context.json` and the same command with `--infer-transition-air-lookahead` or `--compensate-transition-air-damping` and distinct output names. Train/validation each converted 60/60 under all three settings; `replays/test` remains sealed.

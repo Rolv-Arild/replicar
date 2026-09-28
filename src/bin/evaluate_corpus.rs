@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use replay_to_rocketsim::conversion::{
-    CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
-    convert_observations, quaternion, rotation_error_degrees,
+    convert_bytes, convert_observations, quaternion, rotation_error_degrees, CarSlot,
+    ConversionOutput, ConvertOptions, PositionResidual,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
 use rocketsim::{ArenaEvent, Mat3A, PhysState};
@@ -286,6 +286,7 @@ struct Report {
     one_step_kinematics_by_game_size: BTreeMap<String, KinematicsByBodySummary>,
     one_step_kinematics_all: KinematicsByBodySummary,
     one_step_car_angular_by_altitude: BTreeMap<String, FieldSummary>,
+    one_step_transition_angular_by_context: BTreeMap<String, FieldSummary>,
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
@@ -401,6 +402,69 @@ fn outlier_record(
         linear_error_uu: linear_error,
         regret_uu: residual.simulated_error_uu - linear_error,
     })
+}
+
+/// Independent diagnostic labels for fresh car packets in the 50–100 UU band.
+/// The action labels describe replay component packets, not verified inputs.
+fn transition_contexts(
+    conversion: &ConversionOutput,
+    residual: &PositionResidual,
+) -> Option<[&'static str; 3]> {
+    let actor_id = residual.actor_id?;
+    let frame = conversion.observations.frames.get(residual.frame)?;
+    let car = frame.cars.iter().find(|car| car.actor_id == actor_id)?;
+    let previous = conversion
+        .observations
+        .frames
+        .get(residual.frame.checked_sub(1)?)?
+        .cars
+        .iter()
+        .find(|previous| {
+            previous.actor_id == actor_id && previous.actor_created_frame == car.actor_created_frame
+        })?;
+    let previous_z = previous.body.position.as_ref()?.value[2];
+    let origin = if previous_z < 50.0 {
+        "origin_ground"
+    } else if previous_z > 100.0 {
+        "origin_air"
+    } else {
+        "origin_transition"
+    };
+    let ground = if residual.is_on_ground == Some(true) {
+        "sim_ground"
+    } else {
+        "sim_air"
+    };
+    let mut event = "no_recent_jump_or_dodge";
+    for earlier in (0..=residual.frame).rev() {
+        let candidate = &conversion.observations.frames[earlier];
+        if frame.time - candidate.time > 0.15 {
+            break;
+        }
+        let Some(candidate_car) = candidate.cars.iter().find(|candidate_car| {
+            candidate_car.actor_id == actor_id
+                && candidate_car.actor_created_frame == car.actor_created_frame
+        }) else {
+            continue;
+        };
+        let fresh_odd = |raw: &Option<replay_to_rocketsim::observations::Value<u8>>| {
+            raw.as_ref()
+                .is_some_and(|value| value.frame == earlier && value.value % 2 == 1)
+        };
+        if fresh_odd(&candidate_car.inputs.dodge_active_raw) {
+            event = "recent_dodge_packet";
+            break;
+        }
+        if fresh_odd(&candidate_car.inputs.double_jump_active_raw) {
+            event = "recent_double_jump_packet";
+            break;
+        }
+        if fresh_odd(&candidate_car.inputs.jump_active_raw) {
+            event = "recent_jump_packet";
+            break;
+        }
+    }
+    Some([origin, ground, event])
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -738,6 +802,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_air_controls_from_lookahead = false;
         } else if arg == "--infer-air-lookahead" {
             options.infer_air_controls_from_lookahead = true;
+        } else if arg == "--infer-transition-air-lookahead" {
+            options.infer_transition_air_lookahead = true;
+        } else if arg == "--compensate-transition-air-damping" {
+            options.compensate_transition_air_damping = true;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -750,7 +818,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -762,6 +830,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut one_step_kinematics_groups: BTreeMap<String, KinematicsByBody> = BTreeMap::new();
     let mut one_step_kinematics_all = KinematicsByBody::default();
     let mut one_step_car_angular_by_altitude: BTreeMap<String, FieldSamples> = BTreeMap::new();
+    let mut one_step_transition_angular_by_context: BTreeMap<String, FieldSamples> =
+        BTreeMap::new();
     let mut report = Report {
         schema_version: 1,
         split_directory: root.display().to_string(),
@@ -778,6 +848,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         one_step_kinematics_by_game_size: BTreeMap::new(),
         one_step_kinematics_all: one_step_kinematics_all.summary(),
         one_step_car_angular_by_altitude: BTreeMap::new(),
+        one_step_transition_angular_by_context: BTreeMap::new(),
         masked_position_uu_by_horizon_frames: BTreeMap::new(),
         masked_by_game_size: BTreeMap::new(),
         masked_kinematics_by_horizon_frames: BTreeMap::new(),
@@ -831,6 +902,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .entry(altitude.to_owned())
                                 .or_default()
                                 .add(sim_ang, hold_ang);
+                            if altitude == "transition" {
+                                if let Some(contexts) = transition_contexts(&conversion, residual) {
+                                    for context in contexts {
+                                        one_step_transition_angular_by_context
+                                            .entry(context.to_owned())
+                                            .or_default()
+                                            .add(sim_ang, hold_ang);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -967,6 +1048,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     report.one_step_car_angular_by_altitude = one_step_car_angular_by_altitude
         .into_iter()
         .map(|(alt, samples)| (alt, samples.summary()))
+        .collect();
+    report.one_step_transition_angular_by_context = one_step_transition_angular_by_context
+        .into_iter()
+        .map(|(context, samples)| (context, samples.summary()))
         .collect();
     report.masked_position_uu_by_horizon_frames = masked_by_horizon
         .into_iter()
