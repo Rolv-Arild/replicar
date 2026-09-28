@@ -1,6 +1,6 @@
 # Reconstruction measurements
 
-Last updated: 2026-09-27. These are development measurements, not a final accuracy claim. Current reviewed machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
+Last updated: 2026-09-28. These are development measurements, not a final accuracy claim. Current reviewed machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
 The early sections record historical experiments with actor-lifetime, boost, demolition, hitbox, jump, and dodge inference. The later reviewed sections use corrected pad handling, guarded aerial lookahead, and field-specific kinematic residuals. Historical ablation reports remain under `target/*-conversion-metrics*.json`; their figures should be read with the implementation described beside them.
 
@@ -90,7 +90,7 @@ At horizon 4 by game size with `--mask-seed 239847`: 1v1 (43 samples) RocketSim 
 ### Boost findings and limitations
 
 1. **Continuous depletion tracking (p50):** RocketSim median boost error is under 1.0 boost unit across all horizons and game sizes (0.33 to 1.06 boost units, representing $\le 1\%$ of total boost capacity). In contrast, the hold-last-observed baseline median error is 6.3 to 11.4 boost units. This confirms that simulating boost depletion from inferred active boost input (`boost_active_raw`) closely matches ground-truth consumption.
-2. **Small boost-pad pickups (p90):** Across nearly every horizon and game-size slice, RocketSim p90 error clusters tightly around **12.16 boost units**. In Rocket League, small boost pads provide exactly 12% boost (or 31 raw ticks, $31 \times 100 / 255 \approx 12.156863$ boost units). This reveals that the predominant discrepancy at p90 is small pad pickups occurring during the four-frame mask that the simulator does not reproduce—either because masked car body trajectory deviated from the pickup radius, or because pad cooldown state in RocketSim was not synchronized with the match.
+2. **Small boost-pad pickups (p90):** Across nearly every horizon and game-size slice, RocketSim p90 error clusters tightly around **12.16 boost units**. A small boost pad provides 31 raw boost ticks ($31 \times 100 / 255 \approx 12.156863$ boost units), so missed or spurious pickups are a plausible contributor. The quantile alone cannot attribute individual errors; trajectory divergence, pad cooldown, and other events require event-level checks.
 3. **Orb pickups and respawns (p99):** Extreme tail errors reach 80–100 boost units, corresponding to 100-boost orb pickups or kickoff/respawn refills that occurred during the withheld window.
 4. **Limitations:** Only frames with fresh original boost packets are evaluated (~200–250 per horizon per split); replay boost updates are replicated at network rates rather than 120 Hz ticks. Simultaneous body masking also couples car position error to boost-pad collision detection.
 
@@ -345,7 +345,7 @@ The original calibration tool estimated nonzero pitch on 36,423 of 53,565 airbor
 
 ### Masked evaluation and leakage prevention
 
-In `evaluate_corpus.rs`, future data leakage is strictly prevented:
+For the current four-frame mask in `evaluate_corpus.rs`, the next fresh angular packet is unavailable to the lookahead solver at the immediate masked boundary:
 - Within a masked interval, `masked_observations` carries forward the prior rigid-body value and its original frame provenance. The lookahead solver requires a fresh next-frame packet, so it falls back to inferred aerial steering at that boundary.
 - The converter also requires active play at both endpoints, the same car actor lifetime and owner, fresh positions above 100 UU, and no fresh next-frame dodge activation. These guards reduced unmasked angular fidelity in some cases but avoid inferring air controls from a contact, respawn, or play-state transition.
 - A 60-replay validation ablation against `--no-infer-air-lookahead` produced identical masked car-position counts and p50/p90/p99 at horizons 1–4. Unmasked one-step car angular velocity p50 improved from 0.3985 to 0.3664 rad/s with lookahead; p90 improved from 2.5413 to 2.5277. Unmasked car-position quantiles changed by at most 0.001 UU. This establishes equality for the current four-frame mask, not for every possible masking protocol.
@@ -460,4 +460,38 @@ The `offline_projection_fit` metric measures how closely the starting velocity t
 
 There is independent, but narrower, cross-field evidence: the preceding diagnostic uses the position-derived interval to integrate angular velocity and evaluates against the *unused* target orientation. On its selected airborne pairs, validation median orientation error fell from 2.881° to 0.097°. That supports a shared translation/rotation timing or velocity-semantics effect on those pairs. It still uses future data, is not a causal test, and does not prove that the inferred tick count is the actual packet age.
 
-The prior branch reported modes at 2 and 7 rounded ticks, but its raw actor-cadence analysis and isolated RocketSim experiment were not committed as reproducible source or reports. Those modes should be treated as **inferred motion intervals**, not raw packet timestamps. Next, measure actual per-actor update gaps from replay frames and compare projected intervals by gap length, actor, replay, and contact state. Any correction to the converter needs an independent target-field or masked validation result, with the original replay timeline preserved.
+The prior branch reported modes at 2 and 7 rounded ticks, but its raw actor-cadence analysis and isolated RocketSim experiment were not committed as reproducible source or reports. Those modes should be treated as **inferred motion intervals**, not raw packet timestamps. The following section measures actual per-actor update gaps and compares projected intervals by gap length, replay, and contact state. Any correction to the converter still needs independent validation, with the original replay timeline preserved.
+
+## Raw actor cadence and frozen gap-scale check (2026-09-28)
+
+`audit_packet_timing` counts consecutive fresh car position updates from the same primary linked actor lifetime during continuous `Active` play. It counts ball updates separately. These are **observed replay-frame gaps**, not inferred physics ticks. The ignored reports can be reproduced with:
+
+```powershell
+cargo run --release --bin audit_packet_timing -- replays/train target/train-packet-timing.json
+cargo run --release --bin audit_packet_timing -- replays/validation target/validation-packet-timing.json target/train-packet-timing.json
+```
+
+| Split | Size | Car gap 1 / 2 / 3 / 4+ replay frames | Ball gap 1 frame |
+| --- | --- | ---: | ---: |
+| Train | 1v1 | 13,236 / 83,463 / 60,601 / 752 | 159,862 |
+| Train | 2v2 | 53,861 / 122,466 / 78,094 / 30,908 | 135,325 |
+| Train | 3v3 | 109,358 / 274,715 / 144,983 / 26,488 | 174,792 |
+| Validation | 1v1 | 10,887 / 73,073 / 49,871 / 23,321 | 143,087 |
+| Validation | 2v2 | 48,522 / 145,147 / 92,423 / 36,908 | 154,521 |
+| Validation | 3v3 | 126,153 / 282,491 / 116,769 / 51,089 | 177,057 |
+
+Two or three replay frames between car updates are common, so the converter often spans roughly 0.067-0.100 seconds (8-12 RocketSim ticks) before seeing a fresh car body. Ball updates usually appear every replay frame. Long car gaps are unevenly distributed: the largest train 4+ counts are 23,038, 15,432, and 14,351 in three individual replays. The raw-gap counts cover active primary cars, including known owners whose current link is inactive; an independent active-link-only train audit changed counts only slightly.
+
+The same tool groups motion-derived intervals by raw gap. The training median **rounded interval / replay timestamp interval** is 0.50/0.75/0.50 for one-frame gaps in 1v1/2v2/3v3, about 1.125 for two-frame gaps, and 0.88-0.92 for three-frame gaps. Validation shows the same broad pattern, though its one-frame 2v2 median is 0.50. This explains why pooling all gap lengths obscures timing structure. These ratios are inferred from both endpoint positions and velocities; their rounded ticks are still not observed packet timestamps.
+
+As a separate-field check, the position-derived interval is used to integrate angular velocity and compared with the unused target orientation. On validation one-frame airborne pairs, median orientation error falls from 3.406°/2.825°/3.094° using the nominal interval to 0.125°/0.097°/0.097° using the fitted interval for 1v1/2v2/3v3. This is an offline cross-field fit; target position and velocity are already known when the interval is chosen.
+
+To test whether a timing scale transfers without using the *scored* endpoint position, the tool takes the median projected scale for each game size and raw gap of 1-3 frames from the **train** report, freezes those nine values, and scores simple start-velocity position and start-angular-velocity orientation extrapolations on **validation**. Each baseline and model value uses the same eligible pairs. The raw gap becomes known when the next packet arrives, so this is an offline packet-endpoint model, not a 120 Hz forward simulation policy.
+
+| Validation size | Position pairs | Nominal / frozen-gap position p50; p90 (UU) | Air rotation pairs | Nominal / frozen-gap rotation p50; p90 (degrees) |
+| --- | ---: | ---: | ---: | ---: |
+| 1v1 | 133,831 | 18.99 / **11.94**; 44.61 / **33.73** | 36,047 | 4.04 / **3.50**; 11.09 / **10.58** |
+| 2v2 | 286,091 | 18.25 / **13.09**; 45.39 / **37.21** | 79,153 | 3.56 / **3.09**; 10.01 / **9.37** |
+| 3v3 | 525,412 | 18.87 / **12.97**; 45.05 / **38.22** | 148,491 | 3.33 / **2.76**; 9.43 / **9.15** |
+
+Despite the pooled gains, **8 of 60 validation replays regress** in median position and median air rotation. The worst per-replay median position regression is 8.58 UU. A naive alternative that carries the previous pair's fitted scale forward is worse across all game sizes (validation pooled-by-size median position error rises from 17.56/17.34/17.85 to 28.46/28.95/31.63 UU). The gap-scale model is therefore a diagnostic candidate, not a converter correction. Replay-specific modes, long-gap cases, contacts, and masked RocketSim behavior need further work; `replays/test` remains sealed.
