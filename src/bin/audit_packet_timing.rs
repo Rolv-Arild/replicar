@@ -8,7 +8,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec3};
-use replay_to_rocketsim::conversion::{OfflineIntervalEstimate, estimate_car_packet_interval};
+use replay_to_rocketsim::conversion::{estimate_car_packet_interval, OfflineIntervalEstimate};
 use replay_to_rocketsim::observations::{self, Body, Car};
 use serde::Serialize;
 
@@ -137,6 +137,8 @@ struct PairStats {
     gap_model_position_error_uu: Vec<f32>,
     nominal_rotation_on_gap_model_pairs_degrees: Vec<f32>,
     gap_model_rotation_error_degrees: Vec<f32>,
+    adaptive_position_error_uu: Vec<f32>,
+    adaptive_rotation_error_degrees: Vec<f32>,
 }
 
 #[derive(Serialize)]
@@ -156,6 +158,49 @@ struct PairSummary {
     gap_model_position_error_uu: Option<Quantiles>,
     nominal_rotation_on_gap_model_pairs_degrees: Option<Quantiles>,
     gap_model_rotation_error_degrees: Option<Quantiles>,
+    adaptive_position_error_uu: Option<Quantiles>,
+    adaptive_rotation_error_degrees: Option<Quantiles>,
+}
+
+/// Chooses between nominal time and the frozen train scale using only completed
+/// earlier pairs from the same replay and raw frame gap.
+#[derive(Default)]
+struct ReplayGapCalibration {
+    by_gap: BTreeMap<usize, (usize, usize)>, // (frozen wins, nominal wins)
+}
+
+impl ReplayGapCalibration {
+    fn scale(&self, gap: usize, frozen: Option<f32>) -> Option<f32> {
+        let frozen = frozen.filter(|s| (0.25..=2.5).contains(s))?;
+        let &(frozen_wins, nominal_wins) = self.by_gap.get(&gap).unwrap_or(&(0, 0));
+        if frozen_wins + nominal_wins >= 64 && nominal_wins as f32 > frozen_wins as f32 * 1.1 {
+            Some(1.0)
+        } else {
+            Some(frozen)
+        }
+    }
+
+    fn observe(&mut self, prior: Sample, next: Sample, frozen: Option<f32>) {
+        let gap = next.frame - prior.frame;
+        let Some(scale) = frozen.filter(|s| (0.25..=2.5).contains(s)) else {
+            return;
+        };
+        let Some(v0) = prior.vel else { return };
+        let dt = next.time - prior.time;
+        if !dt.is_finite() || dt <= 0.0 || dt > 0.5 {
+            return;
+        }
+        let nominal = (prior.pos + v0 * dt - next.pos).length();
+        let adjusted = (prior.pos + v0 * dt * scale - next.pos).length();
+        if nominal.is_finite() && adjusted.is_finite() {
+            let wins = self.by_gap.entry(gap).or_default();
+            if adjusted < nominal {
+                wins.0 += 1;
+            } else if nominal < adjusted {
+                wins.1 += 1;
+            }
+        }
+    }
 }
 
 impl PairStats {
@@ -166,6 +211,7 @@ impl PairStats {
         compare_rotation: bool,
         past_scale: Option<f32>,
         gap_model_scale: Option<f32>,
+        adaptive_scale: Option<f32>,
     ) {
         let gap = next.frame - prior.frame;
         if gap == 0 {
@@ -178,6 +224,26 @@ impl PairStats {
         }
         self.elapsed_seconds.push(dt);
         if compare_rotation {
+            if let (Some(v0), Some(scale)) = (
+                prior.vel,
+                adaptive_scale.filter(|s| (0.25..=2.5).contains(s)),
+            ) {
+                self.adaptive_position_error_uu
+                    .push((prior.pos + v0 * dt * scale - next.pos).length());
+                if let (Some(q0), Some(q1), Some(w0)) = (prior.rot, next.rot, prior.ang_vel) {
+                    if prior.pos.z > 100.0
+                        && next.pos.z > 100.0
+                        && !prior.dodge_active
+                        && !next.dodge_active
+                    {
+                        let error = |duration: f32| {
+                            let predicted = Quat::from_scaled_axis(w0 * duration) * q0;
+                            2.0 * predicted.dot(q1).abs().clamp(0.0, 1.0).acos().to_degrees()
+                        };
+                        self.adaptive_rotation_error_degrees.push(error(dt * scale));
+                    }
+                }
+            }
             if let (Some(v0), Some(scale)) = (
                 prior.vel,
                 gap_model_scale.filter(|s| (0.25..=2.5).contains(s)),
@@ -286,6 +352,8 @@ impl PairStats {
                 self.nominal_rotation_on_gap_model_pairs_degrees,
             ),
             gap_model_rotation_error_degrees: quantiles(self.gap_model_rotation_error_degrees),
+            adaptive_position_error_uu: quantiles(self.adaptive_position_error_uu),
+            adaptive_rotation_error_degrees: quantiles(self.adaptive_rotation_error_degrees),
         }
     }
 }
@@ -303,6 +371,7 @@ impl Stats {
         next: Sample,
         past_scale: Option<f32>,
         gap_model_scale: Option<f32>,
+        adaptive_scale: Option<f32>,
     ) {
         self.car.entry("all".to_owned()).or_default().add(
             prior,
@@ -310,6 +379,7 @@ impl Stats {
             true,
             past_scale,
             gap_model_scale,
+            adaptive_scale,
         );
         let gap = next.frame - prior.frame;
         let label = if gap <= 3 {
@@ -317,10 +387,14 @@ impl Stats {
         } else {
             "4+".to_owned()
         };
-        self.car
-            .entry(label)
-            .or_default()
-            .add(prior, next, true, past_scale, gap_model_scale);
+        self.car.entry(label).or_default().add(
+            prior,
+            next,
+            true,
+            past_scale,
+            gap_model_scale,
+            adaptive_scale,
+        );
         let contact = if prior.pos.z < 50.0 && next.pos.z < 50.0 {
             "ground"
         } else if prior.pos.z > 100.0 && next.pos.z > 100.0 {
@@ -334,6 +408,7 @@ impl Stats {
             true,
             past_scale,
             gap_model_scale,
+            adaptive_scale,
         );
     }
 
@@ -341,7 +416,7 @@ impl Stats {
         self.ball
             .entry("all".to_owned())
             .or_default()
-            .add(prior, next, false, None, None);
+            .add(prior, next, false, None, None, None);
         let gap = next.frame - prior.frame;
         let label = if gap <= 3 {
             gap.to_string()
@@ -351,7 +426,7 @@ impl Stats {
         self.ball
             .entry(label)
             .or_default()
-            .add(prior, next, false, None, None);
+            .add(prior, next, false, None, None, None);
     }
 
     fn summary(self) -> StatsSummary {
@@ -418,6 +493,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let stats = by_size.entry(size.clone()).or_default();
         let mut replay_stats = Stats::default();
         let mut prior_cars: HashMap<(i32, usize), (Sample, Option<f32>)> = HashMap::new();
+        let mut calibration = ReplayGapCalibration::default();
         let mut prior_ball: Option<Sample> = None;
         for frame in &replay.frames {
             if !frame
@@ -448,14 +524,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let gap = next.frame - prior.frame;
                     let gap_model_scale = gap_model.as_ref().and_then(|model| {
                         (gap <= 3).then(|| gap.to_string()).and_then(|gap_label| {
-                            model["by_game_size"][&size]["car"][&gap_label]
-                                    ["projected_scale"]["p50"]
-                                    .as_f64()
-                                    .map(|v| v as f32)
+                            model["by_game_size"][&size]["car"][&gap_label]["projected_scale"]
+                                ["p50"]
+                                .as_f64()
+                                .map(|v| v as f32)
                         })
                     });
-                    stats.add_car(prior, next, past_scale, gap_model_scale);
-                    replay_stats.add_car(prior, next, past_scale, gap_model_scale);
+                    let adaptive_scale = calibration.scale(gap, gap_model_scale);
+                    stats.add_car(prior, next, past_scale, gap_model_scale, adaptive_scale);
+                    replay_stats.add_car(prior, next, past_scale, gap_model_scale, adaptive_scale);
+                    calibration.observe(prior, next, gap_model_scale);
                     prior_cars.insert(
                         key,
                         (next, projected_interval(prior, next).map(|v| v.scale)),
@@ -475,7 +553,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let report = Report {
         split: root.display().to_string(),
         replay_count: paths.len(),
-        method: "raw gaps count fresh position packets from the same active actor lifetime; motion projection uses fresh position and velocity at both endpoints; rounded ticks are inferred, not packet timestamps; rotation check uses target orientation only for scoring",
+        method: "raw gaps count fresh position packets from the same active actor lifetime; motion projection uses fresh position and velocity at both endpoints; rounded ticks are inferred, not packet timestamps; rotation check uses target orientation only for scoring; adaptive scale starts at frozen train scale and switches to nominal for a raw gap after 64 earlier same-replay paired votes when nominal wins exceed frozen wins by 10%",
         gap_model_source: model_path.map(|path| path.display().to_string()),
         by_game_size: by_size
             .into_iter()
@@ -489,4 +567,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     io::stdout().flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_calibration_uses_only_completed_pairs_of_the_same_gap() {
+        let mut calibration = ReplayGapCalibration::default();
+        let sample = |frame, x| Sample {
+            frame,
+            time: frame as f32 / 30.0,
+            pos: Vec3::new(x, 0.0, 0.0),
+            vel: Some(Vec3::new(900.0, 0.0, 0.0)),
+            rot: None,
+            ang_vel: None,
+            dodge_active: false,
+        };
+        // The frozen half-time model loses to nominal time for these completed
+        // one-frame pairs. A new two-frame gap must retain its frozen prior.
+        for frame in 0..63 {
+            calibration.observe(
+                sample(frame, frame as f32 * 30.0),
+                sample(frame + 1, (frame + 1) as f32 * 30.0),
+                Some(0.5),
+            );
+        }
+        assert_eq!(calibration.scale(1, Some(0.5)), Some(0.5));
+        calibration.observe(sample(63, 1890.0), sample(64, 1920.0), Some(0.5));
+        assert_eq!(calibration.scale(1, Some(0.5)), Some(1.0));
+        assert_eq!(calibration.scale(2, Some(0.5)), Some(0.5));
+    }
 }

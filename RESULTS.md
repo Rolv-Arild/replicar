@@ -495,3 +495,24 @@ To test whether a timing scale transfers without using the *scored* endpoint pos
 | 3v3 | 525,412 | 18.87 / **12.97**; 45.05 / **38.22** | 148,491 | 3.33 / **2.76**; 9.43 / **9.15** |
 
 Despite the pooled gains, **8 of 60 validation replays regress** in median position and median air rotation. The worst per-replay median position regression is 8.58 UU. A naive alternative that carries the previous pair's fitted scale forward is worse across all game sizes (validation pooled-by-size median position error rises from 17.56/17.34/17.85 to 28.46/28.95/31.63 UU). The gap-scale model is therefore a diagnostic candidate, not a converter correction. Replay-specific modes, long-gap cases, contacts, and masked RocketSim behavior need further work; `replays/test` remains sealed.
+
+## Earlier-packet replay calibration (2026-09-28)
+
+The eight validation replays where the frozen train gap scale worsened both median position and air rotation have mostly nominal-looking motion intervals. Their frozen-scale median position regressions range from 2.24 to 8.58 UU. This motivated a replay-specific selector in `audit_packet_timing`: for each raw gap of 1–3 frames, it starts with the frozen train scale and counts whether nominal or frozen start-velocity extrapolation wins on **completed earlier pairs in that replay**. After 64 scored pairs for that gap, it selects nominal time if nominal wins exceed frozen wins by 10%. It scores the current endpoint before adding its result to the history. This is an offline endpoint extrapolation, not a RocketSim or replay-tick correction. The selector was fixed before the validation run.
+
+Reproduce the paired reports with:
+
+```powershell
+cargo run --release --bin audit_packet_timing -- replays/train target/train-packet-timing-adaptive.json target/train-packet-timing.json
+cargo run --release --bin audit_packet_timing -- replays/validation target/validation-packet-timing-adaptive.json target/train-packet-timing.json
+```
+
+All 60 train and 60 validation replays parsed. The following validation numbers compare **the same eligible pairs**; columns are nominal / frozen train scale / earlier-packet selector, with position in UU and airborne orientation in degrees. The orientation endpoint is excluded from scale selection.
+
+| Size | Position pairs | Position p50 / p90: nominal · frozen · selector | Air rotation pairs | Air rotation p50 / p90: nominal · frozen · selector |
+| --- | ---: | --- | ---: | --- |
+| 1v1 | 133,831 | 18.99 / 44.61 · 11.94 / 33.73 · 11.71 / 34.06 | 36,047 | 4.04 / 11.09 · 3.50 / 10.58 · 3.49 / 10.64 |
+| 2v2 | 286,091 | 18.25 / 45.39 · 13.09 / 37.21 · 12.96 / 37.18 | 79,153 | 3.56 / 10.01 · 3.09 / 9.37 · 3.08 / 9.35 |
+| 3v3 | 525,412 | 18.87 / 45.05 · 12.97 / 38.22 · 12.43 / 38.26 | 148,491 | 3.33 / 9.43 · 2.76 / 9.15 · 2.70 / 9.19 |
+
+Relative to the frozen model, validation replay median position improves on 11 replays, worsens on 3, and is unchanged on 46; air rotation improves on 10, worsens on 2, and is unchanged on 48. The largest added regression versus frozen is 0.13 UU in replay median position. Relative to nominal time, **8/60 validation replay median positions and 7/60 air rotations still regress**. For the eight original position failures, the selector cuts the worst replay median regression from 8.58 to 1.05 UU, but does not eliminate it. The 1v1/3v3 pooled p90 position and rotation also rise slightly over frozen. Validation position p99 is 73.50/68.54/72.18 UU with nominal time, 89.61/75.71/95.57 UU with frozen scale, and 89.14/75.65/95.54 UU with the selector across 1v1/2v2/3v3. Train results have the same directional pooled median gains but are descriptive because the frozen scale was derived from train. This selector therefore remains diagnostic and is **not enabled in conversion**. A later timing correction needs paired masked RocketSim validation, contact and long-gap analysis, and no material per-replay regression; the 120 Hz replay timeline remains unchanged. `replays/test` remains sealed.
