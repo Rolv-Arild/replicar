@@ -71,6 +71,8 @@ pub struct ConvertOptions {
     pub compensate_transition_air_damping: bool,
     /// Experimental: carry a recent replay angular velocity across contact-free low-air intervals.
     pub hold_low_air_angular: bool,
+    /// Experimental: require a prior observed angular speed near the 5.5 rad/s packet cap.
+    pub gate_low_air_angular_by_speed: bool,
     /// Experimental: use RocketSim air controls to steer toward a recent low-air angular packet.
     pub feedback_low_air_angular: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
@@ -95,6 +97,7 @@ impl Default for ConvertOptions {
             infer_transition_air_lookahead: false,
             compensate_transition_air_damping: false,
             hold_low_air_angular: false,
+            gate_low_air_angular_by_speed: false,
             feedback_low_air_angular: false,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
@@ -323,6 +326,7 @@ fn low_air_angular_hold(
     predicted: &CarState,
     slot: usize,
     events: &[SimEvent],
+    min_angular_speed: f32,
 ) -> Option<Vec3A> {
     let frame = observations.frames.get(index)?;
     let previous = observations.frames.get(index.checked_sub(1)?)?;
@@ -336,6 +340,7 @@ fn low_air_angular_hold(
     if !(50.0..=100.0).contains(&pos.value[2])
         || !(50.0..=100.0).contains(&predicted.phys.pos.z)
         || !held.is_finite()
+        || held.length() < min_angular_speed
         || predicted.is_on_ground
         || predicted.wheels_with_contact.iter().any(|&contact| contact)
         || predicted.world_contact_normal.is_some()
@@ -918,6 +923,11 @@ pub fn convert_observations_with(
                         &car_state,
                         slot,
                         &events,
+                        if options.gate_low_air_angular_by_speed {
+                            5.48
+                        } else {
+                            0.0
+                        },
                     ) {
                         car_state.phys.ang_vel = held;
                         arena.set_car_state(slot, car_state);

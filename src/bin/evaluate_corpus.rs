@@ -205,6 +205,44 @@ struct TraceSimCar {
     controls_for_next_interval: TraceControls,
 }
 
+#[derive(Serialize)]
+struct PriorAngularPacket {
+    frame: usize,
+    replay_time: f32,
+    angular_velocity_radians_per_second: [f32; 3],
+}
+
+fn prior_angular_packets(
+    original: &ObservedReplay,
+    car: &replay_to_rocketsim::observations::Car,
+    before_frame: usize,
+) -> Vec<PriorAngularPacket> {
+    let mut packets = Vec::new();
+    for source in (car.actor_created_frame..before_frame).rev() {
+        let frame = &original.frames[source];
+        if let Some(value) = frame
+            .cars
+            .iter()
+            .find(|candidate| {
+                candidate.actor_id == car.actor_id
+                    && candidate.actor_created_frame == car.actor_created_frame
+            })
+            .and_then(|candidate| candidate.body.angular_velocity_replay_units.as_ref())
+            .filter(|value| value.frame == source)
+        {
+            packets.push(PriorAngularPacket {
+                frame: source,
+                replay_time: frame.time,
+                angular_velocity_radians_per_second: value.value.map(|axis| axis * 0.01),
+            });
+            if packets.len() == 3 {
+                break;
+            }
+        }
+    }
+    packets
+}
+
 impl From<&CarState> for TraceSimCar {
     fn from(state: &CarState) -> Self {
         Self {
@@ -249,6 +287,7 @@ struct MaskedRotationTrace {
     observed_inputs_at_target: Inputs,
     observed_inputs_before_interval: Option<Inputs>,
     observed_pad_pickups_at_target: Vec<PadPickup>,
+    prior_angular_packets_before_mask: Vec<PriorAngularPacket>,
     previous_simulated: Option<TraceSimCar>,
     predicted: TraceSimCar,
     simulated_event_kinds_in_interval: Vec<&'static str>,
@@ -905,6 +944,11 @@ fn masked_metrics(
                         .filter(|pickup| pickup.instigator_car_id == Some(car.actor_id))
                         .cloned()
                         .collect(),
+                    prior_angular_packets_before_mask: prior_angular_packets(
+                        original,
+                        car,
+                        index - horizon + 1,
+                    ),
                     previous_simulated,
                     predicted: TraceSimCar::from(predicted),
                     simulated_event_kinds_in_interval: car_event_kinds(
@@ -1039,6 +1083,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.compensate_transition_air_damping = true;
         } else if arg == "--hold-low-air-angular" {
             options.hold_low_air_angular = true;
+        } else if arg == "--gated-low-air-angular" {
+            options.hold_low_air_angular = true;
+            options.gate_low_air_angular_by_speed = true;
         } else if arg == "--feedback-low-air-angular" {
             options.feedback_low_air_angular = true;
         } else if arg == "--octane-hitbox" {
@@ -1058,7 +1105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1441,6 +1488,71 @@ mod tests {
                 assert!(selected[3].0 % 100 <= 98);
             }
         }
+    }
+
+    #[test]
+    fn prior_angular_trace_excludes_masked_targets_and_other_actor_lifetimes() {
+        use replay_to_rocketsim::observations::{
+            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
+        };
+
+        let frames = (0..6)
+            .map(|index| {
+                let actor_created_frame = if index == 0 { 0 } else { 1 };
+                let angular_velocity_replay_units = Some(Value {
+                    value: [index as f32 * 100.0, 0.0, 0.0],
+                    frame: index,
+                    source: Source::Replay,
+                });
+                Frame {
+                    index,
+                    time: index as f32 * 0.03,
+                    delta: 0.03,
+                    ball: None,
+                    cars: vec![Car {
+                        actor_id: 7,
+                        actor_created_frame,
+                        player_key: None,
+                        player_link_active: false,
+                        team: None,
+                        body_product_id: None,
+                        body: Body {
+                            angular_velocity_replay_units,
+                            ..Body::default()
+                        },
+                        boost: None,
+                        boost_raw: None,
+                        inputs: Inputs::default(),
+                    }],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: None,
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                }
+            })
+            .collect();
+        let observed = ObservedReplay {
+            header: Header {
+                game_type: "Soccar".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let car = &observed.frames[5].cars[0];
+        let packets = prior_angular_packets(&observed, car, 4);
+        assert_eq!(
+            packets.iter().map(|p| p.frame).collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
+        assert_eq!(
+            packets[0].angular_velocity_radians_per_second,
+            [3.0, 0.0, 0.0]
+        );
     }
 
     #[test]
