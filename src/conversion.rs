@@ -71,6 +71,8 @@ pub struct ConvertOptions {
     pub compensate_transition_air_damping: bool,
     /// Experimental: carry a recent replay angular velocity across contact-free low-air intervals.
     pub hold_low_air_angular: bool,
+    /// Experimental: use RocketSim air controls to steer toward a recent low-air angular packet.
+    pub feedback_low_air_angular: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -93,6 +95,7 @@ impl Default for ConvertOptions {
             infer_transition_air_lookahead: false,
             compensate_transition_air_damping: false,
             hold_low_air_angular: false,
+            feedback_low_air_angular: false,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -370,6 +373,81 @@ fn low_air_angular_hold(
         }
     }
     Some(held)
+}
+
+/// Feedback is computed at the beginning of the next interval, so RocketSim
+/// integrates orientation and angular velocity under the same controls.
+fn low_air_feedback_controls(
+    observations: &ObservedReplay,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    slot: usize,
+    events: &[SimEvent],
+) -> Option<AirControls> {
+    let frame = observations.frames.get(index)?;
+    let previous = observations.frames.get(index.checked_sub(1)?)?;
+    previous
+        .cars
+        .iter()
+        .find(|c| c.actor_id == car.actor_id && c.actor_created_frame == car.actor_created_frame)?;
+    let position = car.body.position.as_ref()?;
+    let angular = car.body.angular_velocity_replay_units.as_ref()?;
+    let age = |source: usize| Some(frame.time - observations.frames.get(source)?.time);
+    if !(50.0..=100.0).contains(&position.value[2])
+        || !(50.0..=100.0).contains(&state.phys.pos.z)
+        || !(0.0..=0.15).contains(&age(position.frame)?)
+        || !(0.0..=0.15).contains(&age(angular.frame)?)
+        || state.is_on_ground
+        || state.wheels_with_contact.iter().any(|&contact| contact)
+        || state.world_contact_normal.is_some()
+        || state.is_flipping
+        || state.is_auto_flipping
+        || events.iter().any(|event| match event.event {
+            ArenaEvent::CarHitWorld(v) => v.car_idx == slot,
+            ArenaEvent::CarHitBall(v) => v.car_idx == slot,
+            ArenaEvent::CarHitCar(v) => v.bumper_car_idx == slot || v.victim_car_idx == slot,
+            _ => false,
+        })
+    {
+        return None;
+    }
+    for earlier in (car.actor_created_frame..=index).rev() {
+        let candidate = &observations.frames[earlier];
+        if frame.time - candidate.time > 0.15 {
+            break;
+        }
+        if let Some(c) = candidate.cars.iter().find(|c| {
+            c.actor_id == car.actor_id && c.actor_created_frame == car.actor_created_frame
+        }) {
+            let odd = |v: &Option<Value<u8>>| {
+                v.as_ref()
+                    .is_some_and(|v| v.frame == earlier && v.value % 2 == 1)
+            };
+            if odd(&c.inputs.jump_active_raw)
+                || odd(&c.inputs.double_jump_active_raw)
+                || odd(&c.inputs.dodge_active_raw)
+            {
+                return None;
+            }
+        }
+    }
+    let target = vec3(angular.value) * 0.01;
+    if !target.is_finite() || !state.phys.ang_vel.is_finite() {
+        return None;
+    }
+    let delta = target - state.phys.ang_vel;
+    let pitch_error = delta.dot(-state.phys.rot_mat.y_axis);
+    let roll_error = delta.dot(-state.phys.rot_mat.x_axis);
+    if pitch_error.hypot(roll_error) < 0.75 {
+        return None;
+    }
+    Some(solve_inverse_air_controls(
+        state.phys.rot_mat,
+        state.phys.ang_vel,
+        target,
+        4.0 / 120.0,
+    ))
 }
 
 fn position_residual(
@@ -1027,6 +1105,21 @@ pub fn convert_observations_with(
                 controls.yaw = solved.yaw;
                 controls.roll = solved.roll;
                 air_controls_applied = true;
+            }
+            if !air_controls_applied && options.feedback_low_air_angular && active && !new_lifetime
+            {
+                if let Some(solved) =
+                    low_air_feedback_controls(observations, frame.index, car, &state, slot, &events)
+                {
+                    controls.pitch = solved.pitch;
+                    controls.roll = solved.roll;
+                    controls.yaw = if options.infer_air_steer_controls {
+                        controls.steer
+                    } else {
+                        0.0
+                    };
+                    air_controls_applied = true;
+                }
             }
             if !air_controls_applied && options.infer_air_steer_controls && airborne {
                 controls.yaw = controls.steer;

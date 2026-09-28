@@ -1,4 +1,5 @@
 //! Compare replay orientation changes with angular-velocity integration on fresh airborne pairs.
+//! Pass --low-air to inspect pairs whose two heights are both 50–100 UU.
 
 use std::env;
 use std::error::Error;
@@ -66,11 +67,19 @@ fn summary(label: &str, mut samples: Vec<f32>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = env::args_os().skip(1);
     let root = PathBuf::from(
-        env::args_os()
-            .nth(1)
-            .ok_or("usage: diagnose_air_rotation <split>")?,
+        args.next()
+            .ok_or("usage: diagnose_air_rotation <split> [--low-air]")?,
     );
+    let low_air = match args.next() {
+        None => false,
+        Some(flag) if flag == "--low-air" => true,
+        _ => return Err("usage: diagnose_air_rotation <split> [--low-air]".into()),
+    };
+    if args.next().is_some() {
+        return Err("usage: diagnose_air_rotation <split> [--low-air]".into());
+    }
     let replay_paths = paths(&root)?;
     let mut hold = Vec::new();
     let mut midpoint = Vec::new();
@@ -219,8 +228,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     || r1.frame != f1.index
                     || w0.frame != f0.index
                     || w1.frame != f1.index
-                    || p0.value[2] <= 100.0
-                    || p1.value[2] <= 100.0
+                    || if low_air {
+                        !(50.0..=100.0).contains(&p0.value[2])
+                            || !(50.0..=100.0).contains(&p1.value[2])
+                    } else {
+                        p0.value[2] <= 100.0 || p1.value[2] <= 100.0
+                    }
                     || c0
                         .inputs
                         .dodge_active_raw
@@ -339,6 +352,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     println!("{} replays", replay_paths.len());
+    println!(
+        "car altitude band: {}",
+        if low_air {
+            "50–100 UU at both ends"
+        } else {
+            "above 100 UU at both ends"
+        }
+    );
     summary("rotation from start angular velocity (deg)", hold);
     summary("rotation from midpoint angular velocity (deg)", midpoint);
     summary(
@@ -378,22 +399,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         "absolute angular vs translation scale difference",
         angular_translation_scale_difference,
     );
-    summary(
-        "same-frame car-car scale difference",
-        same_frame_car_scale_difference,
-    );
-    summary(
-        "same-frame ball-car scale difference",
-        same_frame_ball_car_scale_difference,
-    );
+    if !low_air {
+        summary(
+            "same-frame car-car scale difference",
+            same_frame_car_scale_difference,
+        );
+        summary(
+            "same-frame ball-car scale difference",
+            same_frame_ball_car_scale_difference,
+        );
+    }
     for (ticks, samples) in scale_by_gap.into_iter().enumerate().skip(1) {
         summary(&format!("projected scale at {ticks} ticks"), samples);
     }
     for (ticks, samples) in translation_scale_by_gap.into_iter().enumerate().skip(1) {
         summary(&format!("translation scale at {ticks} ticks"), samples);
     }
-    for (ticks, samples) in ball_scale_by_gap.into_iter().enumerate().skip(1) {
-        summary(&format!("ball scale at {ticks} ticks"), samples);
+    if !low_air {
+        for (ticks, samples) in ball_scale_by_gap.into_iter().enumerate().skip(1) {
+            summary(&format!("ball scale at {ticks} ticks"), samples);
+        }
     }
     Ok(())
 }

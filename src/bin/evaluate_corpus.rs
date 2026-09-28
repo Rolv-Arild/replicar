@@ -809,6 +809,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.compensate_transition_air_damping = true;
         } else if arg == "--hold-low-air-angular" {
             options.hold_low_air_angular = true;
+        } else if arg == "--feedback-low-air-angular" {
+            options.feedback_low_air_angular = true;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -821,7 +823,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
