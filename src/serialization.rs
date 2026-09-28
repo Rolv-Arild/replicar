@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use rocketsim::{ArenaEvent, BallState, CarControls, CarState, PhysState, Vec3A};
 use serde::Serialize;
 
-use crate::conversion::{ConversionOutput, PositionResidual, SimEvent};
+use crate::conversion::{
+    ConversionOutput, ConversionSummary, ConvertOptions, ConvertedFrame, PositionResidual, SimEvent,
+};
 use crate::observations;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -284,6 +286,76 @@ struct FrameLine<'a> {
     position_residuals: &'a [PositionResidual],
 }
 
+pub(crate) fn header_json(
+    observations: &observations::ObservedReplay,
+    options: &ConvertOptions,
+    summary: &ConversionSummary,
+    source_sha256: &Option<String>,
+) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&HeaderLine {
+        record_type: "header",
+        schema_version: SCHEMA_VERSION,
+        source_sha256,
+        boxcars_version: "0.11.5",
+        rocketsim_revision: ROCKETSIM_REVISION,
+        conversion_options: options,
+        tick_rate_hz: 120,
+        units: "Rocket League UU, seconds, radians per second for state angular velocity",
+        header: &observations.header,
+        car_slots: &summary.car_slots,
+        observation_diagnostics: &observations.diagnostics,
+        conversion_diagnostics: &summary.diagnostics,
+    })
+}
+
+pub(crate) fn frame_json(
+    converted: &ConvertedFrame,
+    observed: &observations::Frame,
+    residuals: &[PositionResidual],
+) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&frame_line(converted, observed, residuals))
+}
+
+fn frame_line<'a>(
+    converted: &'a ConvertedFrame,
+    observed: &'a observations::Frame,
+    residuals: &'a [PositionResidual],
+) -> FrameLine<'a> {
+    let state = StateRecord {
+        arena_tick: converted.state.tick_count,
+        ball: (&converted.state.ball).into(),
+        cars: converted
+            .state
+            .cars
+            .iter()
+            .map(|(info, car)| {
+                CarRecord::from_state(info.idx, if info.team.is_blue() { 0 } else { 1 }, car)
+            })
+            .collect(),
+        boost_pads: converted
+            .state
+            .boost_pads
+            .iter()
+            .map(|(config, state)| PadRecord {
+                position: xyz(config.pos),
+                is_big: config.is_big,
+                cooldown: state.cooldown,
+                is_active: state.is_active(),
+            })
+            .collect(),
+    };
+    FrameLine {
+        record_type: "frame",
+        frame: converted.replay_frame,
+        replay_time: converted.replay_time,
+        timeline_tick: converted.timeline_tick,
+        state,
+        observations: observed,
+        simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
+        position_residuals: residuals,
+    }
+}
+
 fn write_line<T: Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, value).map_err(io::Error::other)?;
     writer.write_all(b"\n")
@@ -297,21 +369,20 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
             "converted and observed frame counts differ",
         ));
     }
-    let header = HeaderLine {
-        record_type: "header",
-        schema_version: SCHEMA_VERSION,
-        source_sha256: &output.source_sha256,
-        boxcars_version: "0.11.5",
-        rocketsim_revision: ROCKETSIM_REVISION,
-        conversion_options: &output.options,
-        tick_rate_hz: 120,
-        units: "Rocket League UU, seconds, radians per second for state angular velocity",
-        header: &output.observations.header,
-        car_slots: &output.car_slots,
-        observation_diagnostics: &output.observations.diagnostics,
-        conversion_diagnostics: &output.diagnostics,
+    let summary = ConversionSummary {
+        car_slots: output.car_slots.clone(),
+        diagnostics: output.diagnostics.clone(),
     };
-    write_line(&mut writer, &header)?;
+    writer.write_all(
+        &header_json(
+            &output.observations,
+            &output.options,
+            &summary,
+            &output.source_sha256,
+        )
+        .map_err(io::Error::other)?,
+    )?;
+    writer.write_all(b"\n")?;
     let mut residual_index = 0;
     for (converted, observed) in output.frames.iter().zip(&output.observations.frames) {
         let start = residual_index;
@@ -320,39 +391,11 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
         {
             residual_index += 1;
         }
-        let state = StateRecord {
-            arena_tick: converted.state.tick_count,
-            ball: (&converted.state.ball).into(),
-            cars: converted
-                .state
-                .cars
-                .iter()
-                .map(|(info, car)| {
-                    CarRecord::from_state(info.idx, if info.team.is_blue() { 0 } else { 1 }, car)
-                })
-                .collect(),
-            boost_pads: converted
-                .state
-                .boost_pads
-                .iter()
-                .map(|(config, state)| PadRecord {
-                    position: xyz(config.pos),
-                    is_big: config.is_big,
-                    cooldown: state.cooldown,
-                    is_active: state.is_active(),
-                })
-                .collect(),
-        };
-        let line = FrameLine {
-            record_type: "frame",
-            frame: converted.replay_frame,
-            replay_time: converted.replay_time,
-            timeline_tick: converted.timeline_tick,
-            state,
-            observations: observed,
-            simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
-            position_residuals: &output.position_residuals[start..residual_index],
-        };
+        let line = frame_line(
+            converted,
+            observed,
+            &output.position_residuals[start..residual_index],
+        );
         write_line(&mut writer, &line)?;
     }
     Ok(())

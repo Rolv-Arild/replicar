@@ -12,7 +12,7 @@ $replay = (Get-ChildItem replays/train/1v1/*.replay | Select-Object -First 1).Fu
 cargo run --release --bin convert_replay -- $replay target/example.jsonl
 ```
 
-The CLI accepts an optional third argument for the mesh directory. Its output is JSON Lines: one versioned `header` record followed by one `frame` record per network frame. The header records the replay SHA-256, dependency revisions, conversion options, actor-to-car slots, and diagnostics. Each frame contains replay time, timeline tick, a RocketSim state snapshot, the typed observations with source-frame freshness, simulated events, and position prediction residuals. The replay observations distinguish last-seen values from fresh packets through each field's `frame` and `source` keys. Player and car observations retain raw loadout body product IDs; known IDs select RocketSim hitboxes, while unknown or absent IDs use Octane and remain visible in diagnostics. The [body catalog](data/README.md) documents the supplied item snapshot, source-backed mappings, and unresolved products. Header final scores must never be used as the score at an earlier frame.
+The CLI accepts an optional third argument for the mesh directory. Use an `.jsonl` output path for JSON Lines or `.parquet` for direct Rust Parquet output. JSONL has one versioned `header` record followed by one `frame` record per network frame. Both formats retain the replay SHA-256, dependency revisions, conversion options, actor-to-car slots, diagnostics, complete RocketSim state, observations with source-frame freshness, events, and position residuals. Parquet also has typed columns for dense Python reads. Player and car observations retain raw loadout body product IDs; known IDs select RocketSim hitboxes, while unknown or absent IDs use Octane and remain visible in diagnostics. The [body catalog](data/README.md) documents the supplied item snapshot, source-backed mappings, and unresolved products. Header final scores must never be used as the score at an earlier frame.
 
 To reproduce the development accuracy report, run `cargo run --release --bin evaluate_corpus -- replays/train target/train-conversion-metrics.json` and use `replays/validation` for the held-out development check. The evaluator records one-step pre-correction residuals and four-frame masked predictions for position, linear velocity, rotation, angular velocity, and boost against hold or linear baselines. It evaluates the active primary car when multiple actors share a player. Pass `--no-inferred-boost` for the boost-input ablation or `--octane-hitbox` to use the original all-Octane setup. `convert_replay` accepts the same flags. `calibrate_boost replays/train` reports the evidence for interpreting the boost activation counter. `audit_packet_timing` reports raw car/ball update gaps separately from motion-derived intervals; see `RESULTS.md` for its train/validation protocol. Keep `replays/test` for the final frozen evaluation.
 
@@ -33,7 +33,13 @@ print(arrays["car_position"].shape)  # frames × car slots × XYZ
 
 `iter_frames` streams rich records with only Python's standard library and also accepts `.jsonl.gz`. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car position, rotation and velocity, car boost, demo state, controls, boost pads, team scores, and match clock. It uses NaN for absent numeric observations and a mask for car slots missing from a RocketSim snapshot. Array control channels are in `control_axes_order` and `control_buttons_order`; they include inferred boost. Use the streaming records for original action counters and field provenance, complete state, statistics, and events.
 
-An optional Parquet/Arrow IPC prototype converts the Rust JSONL output to typed ML columns while preserving each complete frame record in a compressed payload. Install the pinned Python extra and run:
+The Rust CLI can write Parquet without an intermediate JSONL file:
+
+```powershell
+cargo run --release --bin convert_replay -- $replay target/example.parquet
+```
+
+Install the pinned Python extra to read Parquet. The earlier Python second-stage writer remains available for Arrow IPC or comparison:
 
 ```powershell
 python -m pip install -r python/requirements-columnar.txt
@@ -51,7 +57,7 @@ print(arrays["car_position"].shape)
 first_rich_frame = next(iter_columnar_frames("target/example.parquet"))
 ```
 
-The columnar format keeps the full observations, simulated events, residuals, and hidden RocketSim fields in `frame_json`; typed columns cover the dense state, controls, pads, score, and clock. Parquet is the recommended ML read format from the current prototype because it can skip the rich payload when loading arrays. JSONL remains the direct Rust output and the easiest inspection format. [RESULTS.md](RESULTS.md) has train-only size/read benchmarks for JSONL, gzip JSONL, Arrow IPC, and Parquet. The Rust converter still retains all snapshots in memory before writing; a direct Rust columnar writer and state-restoration check remain planned.
+The columnar format keeps complete observations, simulated events, residuals, and hidden RocketSim fields in `frame_json`; typed columns cover the dense state, controls, pads, score, and clock. Parquet can skip the rich payload when loading arrays. JSONL remains easiest to inspect. The direct Rust Parquet path simulates twice to determine final car-slot widths before writing 512-frame row groups; it avoids retaining all simulated snapshots, but replay bytes and extracted observations remain in memory for offline lookahead. JSONL still retains all snapshots before writing. [RESULTS.md](RESULTS.md) has format benchmarks and direct-writer parity checks. Full RocketSim state restoration from serialized records remains open, so Parquet has not replaced JSONL as the default example output.
 
 ## Present accuracy limits
 

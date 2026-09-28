@@ -572,3 +572,26 @@ The same commands used `replays/train/2v2/000c0390-fc3c-4a68-8360-3979d9d88aaf.r
 Sizes are decimal MB; read times are median seconds over three warm local reads of the same dense outputs, excluding conversion/write time. Parquet's projected loader skips the rich JSON column, whereas the prototype Arrow loader reads the whole IPC table before selecting columns; this difference is implementation-specific. Gzip JSONL is smallest, but still needs JSON parsing for dense arrays. On the 1v1 sample, a single rich-frame pass took 1.16 s JSONL, 1.35 s gzip, 1.13 s Arrow, and 1.22 s Parquet; rich access is therefore much closer across formats. Columnar write time was about 3.3–8.0 s across these samples, excluding Rust replay conversion. These are development machine measurements on one replay per size, with OS-cache effects; they do not establish corpus-wide throughput.
 
 **Format decision for the next implementation step:** target Parquet for Python ML array access while retaining JSONL as the direct, inspectable Rust output until a native streaming writer exists. Arrow IPC remains available when its somewhat smaller files or batch semantics are preferable. The hybrid payload duplicates some typed values; a direct Rust Parquet writer, bounded-memory conversion, and a state-restoration check are still needed before declaring Phase 5 complete. `replays/test` remains sealed.
+
+## Direct Rust Parquet export (2026-09-28)
+
+`convert_replay` now writes `.parquet` directly from Rust using pinned Apache Arrow/Parquet 60.0.0 with zstd level 3. It preserves the Python prototype's columnar version 1 schema: final JSONL-equivalent header in metadata, first-frame pad configuration, typed state/action/score/clock columns, and a complete `frame_json` payload per row. A callback emits each corrected RocketSim snapshot and its residuals without keeping all snapshots in the Parquet path. Final car slots and conversion diagnostics are learned in a first simulation pass; a second pass writes 512-frame row groups. Both passes' complete car-slot metadata and diagnostics must agree. `boxcars` parsing, replay bytes, and the extracted observations remain replay-sized in memory because offline control inference can inspect future observations. This is bounded **snapshot/output** memory, not bounded total conversion memory. No peak-memory or throughput claim has yet been measured.
+
+The reusable `python/verify_direct_parquet.py` check compares the complete header, every dense NumPy array (including NaN missing values), every rich frame dictionary, and the 512-row-group bound against a Rust JSONL export. Run, for example:
+
+```powershell
+cargo run --bin convert_replay -- replays/train/1v1/0000a984-75af-4b24-b5a6-cb3663fc4efa.replay target/direct-1v1.parquet
+$env:PYTHONPATH = 'target/pydeps'
+python python/verify_direct_parquet.py target/columnar-sample.jsonl target/direct-1v1.parquet
+```
+
+The checked training replays were the same source files and JSONL references as in the columnar prototype section above. The validation file was `replays/validation/1v1/1a3ac92c-961e-469b-9d1a-29d210a7b5d9.replay`, independently exported to both JSONL and Parquet with the same default options. All four comparisons passed:
+
+| Split and size | Frames | Direct Parquet bytes | Header / arrays / rich frames |
+| --- | ---: | ---: | --- |
+| Train 1v1 | 11,663 | 10,541,260 | Exact |
+| Train 2v2 | 6,786 | 10,324,582 | Exact |
+| Train 3v3 | 10,935 | 24,304,160 | Exact |
+| Validation 1v1 | 12,724 | 11,882,204 | Exact |
+
+An initial parity failure found that promoting the replay's binary `f32` time directly to `f64` changed nearly every Python time value compared with reading JSONL's shortest decimal representation. The writer now parses that same decimal representation for the typed time column, and the full-array comparisons pass. `cargo test --all-targets` and Python loader tests pass. The format remains opt-in via the `.parquet` output extension. Restoring a serialized snapshot into a RocketSim arena, total peak-memory measurement, and wider validation checks remain open before making Parquet the default ML export. `replays/test` remains sealed.

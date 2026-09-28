@@ -24,6 +24,7 @@ pub enum ConvertError {
     MissingNetworkFrames,
     UnsupportedMode(String),
     Init(io::Error),
+    Output(io::Error),
     InvalidTime { frame: usize, time: f32 },
 }
 
@@ -34,6 +35,7 @@ impl fmt::Display for ConvertError {
             Self::MissingNetworkFrames => write!(f, "replay has no network frames"),
             Self::UnsupportedMode(mode) => write!(f, "unsupported replay mode: {mode}"),
             Self::Init(error) => write!(f, "RocketSim initialization failed: {error}"),
+            Self::Output(error) => write!(f, "conversion output failed: {error}"),
             Self::InvalidTime { frame, time } => {
                 write!(f, "invalid replay time {time} at frame {frame}")
             }
@@ -110,7 +112,7 @@ pub struct ConvertedFrame {
     pub simulated_events: Vec<SimEvent>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Diagnostics {
     pub skipped_timeline_ticks: u64,
     pub unlinked_car_frames: usize,
@@ -130,7 +132,14 @@ pub struct ConversionOutput {
     pub diagnostics: Diagnostics,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Metadata from a conversion that emits each state through a callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionSummary {
+    pub car_slots: Vec<CarSlot>,
+    pub diagnostics: Diagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CarSlot {
     pub slot: usize,
     pub player_key: String,
@@ -528,11 +537,7 @@ fn dodge_impulse_unobserved(car: &observations::Car, frame: usize, state: &CarSt
 }
 
 fn team(index: u8) -> Team {
-    if index == 0 {
-        Team::Blue
-    } else {
-        Team::Orange
-    }
+    if index == 0 { Team::Blue } else { Team::Orange }
 }
 
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
@@ -589,6 +594,35 @@ pub fn convert_observations(
     observations: ObservedReplay,
     options: &ConvertOptions,
 ) -> Result<ConversionOutput, ConvertError> {
+    let mut frames = Vec::with_capacity(observations.frames.len());
+    let mut position_residuals = Vec::new();
+    let summary = convert_observations_with(&observations, options, |converted, _, residuals| {
+        frames.push(converted.clone());
+        position_residuals.extend_from_slice(residuals);
+        Ok(())
+    })?;
+    Ok(ConversionOutput {
+        source_sha256: None,
+        options: options.clone(),
+        observations,
+        frames,
+        position_residuals,
+        car_slots: summary.car_slots,
+        diagnostics: summary.diagnostics,
+    })
+}
+
+/// Emit one state at a time. The observed replay remains in memory for lookahead and
+/// provenance, but simulated snapshots and residuals are bounded to one frame.
+pub fn convert_observations_with(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    mut on_frame: impl FnMut(
+        &ConvertedFrame,
+        &observations::Frame,
+        &[PositionResidual],
+    ) -> io::Result<()>,
+) -> Result<ConversionSummary, ConvertError> {
     if observations.header.game_type != "TAGame.Replay_Soccar_TA" {
         return Err(ConvertError::UnsupportedMode(
             observations.header.game_type.clone(),
@@ -605,8 +639,6 @@ pub fn convert_observations(
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
     let mut pad_actor_to_index: HashMap<i32, usize> = HashMap::new();
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
-    let mut frames = Vec::with_capacity(observations.frames.len());
-    let mut position_residuals = Vec::new();
     let mut diagnostics = Diagnostics::default();
     let first_time = observations.frames.first().map_or(0.0, |frame| frame.time);
     let mut previous_tick = 0;
@@ -614,6 +646,7 @@ pub fn convert_observations(
     let mut ball_initialized = false;
 
     for (frame_idx, frame) in observations.frames.iter().enumerate() {
+        let mut frame_residuals = Vec::new();
         if !frame.time.is_finite() || frame.time < first_time {
             return Err(ConvertError::InvalidTime {
                 frame: frame.index,
@@ -661,7 +694,7 @@ pub fn convert_observations(
                     None,
                     &observations.frames,
                 ) {
-                    position_residuals.push(residual);
+                    frame_residuals.push(residual);
                 }
             }
             let mut ball = *arena.get_ball_state();
@@ -745,7 +778,7 @@ pub fn convert_observations(
                     Some(car_state.is_on_ground),
                     &observations.frames,
                 ) {
-                    position_residuals.push(residual);
+                    frame_residuals.push(residual);
                 }
             }
             let mut state = if new_lifetime {
@@ -1005,20 +1038,16 @@ pub fn convert_observations(
                 }
             }
         }
-        frames.push(ConvertedFrame {
+        let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
             timeline_tick,
             state: arena.get_arena_state(),
             simulated_events: events,
-        });
+        };
+        on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }
-    Ok(ConversionOutput {
-        source_sha256: None,
-        options: options.clone(),
-        observations,
-        frames,
-        position_residuals,
+    Ok(ConversionSummary {
         car_slots,
         diagnostics,
     })
@@ -1646,21 +1675,25 @@ mod tests {
         );
         assert!(slow_est.is_none());
 
-        assert!(estimate_car_packet_interval(
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            -0.03,
-        )
-        .is_none());
-        assert!(estimate_car_packet_interval(
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            0.6,
-        )
-        .is_none());
+        assert!(
+            estimate_car_packet_interval(
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                -0.03,
+            )
+            .is_none()
+        );
+        assert!(
+            estimate_car_packet_interval(
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                0.6,
+            )
+            .is_none()
+        );
     }
 }
