@@ -1,8 +1,15 @@
+import gzip
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from replay_columnar import (
+    iter_columnar_frames,
+    load_columnar_numpy,
+    read_columnar_header,
+    write_columnar,
+)
 from replay_to_rocketsim import iter_frames, load_numpy, read_header
 
 
@@ -15,6 +22,7 @@ class LoaderTest(unittest.TestCase):
         }
         frame = {
             "record_type": "frame",
+            "frame": 0,
             "replay_time": 1.5,
             "timeline_tick": 10,
             "state": {
@@ -68,6 +76,34 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual(arrays["scores"][0, 0], 2)
             self.assertTrue(arrays["car_present"][0, 0])
             self.assertTrue(__import__("numpy").isnan(arrays["scores"][0, 1]))
+            compressed = Path(directory) / "sample.jsonl.gz"
+            with gzip.open(compressed, "wt", encoding="utf-8") as output:
+                output.write(path.read_text(encoding="utf-8"))
+            self.assertEqual(read_header(compressed), header)
+            self.assertEqual(list(iter_frames(compressed)), [frame])
+            for key, value in load_numpy(compressed).items():
+                if isinstance(value, __import__("numpy").ndarray):
+                    __import__("numpy").testing.assert_equal(value, arrays[key])
+                else:
+                    self.assertEqual(value, arrays[key])
+            try:
+                import pyarrow  # noqa: F401
+            except ImportError:
+                return
+            import numpy as np
+
+            for suffix in ("arrow", "parquet"):
+                columnar = Path(directory) / f"sample.{suffix}"
+                self.assertEqual(write_columnar(path, columnar, batch_size=1), 1)
+                self.assertEqual(read_columnar_header(columnar), header)
+                self.assertEqual(list(iter_columnar_frames(columnar)), [frame])
+                loaded = load_columnar_numpy(columnar)
+                self.assertEqual(loaded.keys(), arrays.keys())
+                for key, expected in arrays.items():
+                    if isinstance(expected, np.ndarray):
+                        np.testing.assert_equal(loaded[key], expected)
+                    else:
+                        self.assertEqual(loaded[key], expected)
 
     def test_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:

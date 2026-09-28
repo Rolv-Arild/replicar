@@ -6,6 +6,7 @@ NumPy is imported only when that function is called.
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from typing import Any, Iterator
@@ -15,7 +16,8 @@ SCHEMA_VERSION = 1
 
 
 def _lines(path: str | Path) -> Iterator[dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as source:
+    opener = gzip.open if Path(path).suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
                 continue

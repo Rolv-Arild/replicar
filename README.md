@@ -31,9 +31,27 @@ arrays = load_numpy("target/example.jsonl")  # requires NumPy
 print(arrays["car_position"].shape)  # frames × car slots × XYZ
 ```
 
-`iter_frames` streams rich records with only Python's standard library. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car position, rotation and velocity, car boost, demo state, controls, boost pads, team scores, and match clock. It uses NaN for absent numeric observations and a mask for car slots missing from a RocketSim snapshot. Array control channels are in `control_axes_order` and `control_buttons_order`; they include inferred boost. Use the streaming records for original action counters and field provenance, complete state, statistics, and events.
+`iter_frames` streams rich records with only Python's standard library and also accepts `.jsonl.gz`. `load_numpy` makes two passes to allocate dense arrays; it returns time/ticks, ball and car position, rotation and velocity, car boost, demo state, controls, boost pads, team scores, and match clock. It uses NaN for absent numeric observations and a mask for car slots missing from a RocketSim snapshot. Array control channels are in `control_axes_order` and `control_buttons_order`; they include inferred boost. Use the streaming records for original action counters and field provenance, complete state, statistics, and events.
 
-JSONL is intentionally inspectable and currently large: one 12,292-frame training replay produced 115 MB. A compact columnar format and a truly streaming Rust conversion API are planned. The current Rust converter retains all snapshots in memory before writing.
+An optional Parquet/Arrow IPC prototype converts the Rust JSONL output to typed ML columns while preserving each complete frame record in a compressed payload. Install the pinned Python extra and run:
+
+```powershell
+python -m pip install -r python/requirements-columnar.txt
+python python/replay_columnar.py target/example.jsonl target/example.parquet
+```
+
+```python
+import sys
+sys.path.insert(0, "python")
+from replay_columnar import read_columnar_header, iter_columnar_frames, load_columnar_numpy
+
+header = read_columnar_header("target/example.parquet")
+arrays = load_columnar_numpy("target/example.parquet")
+print(arrays["car_position"].shape)
+first_rich_frame = next(iter_columnar_frames("target/example.parquet"))
+```
+
+The columnar format keeps the full observations, simulated events, residuals, and hidden RocketSim fields in `frame_json`; typed columns cover the dense state, controls, pads, score, and clock. Parquet is the recommended ML read format from the current prototype because it can skip the rich payload when loading arrays. JSONL remains the direct Rust output and the easiest inspection format. [RESULTS.md](RESULTS.md) has train-only size/read benchmarks for JSONL, gzip JSONL, Arrow IPC, and Parquet. The Rust converter still retains all snapshots in memory before writing; a direct Rust columnar writer and state-restoration check remain planned.
 
 ## Present accuracy limits
 

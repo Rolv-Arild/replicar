@@ -547,3 +547,28 @@ The causal damping ablation also has a consistent masked tradeoff at horizon fou
 | 3v3 | 0.519 / 3.347 → 0.543 / 3.307 | 2.899 / 18.923 → 2.974 / 18.437 |
 
 Both ablations remain **off by default** because neither improves typical and tail masked errors together. The damping controls are physically motivated simulator compensation, not recovered player inputs. The diagnostic does not establish that RocketSim damping is the only cause; raw car packet timing, wheel contact, and unobserved pitch/roll remain possible contributors. Reproduce ignored reports with `cargo run --release --bin evaluate_corpus -- replays/<split> target/<split>-takeoff-context.json` and the same command with `--infer-transition-air-lookahead` or `--compensate-transition-air-damping` and distinct output names. Train/validation each converted 60/60 under all three settings; `replays/test` remains sealed.
+
+## Compact columnar format prototype (2026-09-28)
+
+`python/replay_columnar.py` converts the Rust schema-v1 JSONL output in bounded batches to Arrow IPC (`.arrow`, zstd) or Parquet (`.parquet`, zstd level 3). Each replay frame has typed time/tick, ball, car, control, pad, score, and clock columns with the same dense shapes, NaN missing values, slot order, and masks as `load_numpy`. The full frame JSON is also retained as a compressed binary column, so typed access does not discard hidden RocketSim fields, replay observations/provenance, events, or residuals. The original header, dependency revisions, source hash, options, car slots, and diagnostics are stored in schema metadata. This is a **Python second stage after Rust JSONL**, not a direct Rust writer or a restored RocketSim arena.
+
+The optional Python dependencies used here were Python 3.11.8, NumPy 2.4.4, and PyArrow 25.0.1 on Windows. PyArrow is pinned in `python/requirements-columnar.txt`. Reproduce one benchmark for each size with the named training replay, for example:
+
+```powershell
+python -m pip install --target target/pydeps -r python/requirements-columnar.txt
+$env:PYTHONPATH = 'target/pydeps'
+cargo run --release --bin convert_replay -- replays/train/1v1/0000a984-75af-4b24-b5a6-cb3663fc4efa.replay target/columnar-sample.jsonl
+python python/benchmark_columnar.py target/columnar-sample.jsonl --repeats 3 --report target/columnar-benchmark.json
+```
+
+The same commands used `replays/train/2v2/000c0390-fc3c-4a68-8360-3979d9d88aaf.replay` and `replays/train/3v3/00054e5d-90dd-4e96-a922-bf28ae08513a.replay`, with `target/columnar-2v2.jsonl` and `target/columnar-3v3.jsonl`. The ignored reports are `target/columnar-benchmark.json`, `target/columnar-2v2-benchmark.json`, and `target/columnar-3v3-benchmark.json`. Source SHA-256 values are in those reports. The script regenerates both columnar files and gzip JSONL, times three complete dense-array loads for each format, and compares every NumPy array and **every complete rich frame** against the Rust JSONL. All three replays passed exact Python dictionary and NumPy array equality, including missing values. Synthetic tests also cover both formats and gzip JSONL.
+
+| Train size | Frames | Raw JSONL MB / read s | gzip JSONL MB / read s | Arrow IPC MB / read s | Parquet MB / read s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1v1 | 11,663 | 129.29 / 2.51 | **7.57** / 2.96 | 9.30 / 0.051 | 10.50 / **0.018** |
+| 2v2 | 6,786 | 118.67 / 2.26 | **7.46** / 2.62 | 9.16 / 0.048 | 10.26 / **0.011** |
+| 3v3 | 10,935 | 262.82 / 5.61 | **17.46** / 6.39 | 21.58 / 0.107 | 24.07 / **0.017** |
+
+Sizes are decimal MB; read times are median seconds over three warm local reads of the same dense outputs, excluding conversion/write time. Parquet's projected loader skips the rich JSON column, whereas the prototype Arrow loader reads the whole IPC table before selecting columns; this difference is implementation-specific. Gzip JSONL is smallest, but still needs JSON parsing for dense arrays. On the 1v1 sample, a single rich-frame pass took 1.16 s JSONL, 1.35 s gzip, 1.13 s Arrow, and 1.22 s Parquet; rich access is therefore much closer across formats. Columnar write time was about 3.3–8.0 s across these samples, excluding Rust replay conversion. These are development machine measurements on one replay per size, with OS-cache effects; they do not establish corpus-wide throughput.
+
+**Format decision for the next implementation step:** target Parquet for Python ML array access while retaining JSONL as the direct, inspectable Rust output until a native streaming writer exists. Arrow IPC remains available when its somewhat smaller files or batch semantics are preferable. The hybrid payload duplicates some typed values; a direct Rust Parquet writer, bounded-memory conversion, and a state-restoration check are still needed before declaring Phase 5 complete. `replays/test` remains sealed.
