@@ -446,67 +446,18 @@ The reviewed reports are `target/train-reviewed.json` and `target/validation-rev
    - In airborne flight, holding the prior angular velocity slightly outperforms the converter's full-match forward simulation (0.825 vs 0.887 rad/s on validation). This differs from the isolated one-car inversion diagnostic above, which uses the future endpoint directly.
    - In transition zones ($50 \le z \le 100$ UU), contact and takeoff impulses create the largest instantaneous angular discrepancies (2.00 vs 0.67 rad/s on validation).
 
-## Car-packet timing resolution and discrete physics quantization (2026-09-27)
+## Offline car motion interval diagnostic (2026-09-28)
 
-### Background and raw actor cadence analysis
+The earlier aerial analysis found that, on adjacent fresh airborne car packets, translation and rotation often imply about half the interval between replay frame timestamps when compared with their reported velocities. The ball usually implies the full interval. See the preceding **Aerial rotation and replay-packet timing diagnosis** for paired train and validation measurements. This does not identify the source of the discrepancy.
 
-Earlier investigation into aerial rotation fidelity revealed a ~0.50 scale factor between observed rotation and integration over nominal frame deltas ($\Delta t = 	ext{Frame.time}_i - 	ext{Frame.time}_{i-1} pprox 0.0333$ s). To determine whether this was a clock discrepancy, network jitter, or physics quantization, we inspected the raw actor update cadence across the training corpus using server-authoritative controls:
+Commit `b2965e9` added `estimate_car_packet_interval`. Given two car positions and their linear velocities, it projects displacement onto mean velocity:
 
-1. **Ball packets and match clock:**
-   - Comparing consecutive ball rigid body packets against nominal frame delta yielded a median scale of **0.999** (almost exactly 4 discrete 120 Hz ticks per frame).
-   - Server match clock countdowns (SecondsRemaining) matched elapsed replay time within network quantization (.000$ s median).
-   - Ball packets and match clock are server-authoritative and advance synchronously with Frame.time.
+`t_projected = (p1 - p0) · mean(v0, v1) / |mean(v0, v1)|²`
 
-2. **Car rigid body updates and client network replication:**
-   - Cars are replicated client objects. While replay frames advance at ~30 Hz (averaging ~4 ticks per frame), consecutive car rigid body updates reflect discrete game engine ticks ( \in \{1, \dots, 8\}$).
-   - Distribution of discrete ticks between consecutive car updates on 
-eplays/train (192,274 samples):
-     - =2$ ticks: **53.0%** (101,866)
-     - =7$ ticks: **11.1%** (21,323)
-     - =1$ tick: **10.3%** (19,842)
-     - =4$ ticks: **8.0%** (15,338)
-     - =8$ ticks: **5.2%** (10,051)
-     - =3$ ticks: **3.9%** (7,527)
-     - =5, 6$ ticks: **6.8%** (13,167)
-   - Pairs commonly alternate between =2$ and =6$ or =7$ ticks, summing to ~8 ticks over 2 frames ($pprox 4$ ticks/frame average).
-   - When a client packet representing 2 physics ticks is compared against a 4-tick RocketSim step or nominal frame linear extrapolation ($\Delta t pprox 0.0333$ s), an apparent translation error of ~16.7 UU at 1000 UU/s is artificially recorded.
+The implementation rounds this result to a multiple of 1/120 s and attaches it to each eligible pre-correction car residual as `offline_interval`. It now returns no estimate when mean speed is below 100 UU/s, the fields are invalid, or the starting velocity and position came from different replay frames. The rounded count is a **motion-derived hypothesis**, not an observed server or client physics tick count. The replay frame timestamp and RocketSim's 120 Hz simulation schedule are unchanged.
 
-### Offline interval formulation
+The `offline_projection_fit` metric measures how closely the starting velocity times that fitted interval reaches the second position. **It is an in-sample fit:** the second position was already used to choose the interval, and the second velocity also enters the estimate. Consequently, this metric must not be compared with causal extrapolation as a prediction gain. The 5× and 225× position improvements claimed in the original branch commit and section do not establish better reconstruction or prediction. The sample sets also differ. We retain the fit only as a diagnostic of how well a quantized scalar interval describes observed translation.
 
-To isolate client replication quantization without distorting causal simulation, we implemented an offline interval estimator:
-\Delta t_{	ext{eff}} = rac{(\mathbf{p}_1 - \mathbf{p}_0) \cdot ar{\mathbf{v}}}{\|ar{\mathbf{v}}\|^2}, \quad k_{	ext{eff}} = \mathrm{round}(\Delta t_{	ext{eff}} \cdot 120)
-	ext{effective\_seconds} = rac{k_{	ext{eff}}}{120}, \quad 	ext{scale} = rac{	ext{effective\_seconds}}{\Delta t_{	ext{nominal}}}
+There is independent, but narrower, cross-field evidence: the preceding diagnostic uses the position-derived interval to integrate angular velocity and evaluates against the *unused* target orientation. On its selected airborne pairs, validation median orientation error fell from 2.881° to 0.097°. That supports a shared translation/rotation timing or velocity-semantics effect on those pairs. It still uses future data, is not a causal test, and does not prove that the inferred tick count is the actual packet age.
 
-- Implemented in src/conversion.rs as estimate_car_packet_interval(...) -> Option<OfflineIntervalEstimate>.
-- Low speeds ($\|ar{\mathbf{v}}\| < 100$ UU/s) fall back to rounded nominal frame delta.
-- Exposed on PositionResidual as offline_interval: Option<OfflineIntervalEstimate> and offline_extrapolation_error_uu: Option<f32>.
-- **Causal vs Offline Timeline Separation:** Forward simulation in convert_observations remains strictly on the 120 Hz replay timeline (	imeline_tick, stepping 4 ticks per frame) to maintain arena-wide synchronization with the ball, boost pads, and match clock. The offline interval is attached as an offline lookahead and diagnostic metric.
-
-### Corpus benchmarks: Train vs Validation
-
-#### 1. Full-match linear extrapolation error (all car updates)
-
-evaluate_corpus tracks both nominal linear extrapolation error ($\Delta t_{	ext{nominal}}$) and offline linear extrapolation error ($\Delta t_{	ext{eff}}$):
-
-| Split | Metric | Samples | p50 (UU) | p90 (UU) | p99 (UU) | Error Reduction (p50) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| **train** | Nominal Linear Error | 998,830 | 18.43 | 44.46 | 72.04 | Baseline |
-| train | Offline Linear Error | 994,712 | **3.52** | **14.80** | **38.96** | **-80.9% (5.2x reduction)** |
-| **validation** | Nominal Linear Error | 1,056,576 | 17.64 | 43.75 | 71.24 | Baseline |
-| validation | Offline Linear Error | 1,052,177 | **3.51** | **14.59** | **38.33** | **-80.1% (5.0x reduction)** |
-
-#### 2. Isolated aerial pair benchmarks (51,038 air pairs on train)
-
-When tested on isolated aerial pairs where cars are free of ground tire friction:
-- **Linear position error:** drops from 24.81 UU to **0.11 UU** (p50) and 47.04 UU to **1.29 UU** (p90) — a **225x reduction**.
-- **Rotation error:** drops from 3.027° to **0.105°** (p50) and 7.310° to **1.646°** (p90) — a **29x reduction**.
-- **RocketSim aerial step:** isolated RocketSim integration using {	ext{eff}}$ ticks achieves orientation error p50 = **0.088°** (down from 3.062°) and angular velocity error p50 = **0.012 rad/s** (down from 0.025 rad/s).
-
-#### 3. Verification of causal mode and masked metrics
-
-Running evaluate_corpus verified zero regression in causal simulation:
-- 1-step simulated car position error: train p50 = 16.96 UU, validation p50 = 16.39 UU.
-- 1-step simulated car rotation error: train p50 = 1.88°, validation p50 = 1.85°.
-- Masked horizons 1–4 position: train [17.13, 15.66, 16.42, 16.78] UU, validation [16.56, 14.96, 16.19, 15.97] UU.
-- All 60 train and 60 validation replays converted successfully with zero errors. 
-eplays/test remains untouched.
+The prior branch reported modes at 2 and 7 rounded ticks, but its raw actor-cadence analysis and isolated RocketSim experiment were not committed as reproducible source or reports. Those modes should be treated as **inferred motion intervals**, not raw packet timestamps. Next, measure actual per-actor update gaps from replay frames and compare projected intervals by gap length, actor, replay, and contact state. Any correction to the converter needs an independent target-field or masked validation result, with the original replay timeline preserved.

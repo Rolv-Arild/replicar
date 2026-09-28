@@ -19,7 +19,7 @@ struct Samples {
     simulated: Vec<f32>,
     hold: Vec<f32>,
     linear: Vec<f32>,
-    offline_linear: Vec<f32>,
+    offline_projection_fit: Vec<f32>,
 }
 
 impl Samples {
@@ -35,10 +35,10 @@ impl Samples {
             self.linear.push(value);
         }
         if let Some(value) = residual
-            .offline_extrapolation_error_uu
+            .offline_projection_fit_error_uu
             .filter(|v| v.is_finite())
         {
-            self.offline_linear.push(value);
+            self.offline_projection_fit.push(value);
         }
     }
 
@@ -47,7 +47,8 @@ impl Samples {
             simulated: quantiles(&self.simulated),
             hold: quantiles(&self.hold),
             linear: quantiles(&self.linear),
-            offline_linear: (!self.offline_linear.is_empty()).then(|| quantiles(&self.offline_linear)),
+            offline_projection_fit: (!self.offline_projection_fit.is_empty())
+                .then(|| quantiles(&self.offline_projection_fit)),
         }
     }
 
@@ -55,7 +56,8 @@ impl Samples {
         self.simulated.extend_from_slice(&other.simulated);
         self.hold.extend_from_slice(&other.hold);
         self.linear.extend_from_slice(&other.linear);
-        self.offline_linear.extend_from_slice(&other.offline_linear);
+        self.offline_projection_fit
+            .extend_from_slice(&other.offline_projection_fit);
     }
 }
 
@@ -90,7 +92,7 @@ struct ErrorSummary {
     hold: Quantiles,
     linear: Quantiles,
     #[serde(skip_serializing_if = "Option::is_none")]
-    offline_linear: Option<Quantiles>,
+    offline_projection_fit: Option<Quantiles>,
 }
 
 #[derive(Default)]
@@ -555,7 +557,7 @@ fn add_masked_error(
         altitude_z: Some(position.value[2]),
         is_on_ground: None,
         offline_interval: None,
-        offline_extrapolation_error_uu: None,
+        offline_projection_fit_error_uu: None,
     });
 }
 

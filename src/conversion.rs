@@ -134,16 +134,13 @@ pub struct CarSlot {
     pub hitbox: String,
 }
 
-/// Labeled offline interval estimate between consecutive car-packet observations.
-///
-/// In Rocket League replays, car rigid body packets arrive asynchronously from network
-/// replication, meaning their observed physics displacement corresponds to discrete 120 Hz
-/// engine ticks rather than the nominal frame timestamp delta.
+/// Offline motion-derived interval estimate between two car observations.
+/// This is a diagnostic projection, not a measured packet timestamp or engine tick count.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OfflineIntervalEstimate {
-    /// Effective physical duration in seconds: `effective_ticks as f32 / 120.0`.
+    /// Motion-derived duration after rounding to the nearest 120 Hz tick.
     pub effective_seconds: f32,
-    /// Discrete 120 Hz engine ticks elapsed between the two updates.
+    /// Rounded tick count implied by the motion projection; not observed engine ticks.
     pub effective_ticks: u32,
     /// Ratio of effective duration to nominal frame delta (`effective_seconds / nominal_dt`).
     pub scale: f32,
@@ -167,7 +164,8 @@ pub struct PositionResidual {
     pub altitude_z: Option<f32>,
     pub is_on_ground: Option<bool>,
     pub offline_interval: Option<OfflineIntervalEstimate>,
-    pub offline_extrapolation_error_uu: Option<f32>,
+    /// In-sample fit: the target position is used both to infer the interval and score it.
+    pub offline_projection_fit_error_uu: Option<f32>,
 }
 
 pub type KinematicResidual = PositionResidual;
@@ -256,9 +254,8 @@ fn vec3(value: [f32; 3]) -> Vec3A {
     Vec3A::new(value[0], value[1], value[2])
 }
 
-/// Estimates the effective physical interval and discrete 120 Hz tick count
-/// between two consecutive car rigid body observations using observed translation
-/// and average linear velocity.
+/// Projects displacement onto mean velocity and rounds the implied interval to 120 Hz.
+/// Uses both endpoint positions and velocities, so it cannot predict the second position.
 pub fn estimate_car_packet_interval(
     pos_start: [f32; 3],
     pos_end: [f32; 3],
@@ -276,15 +273,8 @@ pub fn estimate_car_packet_interval(
 
     let v_mean = (v0 + v1) * 0.5;
     let v_sq = v_mean.length_squared();
-    if v_sq < 100.0 * 100.0 {
-        let k = (nominal_dt * 120.0).round().max(1.0) as u32;
-        let effective_seconds = k as f32 / 120.0;
-        let scale = effective_seconds / nominal_dt;
-        return Some(OfflineIntervalEstimate {
-            effective_seconds,
-            effective_ticks: k,
-            scale,
-        });
+    if !v_sq.is_finite() || v_sq < 100.0 * 100.0 {
+        return None;
     }
 
     let delta_p = p1 - p0;
@@ -403,12 +393,12 @@ fn position_residual(
             (None, None)
         };
 
-    let (offline_interval, offline_extrapolation_error_uu) = if actor_id.is_some() {
+    let (offline_interval, offline_projection_fit_error_uu) = if actor_id.is_some() {
         if let (Some(actual_vel), Some(prev_vel)) = (
             body.linear_velocity.as_ref().filter(|v| v.frame == index),
             previous.and_then(|b| b.linear_velocity.as_ref()),
         ) {
-            if recent(prev_vel.frame) {
+            if prev_vel.frame == previous_pos.frame {
                 let est = estimate_car_packet_interval(
                     previous_pos.value,
                     actual.value,
@@ -417,7 +407,8 @@ fn position_residual(
                     dt,
                 );
                 let err = est.map(|e| {
-                    (previous_pos_val + vec3(prev_vel.value) * e.effective_seconds - actual_pos).length()
+                    (previous_pos_val + vec3(prev_vel.value) * e.effective_seconds - actual_pos)
+                        .length()
                 });
                 (est, err)
             } else {
@@ -446,7 +437,7 @@ fn position_residual(
         altitude_z: Some(actual.value[2]),
         is_on_ground,
         offline_interval,
-        offline_extrapolation_error_uu,
+        offline_projection_fit_error_uu,
     })
 }
 
@@ -1560,8 +1551,13 @@ mod tests {
         let interval = residual.offline_interval.unwrap();
         assert_eq!(interval.effective_ticks, 10);
         assert!((interval.effective_seconds - 10.0 / 120.0).abs() < 1e-4);
-        assert!(residual.offline_extrapolation_error_uu.is_some());
-        assert!((residual.offline_extrapolation_error_uu.unwrap() - (10.0f32 - 100.0 * 10.0 / 120.0).abs()).abs() < 1e-3);
+        assert!(residual.offline_projection_fit_error_uu.is_some());
+        assert!(
+            (residual.offline_projection_fit_error_uu.unwrap()
+                - (10.0f32 - 100.0 * 10.0 / 120.0).abs())
+            .abs()
+                < 1e-3
+        );
 
         let mut frames = frames;
         frames[1].time = 0.8;
@@ -1595,7 +1591,7 @@ mod tests {
         assert!(stale.simulated_angular_velocity_error_rad_per_sec.is_none());
         assert!(stale.linear_extrapolation_error_uu.is_none());
         assert!(stale.offline_interval.is_none());
-        assert!(stale.offline_extrapolation_error_uu.is_none());
+        assert!(stale.offline_projection_fit_error_uu.is_none());
     }
 
     #[test]
@@ -1606,7 +1602,8 @@ mod tests {
             [1200.0, 0.0, 0.0],
             [1200.0, 0.0, 0.0],
             0.033333,
-        ).expect("valid interval");
+        )
+        .expect("valid interval");
         assert_eq!(est.effective_ticks, 10);
         assert!((est.effective_seconds - 10.0 / 120.0).abs() < 1e-4);
         assert!((est.scale - (10.0 / 120.0) / 0.033333).abs() < 1e-3);
@@ -1617,22 +1614,28 @@ mod tests {
             [20.0, 0.0, 0.0],
             [20.0, 0.0, 0.0],
             0.033333,
-        ).expect("low speed fallback");
-        assert_eq!(slow_est.effective_ticks, 4);
+        );
+        assert!(slow_est.is_none());
 
-        assert!(estimate_car_packet_interval(
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            -0.03,
-        ).is_none());
-        assert!(estimate_car_packet_interval(
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0],
-            0.6,
-        ).is_none());
+        assert!(
+            estimate_car_packet_interval(
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                -0.03,
+            )
+            .is_none()
+        );
+        assert!(
+            estimate_car_packet_interval(
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                0.6,
+            )
+            .is_none()
+        );
     }
 }
