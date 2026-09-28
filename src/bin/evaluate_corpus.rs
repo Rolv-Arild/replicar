@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use replay_to_rocketsim::conversion::{
-    convert_bytes, convert_observations, quaternion, rotation_error_degrees, CarSlot,
-    ConversionOutput, ConvertOptions, PositionResidual,
+    CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
+    convert_observations, quaternion, rotation_error_degrees,
 };
 use replay_to_rocketsim::observations::{Body, ObservedReplay};
 use rocketsim::{ArenaEvent, Mat3A, PhysState};
@@ -261,6 +261,7 @@ struct ReplayReport {
     car_slots: Vec<CarSlot>,
     position_uu: BodySummary,
     kinematics: KinematicsByBodySummary,
+    masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
 }
 
 #[derive(Serialize)]
@@ -806,6 +807,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_transition_air_lookahead = true;
         } else if arg == "--compensate-transition-air-damping" {
             options.compensate_transition_air_damping = true;
+        } else if arg == "--hold-low-air-angular" {
+            options.hold_low_air_angular = true;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -818,7 +821,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--octane-hitbox] [--mask-seed u64]".into());
+            return Err("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--octane-hitbox] [--mask-seed u64]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -874,6 +877,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(conversion) => {
                 let mut own = ByBody::default();
                 let mut own_kinematics = KinematicsByBody::default();
+                let mut own_masked_kinematics_report = BTreeMap::new();
                 for residual in &conversion.position_residuals {
                     own.add(residual);
                     own_kinematics.add_residual(residual);
@@ -963,6 +967,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut own_boost,
                             &mut own_angular_by_altitude,
                         );
+                        own_masked_kinematics_report = own_masked_kinematics
+                            .iter()
+                            .map(|(&horizon, samples)| (horizon, samples.summary()))
+                            .collect();
                         for (altitude, samples) in own_angular_by_altitude {
                             car_angular_by_altitude
                                 .entry(altitude)
@@ -1026,6 +1034,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     car_slots: conversion.car_slots.clone(),
                     position_uu: own.summary(),
                     kinematics: own_kinematics.summary(),
+                    masked_kinematics_by_horizon_frames: own_masked_kinematics_report,
                 });
             }
             Err(error) => report.failures.push(Failure {

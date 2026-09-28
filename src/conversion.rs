@@ -69,6 +69,8 @@ pub struct ConvertOptions {
     pub infer_transition_air_lookahead: bool,
     /// Compensate RocketSim air damping in the low-air transition band without future packets.
     pub compensate_transition_air_damping: bool,
+    /// Experimental: carry a recent replay angular velocity across contact-free low-air intervals.
+    pub hold_low_air_angular: bool,
     /// Select a RocketSim hitbox from the replay player's car-body product ID when known.
     pub use_loadout_hitboxes: bool,
     /// Gaps larger than this are left unsimulated and recorded in diagnostics.
@@ -90,6 +92,7 @@ impl Default for ConvertOptions {
             infer_air_controls_from_lookahead: true,
             infer_transition_air_lookahead: false,
             compensate_transition_air_damping: false,
+            hold_low_air_angular: false,
             use_loadout_hitboxes: true,
             max_gap_ticks: 1200,
         }
@@ -307,6 +310,66 @@ pub fn estimate_car_packet_interval(
         effective_ticks: k,
         scale,
     })
+}
+
+/// An intentionally narrow causal ablation. The current replay angular packet is not read.
+fn low_air_angular_hold(
+    observations: &ObservedReplay,
+    index: usize,
+    car: &observations::Car,
+    predicted: &CarState,
+    slot: usize,
+    events: &[SimEvent],
+) -> Option<Vec3A> {
+    let frame = observations.frames.get(index)?;
+    let previous = observations.frames.get(index.checked_sub(1)?)?;
+    let prior = previous
+        .cars
+        .iter()
+        .find(|c| c.actor_id == car.actor_id && c.actor_created_frame == car.actor_created_frame)?;
+    let pos = prior.body.position.as_ref()?;
+    let angular = prior.body.angular_velocity_replay_units.as_ref()?;
+    let held = vec3(angular.value) * 0.01;
+    if !(50.0..=100.0).contains(&pos.value[2])
+        || !(50.0..=100.0).contains(&predicted.phys.pos.z)
+        || !held.is_finite()
+        || predicted.is_on_ground
+        || predicted.wheels_with_contact.iter().any(|&contact| contact)
+        || predicted.world_contact_normal.is_some()
+        || frame.time - observations.frames.get(pos.frame)?.time > 0.15
+        || frame.time - observations.frames.get(angular.frame)?.time > 0.15
+    {
+        return None;
+    }
+    if events.iter().any(|event| match event.event {
+        ArenaEvent::CarHitWorld(v) => v.car_idx == slot,
+        ArenaEvent::CarHitBall(v) => v.car_idx == slot,
+        ArenaEvent::CarHitCar(v) => v.bumper_car_idx == slot || v.victim_car_idx == slot,
+        _ => false,
+    }) {
+        return None;
+    }
+    for earlier in (car.actor_created_frame..=index).rev() {
+        let candidate = &observations.frames[earlier];
+        if frame.time - candidate.time > 0.15 {
+            break;
+        }
+        if let Some(c) = candidate.cars.iter().find(|c| {
+            c.actor_id == car.actor_id && c.actor_created_frame == car.actor_created_frame
+        }) {
+            let odd = |v: &Option<Value<u8>>| {
+                v.as_ref()
+                    .is_some_and(|v| v.frame == earlier && v.value % 2 == 1)
+            };
+            if odd(&c.inputs.jump_active_raw)
+                || odd(&c.inputs.double_jump_active_raw)
+                || odd(&c.inputs.dodge_active_raw)
+            {
+                return None;
+            }
+        }
+    }
+    Some(held)
 }
 
 fn position_residual(
@@ -768,7 +831,20 @@ pub fn convert_observations_with(
                             .find(|previous| previous.actor_id == car.actor_id)
                     })
                     .map(|car| &car.body);
-                let car_state = arena.get_car_state(slot);
+                let mut car_state = *arena.get_car_state(slot);
+                if options.hold_low_air_angular {
+                    if let Some(held) = low_air_angular_hold(
+                        observations,
+                        frame.index,
+                        car,
+                        &car_state,
+                        slot,
+                        &events,
+                    ) {
+                        car_state.phys.ang_vel = held;
+                        arena.set_car_state(slot, car_state);
+                    }
+                }
                 if let Some(residual) = position_residual(
                     frame.index,
                     Some(car.actor_id),
