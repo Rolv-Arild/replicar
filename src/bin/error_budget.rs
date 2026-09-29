@@ -1,10 +1,13 @@
 //! Error budget for one-step, pre-correction replay-state prediction on development replays.
 //!
-//! Splits the converter's own position and linear-velocity residuals by object, packet gap,
-//! ground/air/wall regime and proximity to other objects, and reports how much of the total
-//! squared error and of the large-error tail each group holds. Position error is also split into
-//! along-track (parallel to the last observed velocity) and cross-track parts; a pure timing
-//! offset appears as an along-track error proportional to speed.
+//! Residuals are the converter's own errors just before a fresh packet corrects the simulation.
+//! With packet-lag inference on, only packets whose lag came from their own motion chain
+//! (`source == "chain"`) are used, so the residual isolates model error from timing error.
+//! Each residual is assigned to exactly one behavior partition (first match) so that shares of
+//! squared error add up: flip/jump activity, contact with the ball or another car, boosting,
+//! driving on the ground or a wall, and coasting or aerial flight. Reports position, velocity,
+//! rotation and angular-velocity quantiles and each partition's share of the total squared error.
+//! Train replays only; refuses paths containing "test".
 
 use std::collections::BTreeMap;
 use std::env;
@@ -13,19 +16,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
+use replay_to_rocketsim::observations::{Car, Value};
 
 #[derive(Default)]
 struct Group {
     position: Vec<f32>,
     velocity: Vec<f32>,
-    along_sq: f64,
-    cross_sq: f64,
-    vertical_sq: f64,
-    /// Signed along-track error divided by previous speed: an implied time offset in seconds.
-    time_offsets: Vec<f32>,
+    rotation: Vec<f32>,
+    angular: Vec<f32>,
 }
 
-fn quantile(values: &mut Vec<f32>, q: f64) -> f32 {
+fn quantile(values: &mut [f32], q: f64) -> f32 {
     if values.is_empty() {
         return f32::NAN;
     }
@@ -50,173 +51,219 @@ fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(result)
 }
 
-fn norm(v: [f32; 3]) -> f32 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
-fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
-    norm([a[0] - b[0], a[1] - b[1], a[2] - b[2]])
+fn odd(value: &Option<Value<u8>>) -> bool {
+    value.as_ref().is_some_and(|v| v.value % 2 == 1)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(
         env::args_os()
             .nth(1)
-            .ok_or("usage: error_budget <split dir or replay>")?,
+            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag]")?,
     );
     if path.to_string_lossy().contains("test") {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let mut options = ConvertOptions::default();
-    options.infer_packet_lag = env::args_os().any(|arg| arg == "--infer-packet-lag");
+    let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
+    options.infer_packet_lag = !no_lag;
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
-    let mut total_position_sq = 0.0f64;
-    let mut total_tail = 0usize;
-    let mut total_samples = 0usize;
+    let mut skipped = 0usize;
+    let mut used = 0usize;
 
     for replay_path in replay_paths(&path)? {
         let output = convert_bytes(&fs::read(&replay_path)?, &options)?;
         let frames = &output.observations.frames;
         for residual in &output.position_residuals {
-            let is_car = residual.actor_id.is_some();
+            let converted = &output.frames[residual.frame];
             let frame = &frames[residual.frame];
+            let chain = |actor: Option<i32>| {
+                converted
+                    .packet_lags
+                    .iter()
+                    .any(|lag| lag.actor_id == actor && lag.source == "chain")
+            };
+            if !no_lag && !chain(residual.actor_id) {
+                skipped += 1;
+                continue;
+            }
+            used += 1;
             let ball = frame
                 .ball
                 .as_ref()
-                .and_then(|body| body.position.as_ref())
+                .and_then(|b| b.position.as_ref())
                 .map(|p| p.value);
-            let car_positions: Vec<(i32, [f32; 3])> = frame
-                .cars
-                .iter()
-                .filter_map(|car| Some((car.actor_id, car.body.position.as_ref()?.value)))
-                .collect();
-            let own_position = residual.actor_id.and_then(|id| {
-                car_positions
-                    .iter()
-                    .find(|(a, _)| *a == id)
-                    .map(|(_, p)| *p)
-            });
-            let gap = residual.seconds_since_previous_position;
-            let gap_label = if gap < 0.045 {
-                "gap 1 frame"
-            } else if gap < 0.08 {
-                "gap 2 frames"
-            } else if gap < 0.12 {
-                "gap 3 frames"
-            } else {
-                "gap >3 frames"
-            };
-            let altitude = residual.altitude_z.unwrap_or(f32::NAN);
-            let regime = if is_car {
+            let label = if let Some(actor) = residual.actor_id {
+                let Some(car) = frame.cars.iter().find(|c| c.actor_id == actor) else {
+                    continue;
+                };
+                let position = car.body.position.as_ref().map(|p| p.value);
+                let previous = frames
+                    .get(residual.frame.wrapping_sub(1))
+                    .and_then(|f| f.cars.iter().find(|c| c.actor_id == actor));
+                let active_counter = |c: &Car| {
+                    odd(&c.inputs.jump_active_raw)
+                        || odd(&c.inputs.double_jump_active_raw)
+                        || odd(&c.inputs.dodge_active_raw)
+                        || odd(&c.inputs.flip_car_active_raw)
+                };
+                let flipping = active_counter(car) || previous.is_some_and(active_counter);
+                let subtype = if odd(&car.inputs.dodge_active_raw) {
+                    "CAR dodge counter odd"
+                } else if odd(&car.inputs.double_jump_active_raw) {
+                    "CAR double-jump counter odd"
+                } else if odd(&car.inputs.flip_car_active_raw) {
+                    "CAR flip-car counter odd"
+                } else if odd(&car.inputs.jump_active_raw) {
+                    "CAR jump counter odd"
+                } else {
+                    "CAR counter odd in previous frame only"
+                };
                 let near_ball =
-                    matches!((own_position, ball), (Some(c), Some(b)) if dist(c, b) < 300.0);
-                if near_ball {
-                    "car near ball (<300)"
-                } else if residual.is_on_ground == Some(true) && altitude < 50.0 {
-                    "car ground"
-                } else if residual.is_on_ground == Some(true) {
-                    "car on wall/ramp/ceiling"
+                    matches!((position, ball), (Some(c), Some(b)) if dist(c, b) < 300.0);
+                let near_car = frame.cars.iter().any(|other| {
+                    other.actor_id != actor
+                        && matches!((position, other.body.position.as_ref()),
+                            (Some(c), Some(o)) if dist(c, o.value) < 300.0)
+                });
+                let boosting = odd(&car.inputs.boost_active_raw);
+                let ground = residual.is_on_ground == Some(true);
+                let altitude = residual.altitude_z.unwrap_or(f32::NAN);
+                if flipping {
+                    subtype
+                } else if near_ball {
+                    "CAR near ball (<300)"
+                } else if near_car {
+                    "CAR near other car (<300)"
+                } else if ground && altitude < 50.0 {
+                    if boosting {
+                        "CAR ground boosting"
+                    } else {
+                        "CAR ground no boost"
+                    }
+                } else if ground {
+                    if boosting {
+                        "CAR wall/ramp boosting"
+                    } else {
+                        "CAR wall/ramp no boost"
+                    }
+                } else if boosting {
+                    "CAR air boosting"
                 } else {
-                    "car airborne"
+                    "CAR air no boost"
                 }
             } else {
-                let near_car =
-                    ball.is_some_and(|b| car_positions.iter().any(|(_, c)| dist(*c, b) < 300.0));
+                let near_car = ball.is_some_and(|b| {
+                    frame.cars.iter().any(|c| {
+                        c.body
+                            .position
+                            .as_ref()
+                            .is_some_and(|p| dist(p.value, b) < 300.0)
+                    })
+                });
+                let z = residual.altitude_z.unwrap_or(f32::NAN);
                 if near_car {
-                    "ball near car (<300)"
-                } else if altitude > 200.0 {
-                    "ball high air"
+                    "BALL near car (<300)"
+                } else if z > 200.0 {
+                    "BALL high air"
                 } else {
-                    "ball free"
+                    "BALL low (ground/bounce/wall)"
                 }
             };
-            let kind = if is_car { "CAR" } else { "BALL" };
-            let labels = [
-                format!("{kind} all"),
-                format!("{kind} {gap_label}"),
-                format!("{kind} / {regime}"),
-                format!("{kind} / {regime} / {gap_label}"),
-            ];
-            let error = residual.simulated_error_vector_uu;
-            let magnitude = residual.simulated_error_uu;
-            total_position_sq += f64::from(magnitude).powi(2) * f64::from(is_car);
-            total_samples += usize::from(is_car);
-            total_tail += usize::from(is_car && magnitude > 50.0);
-            for label in labels {
-                let group = groups.entry(label).or_default();
-                group.position.push(magnitude);
+            let kind = if residual.actor_id.is_some() {
+                "CAR all"
+            } else {
+                "BALL all"
+            };
+            for name in [label, kind] {
+                let group = groups.entry(name.to_string()).or_default();
+                group.position.push(residual.simulated_error_uu);
                 if let Some(v) = residual.simulated_velocity_error_uu_per_sec {
                     group.velocity.push(v);
                 }
-                if let Some(v) = residual.previous_linear_velocity_uu_per_second {
-                    let speed = norm(v);
-                    if speed > 300.0 {
-                        let unit = [v[0] / speed, v[1] / speed, v[2] / speed];
-                        let along = error[0] * unit[0] + error[1] * unit[1] + error[2] * unit[2];
-                        let cross_sq = (magnitude.powi(2) - along.powi(2)).max(0.0);
-                        group.along_sq += f64::from(along).powi(2);
-                        group.cross_sq += f64::from(cross_sq);
-                        group.vertical_sq += f64::from(error[2]).powi(2);
-                        group.time_offsets.push(along / speed);
-                    }
+                if let Some(v) = residual.simulated_rotation_error_degrees {
+                    group.rotation.push(v);
+                }
+                if let Some(v) = residual.simulated_angular_velocity_error_rad_per_sec {
+                    group.angular.push(v);
                 }
             }
         }
     }
 
-    println!("car samples {total_samples}; car position error > 50 UU in {total_tail}");
-    println!("share columns are fractions of the car position sum of squared error");
+    println!("residuals used {used}, skipped without a chain lag {skipped}");
+    let sum_sq = |values: &[f32]| values.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+    let totals: BTreeMap<&str, [f64; 4]> = ["CAR all", "BALL all"]
+        .iter()
+        .map(|&name| {
+            let g = groups.get(name);
+            (
+                name,
+                [
+                    g.map_or(0.0, |g| sum_sq(&g.position)),
+                    g.map_or(0.0, |g| sum_sq(&g.velocity)),
+                    g.map_or(0.0, |g| sum_sq(&g.rotation)),
+                    g.map_or(0.0, |g| sum_sq(&g.angular)),
+                ],
+            )
+        })
+        .collect();
     println!(
-        "{:<52} {:>8} {:>6} | {:>6} {:>6} {:>7} | {:>6} {:>6} | {:>5} {:>6} | {:>6} {:>7}",
-        "group",
+        "{:<32} {:>8} | {:>16} {:>6} | {:>14} {:>6} | {:>18} {:>6} | {:>13} {:>6}",
+        "partition",
         "n",
-        "SSshr",
-        "p50",
-        "p90",
-        "p99",
-        "vp50",
-        "vp90",
-        "along",
-        "vert",
-        "toff50",
-        "toffIQR"
+        "pos UU p50/90/99",
+        "SS",
+        "vel p50/90",
+        "SS",
+        "rot deg p50/90/99",
+        "SS",
+        "ang p50/90",
+        "SS"
     );
     for (label, group) in groups.iter_mut() {
-        let sum_sq: f64 = group.position.iter().map(|&v| f64::from(v).powi(2)).sum();
-        let share = if label.starts_with("CAR") {
-            sum_sq / total_position_sq
+        let kind = if label.starts_with("CAR") {
+            "CAR all"
         } else {
-            f64::NAN
+            "BALL all"
+        };
+        let total = totals[kind];
+        let share = |sum: f64, index: usize| {
+            if total[index] > 0.0 {
+                sum / total[index]
+            } else {
+                f64::NAN
+            }
         };
         let n = group.position.len();
-        let (p50, p90, p99) = (
+        let sums = [
+            sum_sq(&group.position),
+            sum_sq(&group.velocity),
+            sum_sq(&group.rotation),
+            sum_sq(&group.angular),
+        ];
+        println!(
+            "{:<32} {:>8} | {:>5.1}/{:>4.1}/{:>5.1} {:>6.3} | {:>6.1}/{:>6.1} {:>6.3} | {:>5.2}/{:>5.2}/{:>5.1} {:>6.3} | {:>5.2}/{:>5.2} {:>6.3}",
+            label,
+            n,
             quantile(&mut group.position, 0.5),
             quantile(&mut group.position, 0.9),
             quantile(&mut group.position, 0.99),
-        );
-        let (v50, v90) = (
+            share(sums[0], 0),
             quantile(&mut group.velocity, 0.5),
             quantile(&mut group.velocity, 0.9),
-        );
-        let axis_total = group.along_sq + group.cross_sq;
-        let along = if axis_total > 0.0 {
-            group.along_sq / axis_total
-        } else {
-            f64::NAN
-        };
-        let vertical = if axis_total > 0.0 {
-            group.vertical_sq / axis_total
-        } else {
-            f64::NAN
-        };
-        let (t50, tq1, tq3) = (
-            quantile(&mut group.time_offsets, 0.5),
-            quantile(&mut group.time_offsets, 0.25),
-            quantile(&mut group.time_offsets, 0.75),
-        );
-        println!(
-            "{:<52} {:>8} {:>6.3} | {:>6.1} {:>6.1} {:>7.1} | {:>6.0} {:>6.0} | {:>5.2} {:>6.2} | {:>6.3} {:>3.3}..{:<3.3}",
-            label, n, share, p50, p90, p99, v50, v90, along, vertical, t50, tq1, tq3
+            share(sums[1], 1),
+            quantile(&mut group.rotation, 0.5),
+            quantile(&mut group.rotation, 0.9),
+            quantile(&mut group.rotation, 0.99),
+            share(sums[2], 2),
+            quantile(&mut group.angular, 0.5),
+            quantile(&mut group.angular, 0.9),
+            share(sums[3], 3),
         );
     }
     Ok(())

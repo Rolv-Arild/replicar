@@ -63,6 +63,10 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// Clamp reported car and ball velocities to RocketSim's limits after each step. RocketSim
+    /// applies its limits at the start of the next tick, so the state it reports after a step can
+    /// exceed them (a flipping car by up to 2.2 rad/s), whereas replay states never do.
+    pub limit_reported_velocities: bool,
     /// Offline: infer when inside its frame each ball and car packet was generated (its lag behind
     /// the frame time, in ticks) from chained packet motion, and apply corrections at that time.
     pub infer_packet_lag: bool,
@@ -126,6 +130,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            limit_reported_velocities: true,
             infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
@@ -1375,6 +1380,37 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     lags
 }
 
+/// RocketSim limits speeds at the start of each tick, so a state read after stepping can exceed
+/// the limits that recorded server states obey. Apply them to the reported state.
+fn limit_reported_velocities(arena: &mut Arena, car_count: usize) {
+    const CAR_MAX_SPEED: f32 = 2300.0;
+    const CAR_MAX_ANGULAR_SPEED: f32 = 5.5;
+    const BALL_MAX_SPEED: f32 = 6000.0;
+    const BALL_MAX_ANGULAR_SPEED: f32 = 6.0;
+    let limit = |velocity: Vec3A, maximum: f32| {
+        let speed = velocity.length();
+        (speed > maximum).then(|| velocity * (maximum / speed))
+    };
+    for index in 0..car_count {
+        let mut state = *arena.get_car_state(index);
+        let linear = limit(state.phys.vel, CAR_MAX_SPEED);
+        let angular = limit(state.phys.ang_vel, CAR_MAX_ANGULAR_SPEED);
+        if linear.is_some() || angular.is_some() {
+            state.phys.vel = linear.unwrap_or(state.phys.vel);
+            state.phys.ang_vel = angular.unwrap_or(state.phys.ang_vel);
+            arena.set_car_state(index, state);
+        }
+    }
+    let mut ball = *arena.get_ball_state();
+    let linear = limit(ball.phys.vel, BALL_MAX_SPEED);
+    let angular = limit(ball.phys.ang_vel, BALL_MAX_ANGULAR_SPEED);
+    if linear.is_some() || angular.is_some() {
+        ball.phys.vel = linear.unwrap_or(ball.phys.vel);
+        ball.phys.ang_vel = angular.unwrap_or(ball.phys.ang_vel);
+        arena.set_ball_state(ball);
+    }
+}
+
 fn step_ticks(arena: &mut Arena, ticks: u64, events: &mut Vec<SimEvent>) {
     for _ in 0..ticks {
         let arena_tick = arena.tick_count() + 1;
@@ -1575,7 +1611,11 @@ pub fn convert_observations_with(
         let mut remaining = if simulated { gap } else { 0 };
         for lag in phase_lags {
             // Advance to this group's packet time (`lag` ticks before the frame time).
-            step_ticks(&mut arena, remaining - lag.min(remaining), &mut events);
+            let stepped = remaining - lag.min(remaining);
+            step_ticks(&mut arena, stepped, &mut events);
+            if stepped > 0 && options.limit_reported_velocities {
+                limit_reported_velocities(&mut arena, slots.len());
+            }
             remaining = lag.min(remaining);
             if ball_lag == lag {
                 if let Some(body) = &frame.ball {
@@ -1899,6 +1939,9 @@ pub fn convert_observations_with(
             }
         }
         step_ticks(&mut arena, remaining, &mut events);
+        if remaining > 0 && options.limit_reported_velocities {
+            limit_reported_velocities(&mut arena, slots.len());
+        }
         if options.sync_boost_pad_pickups {
             for pickup in &frame.pad_pickups {
                 let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {
