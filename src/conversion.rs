@@ -67,6 +67,10 @@ pub struct ConvertOptions {
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
     pub infer_flip_cancel: bool,
+    /// Apply the extra ball-car hit impulse that RocketSim computes (and reports as
+    /// `CarHitBall.extra_hit_vel`) but that the pinned build discards, because it is added to a
+    /// per-tick accumulator that is cleared before it reaches the ball.
+    pub apply_hit_extra_impulse: bool,
     /// Clamp reported car and ball velocities to RocketSim's limits after each step. RocketSim
     /// applies its limits at the start of the next tick, so the state it reports after a step can
     /// exceed them (a flipping car by up to 2.2 rad/s), whereas replay states never do.
@@ -139,6 +143,7 @@ impl Default for ConvertOptions {
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
             infer_flip_cancel: true,
+            apply_hit_extra_impulse: true,
             limit_reported_velocities: true,
             exact_tick_lag_chains: true,
             infer_packet_lag: true,
@@ -1533,14 +1538,36 @@ fn limit_reported_velocities(arena: &mut Arena, car_count: usize) {
     }
 }
 
-fn step_ticks(arena: &mut Arena, ticks: u64, events: &mut Vec<SimEvent>) {
+/// Steps one tick. The pinned RocketSim computes the extra ball-car hit impulse but loses it (it
+/// is added to an accumulator that is cleared before use), so when `apply_hit_impulse` is set the
+/// reported `extra_hit_vel` of every `CarHitBall` event is added to the ball's velocity at the end
+/// of the same tick, which is where the intended impulse takes effect.
+pub fn step_tick_with_hit_impulse(arena: &mut Arena, apply_hit_impulse: bool) -> Vec<ArenaEvent> {
+    let events: Vec<ArenaEvent> = arena.step_tick().to_vec();
+    if apply_hit_impulse {
+        let extra = events
+            .iter()
+            .filter_map(|event| match event {
+                ArenaEvent::CarHitBall(hit) => Some(hit.extra_hit_vel),
+                _ => None,
+            })
+            .fold(Vec3A::ZERO, |sum, vel| sum + vel);
+        if extra != Vec3A::ZERO {
+            let mut ball = *arena.get_ball_state();
+            ball.phys.vel += extra;
+            arena.set_ball_state(ball);
+        }
+    }
+    events
+}
+
+fn step_ticks(arena: &mut Arena, ticks: u64, apply_hit_impulse: bool, events: &mut Vec<SimEvent>) {
     for _ in 0..ticks {
         let arena_tick = arena.tick_count() + 1;
-        let tick_events = arena.step_tick();
+        let tick_events = step_tick_with_hit_impulse(arena, apply_hit_impulse);
         events.extend(
             tick_events
-                .iter()
-                .copied()
+                .into_iter()
                 .map(|event| SimEvent { arena_tick, event }),
         );
     }
@@ -1851,7 +1878,12 @@ pub fn convert_observations_with(
         for lag in phase_lags {
             // Advance to this group's packet time (`lag` ticks before the frame time).
             let stepped = remaining - lag.min(remaining);
-            step_ticks(&mut arena, stepped, &mut events);
+            step_ticks(
+                &mut arena,
+                stepped,
+                options.apply_hit_extra_impulse,
+                &mut events,
+            );
             if stepped > 0 && options.limit_reported_velocities {
                 limit_reported_velocities(&mut arena, slots.len());
             }
@@ -2229,7 +2261,12 @@ pub fn convert_observations_with(
                 arena.set_car_controls(slot, controls);
             }
         }
-        step_ticks(&mut arena, remaining, &mut events);
+        step_ticks(
+            &mut arena,
+            remaining,
+            options.apply_hit_extra_impulse,
+            &mut events,
+        );
         if remaining > 0 && options.limit_reported_velocities {
             limit_reported_velocities(&mut arena, slots.len());
         }
@@ -3131,6 +3168,61 @@ mod tests {
         let blocked = infer_packet_lags(&masked, &withheld);
         assert!(blocked.ball[5].is_none());
         assert!(blocked.ball[4].is_some() && blocked.ball[6].is_some());
+    }
+
+    #[test]
+    fn reported_hit_impulse_reaches_the_ball_only_when_applied() {
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let run = |apply: bool| -> (f32, f32) {
+            let mut config = ArenaConfig::new(GameMode::Soccar);
+            config.rng_seed = Some(0);
+            let mut arena = Arena::new_with_config(config);
+            arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
+            let mut car = CarState::default();
+            car.phys.pos = Vec3A::new(0.0, -600.0, 17.0);
+            car.phys.vel = Vec3A::new(0.0, 1400.0, 0.0);
+            car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
+            car.is_on_ground = true;
+            car.wheels_with_contact = [true; 4];
+            arena.set_car_state(0, car);
+            let mut ball = BallState::default();
+            ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);
+            arena.set_ball_state(ball);
+            arena.set_car_controls(
+                0,
+                CarControls {
+                    throttle: 1.0,
+                    ..CarControls::default()
+                },
+            );
+            let mut reported = 0.0f32;
+            let mut hit_tick = None;
+            for tick in 1..=60u32 {
+                for event in step_tick_with_hit_impulse(&mut arena, apply) {
+                    if let ArenaEvent::CarHitBall(hit) = event {
+                        if hit_tick.is_none() {
+                            hit_tick = Some(tick);
+                            reported = hit.extra_hit_vel.length();
+                        }
+                    }
+                }
+                if hit_tick.is_some_and(|hit| tick == hit + 4) {
+                    return (arena.get_ball_state().phys.vel.length(), reported);
+                }
+            }
+            panic!("no hit");
+        };
+        let (without, reported) = run(false);
+        let (with, _) = run(true);
+        assert!(
+            reported > 500.0,
+            "the hit reports an extra impulse ({reported})"
+        );
+        // The extra impulse is missing without the workaround and present with it.
+        assert!(
+            with > without + 0.8 * reported,
+            "with {with} without {without} reported {reported}"
+        );
     }
 
     #[test]
