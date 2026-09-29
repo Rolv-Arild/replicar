@@ -230,7 +230,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             car_state.phys.rot_mat = packet.2;
             car_state.phys.ang_vel = packet.3;
             car_state.is_on_ground = packet.0.z < 30.0;
-            car_state.wheels_with_contact = [packet.0.z < 30.0; 4];
+            car_state.wheels_with_contact =
+                [(packet.0.z < 30.0).then(rocketsim::RaycastHitInfo::default); 4];
             arena.set_car_state(0, car_state);
             arena.set_ball_state(ball_state);
             arena.set_car_controls(

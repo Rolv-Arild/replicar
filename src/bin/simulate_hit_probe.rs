@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // facing +y: forward axis (x_axis) = +y, right (y_axis) = +x... (RocketSim rot_mat columns: forward, right, up)
         car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
         car.is_on_ground = true;
-        car.wheels_with_contact = [true; 4];
+        car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
         arena.set_car_state(0, car);
         let mut ball = BallState::default();
         ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);

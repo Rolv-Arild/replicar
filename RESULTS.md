@@ -2,6 +2,29 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## RocketSim update: 79f4d22 to 0b02051 (2026-09-29)
+
+RocketSim `v3-rust` moved 141 commits (2026-08-26 to 2026-09-28, version 0.2.0 to 0.2.1). The dependency is now pinned to `0b020516c4fc633e0db09dfbfaa2026bcddb058e` (`Cargo.toml`, `Cargo.lock`, `serialization::ROCKETSIM_REVISION`). API changes handled in this repository: wheel contacts are `[Option<RaycastHitInfo>; 4]`, `last_extra_hit_tick` moved from the ball to each car (serialized per car, the ball record keeps a null field), and there is a new `CarLanded` event (serialized). The schema version stays 1, but exports made with the previous revision are rejected by the restoration check because the revision string changed. Unit tests (19), the Parquet/JSONL parity check and exact state restoration (12,485 and 13,290 snapshots) pass on the new revision.
+
+**Re-check of the logged issues (details in `ROCKETSIM_NOTES.md`).** (1) The dropped ball-car hit impulse is **fixed upstream**: `on_hit` applies it after contact solving with `accum = false`. With no workaround, the 2,000 UU/s probe sends the ball out at 2,662 UU/s (1,531 before), the mutator scale 1, 2, 3 gives 2,662, 3,793, 4,925 UU/s, and against 1,746 real touches (`diagnose_contact_model`) the simulated hit impulse is 975.3 UU/s versus 990.3 real (cosine 0.99-1.00, median ball velocity error 11.4 UU/s, 78.1% of touches produce a sim hit; the workaround on the old revision gave 1,001.5 vs 1,008.5, 13.8 UU/s and 75.9%). The workaround is now off by default (`apply_hit_extra_impulse`, `--apply-hit-impulse`) because it double counts on the new revision. (2) Speed limits applied at the start of the next tick **remain**: a flipping car still reports 7.45 rad/s, so `limit_reported_velocities` stays on. (3) Missed touches: 382 of 1,746 (22%, was 24%). (4) False demolitions the converter corrected: 300 to 162 (train) and 282 to 140 (validation), consistent with upstream demo/bump cone gating. (5) API limits unchanged.
+
+**Corpus effect** (60/60 replays each, zero failures; same defaults; hit-impulse workaround off on the new revision), one-step pre-correction, RocketSim p50 / p90 / p99:
+
+| Split | Field | 79f4d22 | 0b02051 |
+| --- | --- | --- | --- |
+| train | car position UU | 0.222 / 5.486 / 37.420 | **0.127** / 5.401 / 37.055 |
+| train | car velocity UU/s | 5.856 / 87.329 / 567.130 | **4.421** / 85.897 / 560.812 |
+| train | car rotation deg | 0.467 / 3.418 / 11.802 | 0.431 / 3.291 / 11.282 |
+| train | car angular rad/s | 0.118 / 1.005 / 3.554 | 0.113 / 0.990 / 3.443 |
+| train | ball velocity UU/s | 0.010 / 0.014 / 467.473 | 0.010 / 0.014 / 446.713 |
+| train | ball rotation deg | 0.000 / 0.028 / 4.184 | 0.000 / **0.000** / 4.097 |
+| validation | car position UU | 0.221 / 5.510 / 37.418 | **0.125** / 5.428 / 37.066 |
+| validation | car velocity UU/s | 5.825 / 87.714 / 557.815 | **4.474** / 86.233 / 550.573 |
+| validation | car rotation deg | 0.459 / 3.400 / 11.754 | 0.423 / 3.268 / 11.118 |
+| validation | ball velocity UU/s | 0.010 / 0.015 / 475.673 | 0.010 / 0.014 / 462.940 |
+
+Budget (train, chain-lag packets): ball near a car velocity p90 15.2 to 8.6 UU/s (position p90 1.0 to 0.8); all-car velocity p50 5.3 to 3.3 UU/s, rotation p90/p99 3.14/10.7 to 3.01/10.2 deg. Masked prediction with aligned targets (validation): horizon 4 car position p50/p99 3.622/60.188 to 3.524/58.433 UU, car rotation p50/p90/p99 2.706/13.122/37.237 to 2.619/12.606/35.985 deg, ball position p99 56.4 to 55.5 UU; horizon 1 ball position p99 30.8 to 32.0 UU (slightly worse). The free-flight ball and airborne car tick audits still match to storage precision (ball position p50/p99 0.0051/0.014 UU; 95.1% of pairs below 0.01 UU versus 97.3%, car 89.7% versus 91.5%, unexplained but tiny). The remaining unresolved items (missed hits, flip and jump start timing, ground driving) are unchanged in kind. `replays/test` remains sealed.
+
 ## Ball-car contact: the pinned RocketSim drops the hit impulse (2026-09-29)
 
 **Question.** After exact lag chains, ball residuals are essentially exact away from cars (position p90 0.009 UU), but ball near a car held 66% of ball position and 92% of ball velocity squared error. Is that limited by car replication, or by the contact model?

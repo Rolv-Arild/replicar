@@ -222,7 +222,7 @@ fn context(
         labels.push(format!("previous_sim_ground:{}", state.is_on_ground));
         labels.push(format!(
             "previous_sim_wheel_contact:{}",
-            state.wheels_with_contact.iter().any(|&v| v)
+            state.wheels_with_contact.iter().any(|v| v.is_some())
         ));
         labels.push(format!(
             "previous_sim_world_contact:{}",
@@ -277,9 +277,7 @@ fn context(
                 || odd(&c.inputs.double_jump_active_raw)
                 || odd(&c.inputs.dodge_active_raw);
             recent_replay_pad |= observed.pad_pickups.iter().any(|p| {
-                p.instigator_car_id == Some(actor_id)
-                    && p.picked_up != 255
-                    && p.picked_up % 2 == 1
+                p.instigator_car_id == Some(actor_id) && p.picked_up != 255 && p.picked_up % 2 == 1
             });
         }
         if let Some(slot) = slot {

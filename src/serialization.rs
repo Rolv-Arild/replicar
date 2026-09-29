@@ -11,7 +11,7 @@ use crate::conversion::{
 use crate::observations;
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const ROCKETSIM_REVISION: &str = "79f4d22fc533614d540b88457a96352c17da6b73";
+pub const ROCKETSIM_REVISION: &str = "0b020516c4fc633e0db09dfbfaa2026bcddb058e";
 
 fn xyz(v: Vec3A) -> [f32; 3] {
     v.to_array()
@@ -87,7 +87,8 @@ impl From<&BallState> for BallRecord {
         Self {
             physics: (&ball.phys).into(),
             tick_count_since_kickoff: ball.tick_count_since_kickoff,
-            last_extra_hit_tick: ball.last_extra_hit_tick,
+            // Newer RocketSim tracks the extra-impulse cooldown per car (`CarRecord`).
+            last_extra_hit_tick: None,
             heatseeker_target_direction: ball.hs_info.y_target_dir,
             heatseeker_target_speed: ball.hs_info.cur_target_speed,
             heatseeker_time_since_hit: ball.hs_info.time_since_hit,
@@ -112,6 +113,9 @@ pub struct CarRecord {
     pub time_since_boosted: f32,
     pub is_on_ground: bool,
     pub wheels_with_contact: [bool; 4],
+    /// Tick of this car's last extra ball-hit impulse (RocketSim tracks it per car).
+    #[serde(default)]
+    pub last_extra_hit_tick: Option<u64>,
     pub has_jumped: bool,
     pub has_double_jumped: bool,
     pub has_flipped: bool,
@@ -147,7 +151,8 @@ impl CarRecord {
             boosting_time: car.boosting_time,
             time_since_boosted: car.time_since_boosted,
             is_on_ground: car.is_on_ground,
-            wheels_with_contact: car.wheels_with_contact,
+            wheels_with_contact: car.wheels_with_contact.map(|wheel| wheel.is_some()),
+            last_extra_hit_tick: car.last_extra_hit_tick,
             has_jumped: car.has_jumped,
             has_double_jumped: car.has_double_jumped,
             has_flipped: car.has_flipped,
@@ -242,6 +247,10 @@ pub enum SimEventRecord {
         car_slot: usize,
         pad_index: usize,
     },
+    CarLanded {
+        car_slot: usize,
+        wheels_with_contact: [bool; 4],
+    },
 }
 
 #[derive(Serialize)]
@@ -276,6 +285,10 @@ impl From<&SimEvent> for TimedSimEventRecord {
             ArenaEvent::CarPickupBoost(data) => SimEventRecord::CarPickupBoost {
                 car_slot: data.car_idx,
                 pad_index: data.boost_pad_idx,
+            },
+            ArenaEvent::CarLanded(data) => SimEventRecord::CarLanded {
+                car_slot: data.car_idx,
+                wheels_with_contact: data.wheels.map(|wheel| wheel.is_some()),
             },
         };
         Self {

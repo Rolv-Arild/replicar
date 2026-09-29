@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 pre_state.is_on_ground = true;
-                pre_state.wheels_with_contact = [true; 4];
+                pre_state.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
                 let post: Vec<Packet> = (index..=(index + 12).min(frames.len() - 1))
                     .filter_map(|f| packet_at(f).map(|(p, _, _)| p))
                     .collect();

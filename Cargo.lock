@@ -271,12 +271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_hash_fast"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f214c841e199688ad1d5bdeb01c880069166d9ccc71a0cede0e41d27e7e326c8"
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,12 +293,6 @@ dependencies = [
  "scopeguard",
  "simdutf8",
 ]
-
-[[package]]
-name = "equivalent"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fastrand"
@@ -457,35 +445,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
-name = "indexmap"
-version = "2.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
-dependencies = [
- "equivalent",
- "hashbrown",
 ]
 
 [[package]]
@@ -717,30 +676,16 @@ dependencies = [
 
 [[package]]
 name = "rocketsim"
-version = "0.2.0"
-source = "git+https://github.com/ZealanL/RocketSim.git?rev=79f4d22fc533614d540b88457a96352c17da6b73#79f4d22fc533614d540b88457a96352c17da6b73"
+version = "0.2.1"
+source = "git+https://github.com/ZealanL/RocketSim.git?rev=0b020516c4fc633e0db09dfbfaa2026bcddb058e#0b020516c4fc633e0db09dfbfaa2026bcddb058e"
 dependencies = [
  "arrayvec",
  "byteorder",
- "derive_hash_fast",
  "fastrand",
  "fern",
  "glam",
- "include_dir",
- "indexmap",
  "log",
- "rocketsim_derive",
  "rustc-hash",
- "zerocopy",
-]
-
-[[package]]
-name = "rocketsim_derive"
-version = "0.1.0"
-source = "git+https://github.com/ZealanL/RocketSim.git?rev=79f4d22fc533614d540b88457a96352c17da6b73#79f4d22fc533614d540b88457a96352c17da6b73"
-dependencies = [
- "quote",
- "syn 3.0.6",
 ]
 
 [[package]]

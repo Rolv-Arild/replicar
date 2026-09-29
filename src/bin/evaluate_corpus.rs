@@ -255,7 +255,11 @@ impl From<&CarState> for TraceSimCar {
             linear_velocity: state.phys.vel.to_array(),
             angular_velocity: state.phys.ang_vel.to_array(),
             is_on_ground: state.is_on_ground,
-            wheel_contact_count: state.wheels_with_contact.iter().filter(|&&v| v).count(),
+            wheel_contact_count: state
+                .wheels_with_contact
+                .iter()
+                .filter(|v| v.is_some())
+                .count(),
             world_contact: state.world_contact_normal.is_some(),
             is_jumping: state.is_jumping,
             is_flipping: state.is_flipping,
@@ -533,6 +537,7 @@ fn outlier_record(
             ArenaEvent::CarHitCar(_) => "car_hit_car",
             ArenaEvent::CarHitWorld(_) => "car_hit_world",
             ArenaEvent::CarPickupBoost(_) => "car_pickup_boost",
+            ArenaEvent::CarLanded(_) => "car_landed",
         })
         .collect();
     Some(OutlierRecord {
@@ -1209,6 +1214,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.exact_tick_lag_chains = true;
         } else if arg == "--no-exact-tick-lag-chains" {
             options.exact_tick_lag_chains = false;
+        } else if arg == "--apply-hit-impulse" {
+            options.apply_hit_extra_impulse = true;
         } else if arg == "--no-apply-hit-impulse" {
             options.apply_hit_extra_impulse = false;
         } else if arg == "--infer-dodge-start" {
@@ -1250,7 +1257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--infer-dodge-start] [--no-infer-dodge-start] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--infer-dodge-start] [--no-infer-dodge-start] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {

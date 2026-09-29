@@ -71,9 +71,9 @@ pub struct ConvertOptions {
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
     pub infer_flip_cancel: bool,
-    /// Apply the extra ball-car hit impulse that RocketSim computes (and reports as
-    /// `CarHitBall.extra_hit_vel`) but that the pinned build discards, because it is added to a
-    /// per-tick accumulator that is cleared before it reaches the ball.
+    /// Legacy workaround for RocketSim revisions before `0b02051`, which computed the extra
+    /// ball-car hit impulse (reported as `CarHitBall.extra_hit_vel`) but discarded it. Newer
+    /// RocketSim applies it, so this must stay off there (it would double count).
     pub apply_hit_extra_impulse: bool,
     /// Clamp reported car and ball velocities to RocketSim's limits after each step. RocketSim
     /// applies its limits at the start of the next tick, so the state it reports after a step can
@@ -148,7 +148,7 @@ impl Default for ConvertOptions {
             infer_air_steer_controls: true,
             infer_dodge_start: false,
             infer_flip_cancel: true,
-            apply_hit_extra_impulse: true,
+            apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
             exact_tick_lag_chains: true,
             infer_packet_lag: true,
@@ -791,7 +791,10 @@ fn low_air_angular_hold(
         || !held.is_finite()
         || held.length() < min_angular_speed
         || predicted.is_on_ground
-        || predicted.wheels_with_contact.iter().any(|&contact| contact)
+        || predicted
+            .wheels_with_contact
+            .iter()
+            .any(|contact| contact.is_some())
         || predicted.world_contact_normal.is_some()
         || frame.time - observations.frames.get(pos.frame)?.time > 0.15
         || frame.time - observations.frames.get(angular.frame)?.time > 0.15
@@ -853,7 +856,10 @@ fn low_air_feedback_controls(
         || !(0.0..=0.15).contains(&age(position.frame)?)
         || !(0.0..=0.15).contains(&age(angular.frame)?)
         || state.is_on_ground
-        || state.wheels_with_contact.iter().any(|&contact| contact)
+        || state
+            .wheels_with_contact
+            .iter()
+            .any(|contact| contact.is_some())
         || state.world_contact_normal.is_some()
         || state.is_flipping
         || state.is_auto_flipping
@@ -3477,7 +3483,7 @@ mod tests {
     }
 
     #[test]
-    fn reported_hit_impulse_reaches_the_ball_only_when_applied() {
+    fn reported_hit_impulse_is_part_of_the_ball_speed_without_a_workaround() {
         rocketsim::init(Path::new("collision_meshes"), true).unwrap();
         let run = |apply: bool| -> (f32, f32) {
             let mut config = ArenaConfig::new(GameMode::Soccar);
@@ -3489,7 +3495,7 @@ mod tests {
             car.phys.vel = Vec3A::new(0.0, 1400.0, 0.0);
             car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
             car.is_on_ground = true;
-            car.wheels_with_contact = [true; 4];
+            car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
             arena.set_car_state(0, car);
             let mut ball = BallState::default();
             ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);

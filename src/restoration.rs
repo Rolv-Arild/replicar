@@ -69,7 +69,6 @@ impl BallRecord {
         let mut ball = BallState::default();
         ball.phys = self.physics.to_rocketsim();
         ball.tick_count_since_kickoff = self.tick_count_since_kickoff;
-        ball.last_extra_hit_tick = self.last_extra_hit_tick;
         ball.hs_info.y_target_dir = self.heatseeker_target_direction;
         ball.hs_info.cur_target_speed = self.heatseeker_target_speed;
         ball.hs_info.time_since_hit = self.heatseeker_time_since_hit;
@@ -92,7 +91,10 @@ impl CarRecord {
             boosting_time: self.boosting_time,
             time_since_boosted: self.time_since_boosted,
             is_on_ground: self.is_on_ground,
-            wheels_with_contact: self.wheels_with_contact,
+            wheels_with_contact: self
+                .wheels_with_contact
+                .map(|contact| contact.then(rocketsim::RaycastHitInfo::default)),
+            last_extra_hit_tick: self.last_extra_hit_tick,
             has_jumped: self.has_jumped,
             has_double_jumped: self.has_double_jumped,
             has_flipped: self.has_flipped,
@@ -313,7 +315,7 @@ mod tests {
         original.tick_count = 123;
         original.ball.phys.pos = Vec3A::new(12.5, -31.25, 114.0);
         original.ball.phys.vel = Vec3A::new(100.0, 200.0, -12.0);
-        original.ball.last_extra_hit_tick = Some(119);
+        original.cars[0].1.last_extra_hit_tick = Some(119);
         original.ball.hs_info.cur_target_speed = 2300.0;
         original.cars[0].1.phys.pos = Vec3A::new(-400.0, 250.0, 38.0);
         original.cars[0].1.phys.rot_mat = Mat3A::from_rotation_z(0.5);

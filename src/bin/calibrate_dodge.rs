@@ -1,5 +1,5 @@
-use std::path::Path;
 use rocketsim::{Arena, CarBodyConfig, CarControls, CarState, GameMode, Team, Vec3A};
+use std::path::Path;
 
 fn main() {
     let meshes = Path::new("collision_meshes");
@@ -11,7 +11,7 @@ fn main() {
     let mut state = CarState::default();
     state.phys.pos = Vec3A::new(0.0, 0.0, 300.0);
     state.is_on_ground = false;
-    state.wheels_with_contact = [false; 4];
+    state.wheels_with_contact = [None; 4];
     state.has_jumped = true;
     state.air_time_since_jump = 0.2;
     state.has_flipped = true;
