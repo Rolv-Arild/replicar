@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let per_percentile: usize = env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(2);
     let mut options = ConvertOptions::default();
+    let air_mode = env::args().any(|arg| arg == "--air");
     options.fit_jump_timing = env::args().any(|arg| arg == "--fit-jump-timing");
     rocketsim::init(Path::new("collision_meshes"), true)?;
     let mut events: Vec<Event> = Vec::new();
@@ -105,7 +106,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let Some(before) = f.checked_sub(1).and_then(exported) else {
                     continue;
                 };
-                if before.phys.pos.z > 40.0 {
+                // --air selects jumps from the air (previous packet above 50 UU) instead.
+                if air_mode == (before.phys.pos.z <= 50.0)
+                    || (!air_mode && before.phys.pos.z > 40.0)
+                {
                     continue;
                 }
                 let lag_of = |g: usize| {

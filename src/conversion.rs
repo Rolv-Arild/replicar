@@ -1637,7 +1637,8 @@ const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=8;
 /// to the *next* fresh packet, so that packet is not used by the fit and the residual there stays a
 /// held-out check. Uses later packets (offline reconstruction). Refused without exact chain lags for
 /// both later packets, with a withheld or inactive frame, a jump/dodge counter change, a car that
-/// is not flat on the ground at any of the three packets, or the ball within 400 UU (the scratch
+/// is not on a surface at the first packet (any surface: floor, wall, ramp or ceiling), or the ball
+/// within 400 UU (the scratch
 /// arena's ball is parked; other cars are not modelled either, and refusing spans near them removed
 /// coverage without protecting the fit: near-other-car velocity p90 65.5 to 54.5 UU/s without it).
 #[allow(clippy::too_many_arguments)]
@@ -1671,8 +1672,8 @@ fn fit_ground_control_timing(
             .as_ref()
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
-    let flat = |pos: Vec3A, up: Vec3A| pos.z < 30.0 && up.z > 0.97;
-    if !active(index) || !state.is_on_ground || !flat(state.phys.pos, state.phys.rot_mat.z_axis) {
+    // On any surface (floor, wall, ramp or ceiling); the counters rule out a jump or dodge in the span.
+    if !active(index) || !state.is_on_ground {
         return None;
     }
     let same_car = |c: &&observations::Car| {
@@ -1714,10 +1715,9 @@ fn fit_ground_control_timing(
             return None;
         }
         let b = &other.body;
-        let (Some(p), Some(v), Some(r), Some(w)) = (
+        let (Some(p), Some(v), Some(w)) = (
             b.position.as_ref().filter(|x| x.frame == g),
             b.linear_velocity.as_ref().filter(|x| x.frame == g),
-            b.rotation_xyzw.as_ref().filter(|x| x.frame == g),
             b.angular_velocity_replay_units
                 .as_ref()
                 .filter(|x| x.frame == g),
@@ -1731,12 +1731,7 @@ fn fit_ground_control_timing(
         else {
             continue;
         };
-        let quat = Quat::from_xyzw(r.value[0], r.value[1], r.value[2], r.value[3]);
-        if !quat.is_finite() || quat.length_squared() < 0.5 {
-            continue;
-        }
-        let up = Mat3A::from_quat(quat.normalize()).z_axis;
-        if !flat(vec3(p.value), up) || !clear(g, vec3(p.value)) {
+        if !clear(g, vec3(p.value)) {
             return None;
         }
         found.push((
@@ -1864,7 +1859,7 @@ const JUMP_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=16;
 /// line up: the fitted start is at 0-3 ticks after the midpoint-rule tick in two thirds of the
 /// events and up to 12 ticks later in the rest, per event (`diagnose_jump_latency`: a per-player
 /// median of other events' shifts does not remove the tail, while a per-event fit does). For a car
-/// flat on the ground with a fresh packet at `index` and an even jump counter that turns odd before
+/// on a surface (floor, wall, ramp or ceiling) with a fresh packet at `index` and an even jump counter that turns odd before
 /// the second next fresh packet, one shift of the jump counter's switches (press and release move
 /// together) is chosen by simulating the span to that packet in a scratch arena (position error plus
 /// 0.1 x velocity error), and the interval to the *next* fresh packet is driven with it, so that
@@ -1905,12 +1900,8 @@ fn fit_jump_timing(
             .as_ref()
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
-    if !options.infer_jump_from_active
-        || !active(index)
-        || !state.is_on_ground
-        || state.phys.pos.z >= 25.0
-        || state.phys.rot_mat.z_axis.z <= 0.97
-    {
+    // On any surface (floor, wall, ramp or ceiling): a jump leaves it along the surface normal.
+    if !options.infer_jump_from_active || !active(index) || !state.is_on_ground {
         return None;
     }
     let same_car = |c: &&observations::Car| {
@@ -2087,7 +2078,7 @@ struct FlipFit {
 /// path per jump shift, then the pitch cancel from its angular velocity. The plan drives only the
 /// interval to the *next* fresh packet (the jump input per tick, and the dodge if its press falls
 /// inside it), so that packet is not used by the fit. Uses later packets (offline reconstruction).
-/// Refused for a car not flat on the ground, uneven double-jump or flip counters, spans over 45
+/// Refused for a car not on a surface, uneven double-jump or flip counters, spans over 45
 /// ticks, or a withheld or inactive frame. The ball is simulated (its state at this packet's time in
 /// the main arena); other cars are not.
 #[allow(clippy::too_many_arguments)]
@@ -2126,8 +2117,6 @@ fn fit_ground_flip_timing(
         || !options.infer_dodge_from_active
         || !active(index)
         || !state.is_on_ground
-        || state.phys.pos.z >= 25.0
-        || state.phys.rot_mat.z_axis.z <= 0.97
     {
         return None;
     }

@@ -2,6 +2,33 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## Walls and ramps: the "air jump" was a wall jump, and the fits now accept any surface (2026-09-30)
+
+**Windows first** (`trace_jump_windows replays/train --air`: 4,697 jump activations whose previous packet is above 50 UU). The backlog item was an "air jump" (3,672 train packets, velocity p50 296.9 UU/s, share 0.054). Every window shows the car on the ground in the exported state at heights of 330-1,100 UU and a first-packet residual of about 300 UU/s along a horizontal or oblique direction (the median event's worst vertical-velocity error is 299.6). These are jumps off walls, ramps and the ceiling: the impulse leaves along the surface normal, and the press has the same per-event timing as a floor jump. The fits refused them because they required a car flat on the floor (z < 25 UU, up axis z > 0.97).
+
+**Change.** The jump fit and the joint jump-and-dodge fit now need only `is_on_ground` (any surface), and so does the ground control timing fit, which also stops requiring the second and third packets to be flat. The converter's arena carries the wheel contacts of the surface for the scratch runs; the counters already rule out a jump or dodge in the span, and the ball rule of the ground fit stays.
+
+**Effect** (`error_budget`, chain-lag packets; train / validation; against the state before this change):
+
+| Measure | Before | After |
+| --- | --- | --- |
+| First packet after a jump start, previous z >= 50: velocity p50 UU/s | 296.6 / 297.3 | 19.9 / 21.0 |
+| Same, velocity squared-error share | 0.056 / 0.061 | 0.013 / 0.016 |
+| Same, position p50 UU | 5.0 / 5.0 | 1.5 / 1.7 |
+| Wall or ramp, no boost: velocity p50/p90 UU/s | 8.4/74.7 / 8.3/73.9 | 3.7/48.7 / 3.8/50.0 |
+| Wall or ramp, no boost: angular velocity p90 rad/s | 0.83 / 0.84 | 0.56 / 0.59 |
+| Wall or ramp, no boost: position p90 UU, rotation p90 deg | 5.2, 2.62 / 5.0, 2.59 | 3.6, 1.87 / 3.6, 1.94 |
+| Wall or ramp, boosting: velocity p90 UU/s, angular p90 rad/s | 71.0, 0.94 / 66.3, 0.89 | 54.3, 0.66 / 53.7, 0.65 |
+| All cars: velocity p90 UU/s, angular p90 rad/s | 50.6, 0.58 / 51.4, 0.59 | 48.1, 0.55 / 48.7, 0.56 |
+| `evaluate_corpus` car velocity p50/p90/p99 UU/s | 2.048/59.266/499.298 / 2.036/60.031/494.427 | 1.875/55.571/497.757 / 1.861/56.930/489.161 |
+| `evaluate_corpus` car rotation p90 deg | 2.836 / 2.826 | 2.766 / 2.764 |
+| `evaluate_corpus` car angular velocity p90 rad/s | 0.648 / 0.656 | 0.621 / 0.630 |
+| `evaluate_corpus` car position p90 UU | 4.545 / 4.566 | 4.309 / 4.403 |
+
+Per replay (60 each), p90 improved for velocity in 60 and 60, rotation in 58 and 58, angular velocity in 60 and 59; worse by more than 2%: none. Floor driving, air, near ball and near another car are unchanged to within 0.1 UU (their shares rise only because the total falls); non-aligned masked prediction is unchanged bit for bit and the aligned masked numbers move by less than 1% (target change). The whole path from the start of the overnight work, one-step car velocity p90 (train): 85.9 UU/s at the original converter, 66.1 after the ground-control fits, 59.3 after the jump and dodge fits, 55.6 now.
+
+**What is left.** The first packet after a jump start keeps a velocity p90 of about 285-295 UU/s (about 15% of the events: refused when a dodge follows within the span without an exact lag on the second-next packet, or no second-next packet within 45 ticks). The wall/ramp p90 is still 49-50 UU/s against 36-38 for the floor, and the ground fit keeps its ball rule (near-ball driving is refused; the scratch ball is parked).
+
 ## Ground-start dodge, and dropping the other-car rule from the timing fits (2026-09-30)
 
 **Joint jump and dodge fit.** The largest partition after the airborne dodge fit was the first packet after a dodge whose previous packet is on the ground (7,588 train packets, velocity share 0.21): a jump from the ground followed by a dodge needs the jump shift and the dodge press fitted together (the jump fit refuses a dodge before the second-next packet, the dodge fit needs an airborne start). `fit_ground_flip_timing` (used where the ground and jump fits decline; on with `infer_dodge_start` and `fit_jump_timing`): for a car flat on the ground with even counters, whose jump and dodge counters turn odd before the second-next fresh packet (exact chain lag, up to 45 ticks), one shift of the jump counter's switches and the dodge press tick (relative to the midpoint-rule tick of the activation frame) are searched on that packet (position + 0.1 x velocity) from a saved no-dodge path per jump shift, then the pitch cancel from its angular velocity. The plan drives only the interval to the next fresh packet (the jump input per tick, and a `PendingDodge` if the press falls inside it; the dodge press wins over the schedule and does not cancel the first jump's hold), so that packet stays held out. Unit test `ground_flip_fit_recovers_the_jump_shift_and_the_dodge_press_together`. Measured against the airborne-only fit with the other-car rule at 400 UU: 1,355 more events changed (1,125 with a low start), first packet of the changed low-start events velocity p50 313 to 104 UU/s and rotation p50 4.07 to 3.68 deg, pooled squared error over the first four packets 0.985 (velocity) and 0.978 (angular velocity) of that baseline.
