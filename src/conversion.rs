@@ -83,6 +83,9 @@ pub struct ConvertOptions {
     pub air_persist_gain: f32,
     /// A past control is persisted only when its larger pitch/roll magnitude reaches this value.
     pub air_persist_min_control: f32,
+    /// Skip persistence when angular speed fell by more than this between the two fitted packets
+    /// (a large value disables the gate).
+    pub air_persist_max_speed_drop: f32,
     /// Frames whose car/ball packets were withheld by an evaluator. A lookahead span that contains
     /// one would use a packet from after a withheld target, so it is refused.
     #[serde(skip)]
@@ -124,6 +127,7 @@ impl Default for ConvertOptions {
             air_persist_max_seconds: 0.15,
             air_persist_gain: 1.0,
             air_persist_min_control: 0.5,
+            air_persist_max_speed_drop: 1.0e6,
             withheld_frames: None,
             infer_transition_air_lookahead: true,
             compensate_transition_air_damping: false,
@@ -626,6 +630,10 @@ fn past_persisted_air_controls(
         options.air_lookahead_refine_iterations,
     );
     if solved.pitch.abs().max(solved.roll.abs()) < options.air_persist_min_control {
+        return None;
+    }
+    let speed_drop = (vec3(ang0.value) * 0.01).length() - (vec3(ang1.value) * 0.01).length();
+    if speed_drop > options.air_persist_max_speed_drop {
         return None;
     }
     let gain = options.air_persist_gain;
