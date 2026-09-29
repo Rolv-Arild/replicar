@@ -2,6 +2,25 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## Dodge start fit on the updated RocketSim: still off (2026-09-29)
+
+**Question.** After the update, does fitting the dodge start tick (`--infer-dodge-start`) help, and does using more than one later packet fix its weakness? Protocol: `error_budget replays/{train,validation} [--infer-dodge-start]`, chain-lag packets, base is the default converter; nothing tuned on validation.
+
+**Impulse model (`diagnose_dodge_fit`, 1,500 train events).** RocketSim's dodge impulse matches the real one: |I| p50 550 sim vs 531 real, ratio p10/p50/p90 0.68/1.00/1.16, direction cosine p10/p50 0.59/0.99 (1,327 forward, 135 backward dodges). So what limits the fit is timing and the unobserved pre-dodge orientation and pitch cancel, not the impulse. The fitted start minus the activation frame's tick has p10/p50/p90 -4/-1/8 ticks. At the next packet a fitted start beats the frame-time start in 1,038 of 1,288 events (position p50/p90 7.4/24.0 vs 19.2/46.8 UU, rotation 5.6/15.6 vs 10.9/23.9 deg), in-sample.
+
+**Two variants in the converter.** (1) Fit against the first fresh packet only; (2) fit against up to three fresh packets in the 12 frames after the activation, position and 0.1 x velocity error summed over packets, angular velocity only counted at packets at or after the start, using exact packet ticks from the lag chains. A test that forced `jump=false` before the scheduled start changed nothing.
+
+First packet after a dodge, position p50/p90 UU and velocity p50 UU/s (rotation p50 deg), base to three-packet fit, train (validation moves the same way):
+
+| Previous z | Packets | Position | Velocity p50 | Rotation p50 |
+| --- | --- | --- | --- | --- |
+| >= 300 | 1,639 | 14.8/38.3 to 12.8/36.3 | 38.1 to 25.0 | 5.94 to 5.42 |
+| 120-300 | 1,359 | 15.7/38.4 to 13.6/37.6 | 29.1 to 18.9 | 6.22 to 4.73 |
+| 50-120 | 2,975 | 14.8/39.7 to 11.1/36.5 | 28.2 to 17.9 | 6.37 to 4.89 |
+| < 50 | 7,588 | 16.7/48.0 to 14.7/46.7 | 36.6 to 26.8 | 6.21 to 5.12 |
+
+**But the whole dodge window gets worse.** "Dodge counter odd" (90,621 train packets): rotation p90 7.45 to 7.77 deg, rotation squared-error share 0.313 to 0.369, angular velocity p90 0.66 to 0.88 rad/s; validation the same (0.313 to 0.361, 0.66 to 0.88). Position and velocity in that window improve slightly (p99 27.5 to 24.3 UU). The fit trades the first packet against later ones, so the option stays **off by default**. The low-altitude first packets (7,588, previous z < 50, the largest share of first-dodge error) barely move (position p50 16.7 to 14.7 UU) because the jump start, hold and dodge start are not fitted jointly and a ground packet gives no orientation. Not a usable improvement until later-window angular velocity stops regressing; candidate cause is the planned pitch cancel and roll persisting past the fitted packets.
+
 ## RocketSim update: 79f4d22 to 0b02051 (2026-09-29)
 
 RocketSim `v3-rust` moved 141 commits (2026-08-26 to 2026-09-28, version 0.2.0 to 0.2.1). The dependency is now pinned to `0b020516c4fc633e0db09dfbfaa2026bcddb058e` (`Cargo.toml`, `Cargo.lock`, `serialization::ROCKETSIM_REVISION`). API changes handled in this repository: wheel contacts are `[Option<RaycastHitInfo>; 4]`, `last_extra_hit_tick` moved from the ball to each car (serialized per car, the ball record keeps a null field), and there is a new `CarLanded` event (serialized). The schema version stays 1, but exports made with the previous revision are rejected by the restoration check because the revision string changed. Unit tests (19), the Parquet/JSONL parity check and exact state restoration (12,485 and 13,290 snapshots) pass on the new revision.

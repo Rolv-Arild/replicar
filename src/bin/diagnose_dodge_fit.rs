@@ -34,6 +34,10 @@ fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(result)
 }
 
+fn ty_sign(value: f32) -> bool {
+    value >= 0.0
+}
+
 fn quantile(values: &mut [f64], q: f64) -> f64 {
     values.sort_by(|a, b| a.total_cmp(b));
     values[((values.len() - 1) as f64 * q).round() as usize]
@@ -75,6 +79,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut offsets = Vec::new();
     let mut margins = Vec::new();
     let mut events = 0usize;
+    let (mut impulse_ratio, mut impulse_cosine) = (Vec::<f64>::new(), Vec::<f64>::new());
+    let (mut impulse_real, mut impulse_sim) = (Vec::<f64>::new(), Vec::<f64>::new());
+    let mut by_kind: std::collections::BTreeMap<&str, Vec<(f64, f64, f64)>> = Default::default();
 
     'replays: for replay_path in replay_paths(&path)? {
         let output = convert_bytes(&fs::read(&replay_path)?, &options)?;
@@ -250,6 +257,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ),
                 );
                 offsets.push((best_d - frame_tick_start) as f64);
+                // Impulse comparison at the fitted start: real velocity change against the
+                // no-dodge path versus RocketSim's, and their angle.
+                {
+                    let run_velocity = |arena: &mut Arena, dodge: Option<i64>| -> Vec3A {
+                        arena.set_car_state(slot, pre);
+                        for tick in 1..=k {
+                            let mut controls = base;
+                            if Some(tick) == dodge {
+                                controls.jump = true;
+                                controls.pitch = pitch;
+                                controls.yaw = yaw;
+                            }
+                            arena.set_car_controls(slot, controls);
+                            arena.step_tick();
+                        }
+                        arena.get_car_state(slot).phys.vel
+                    };
+                    let baseline = run_velocity(&mut arena, None);
+                    let dodged = run_velocity(&mut arena, Some(best_d));
+                    let real = b.state.phys.vel - baseline;
+                    let simulated = dodged - baseline;
+                    if real.length() > 1.0 && simulated.length() > 1.0 {
+                        impulse_ratio.push(f64::from(real.length() / simulated.length()));
+                        impulse_cosine.push(f64::from(
+                            real.dot(simulated) / (real.length() * simulated.length()),
+                        ));
+                        impulse_real.push(f64::from(real.length()));
+                        impulse_sim.push(f64::from(simulated.length()));
+                        let forward = pre.phys.rot_mat.x_axis.dot(pre.phys.vel);
+                        let kind = match (ty_sign(torque.value[1]), forward >= 0.0) {
+                            (true, true) => "forward dodge",
+                            (false, false) => "forward dodge",
+                            _ => "backward dodge",
+                        };
+                        by_kind.entry(kind).or_default().push((
+                            f64::from(real.length()),
+                            f64::from(simulated.length()),
+                            f64::from(real.dot(simulated) / (real.length() * simulated.length())),
+                        ));
+                    }
+                }
                 rot.0.push(f64::from(fitted.rot));
                 rot.1.push(f64::from(framed.rot));
                 ang.0.push(f64::from(fitted.ang));
@@ -268,6 +316,38 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let q = |v: &Vec<f64>, p: f64| quantile(&mut v.clone(), p);
     println!("dodge events with exact packets before and after: {events}");
+    {
+        let q = |v: &Vec<f64>, p: f64| quantile(&mut v.clone(), p);
+        println!(
+            "dodge impulse at the fitted start (velocity change vs no-dodge path), n={}: real |I| p10/p50/p90 {:.0}/{:.0}/{:.0}, RocketSim |I| {:.0}/{:.0}/{:.0}, ratio real/sim p10/p50/p90 {:.2}/{:.2}/{:.2}, direction cosine p10/p50/p90 {:.2}/{:.2}/{:.2}",
+            impulse_ratio.len(),
+            q(&impulse_real, 0.1),
+            q(&impulse_real, 0.5),
+            q(&impulse_real, 0.9),
+            q(&impulse_sim, 0.1),
+            q(&impulse_sim, 0.5),
+            q(&impulse_sim, 0.9),
+            q(&impulse_ratio, 0.1),
+            q(&impulse_ratio, 0.5),
+            q(&impulse_ratio, 0.9),
+            q(&impulse_cosine, 0.1),
+            q(&impulse_cosine, 0.5),
+            q(&impulse_cosine, 0.9)
+        );
+        for (kind, rows) in &by_kind {
+            let mut real: Vec<f64> = rows.iter().map(|r| r.0).collect();
+            let mut sim: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            let mut cos: Vec<f64> = rows.iter().map(|r| r.2).collect();
+            println!(
+                "  {kind}: n={} real |I| p50 {:.0}, sim |I| p50 {:.0}, direction cosine p10/p50 {:.2}/{:.2}",
+                rows.len(),
+                quantile(&mut real, 0.5),
+                quantile(&mut sim, 0.5),
+                quantile(&mut cos, 0.1),
+                quantile(&mut cos, 0.5)
+            );
+        }
+    }
     println!(
         "fitted start minus the activation frame's tick (ticks): p10 {:.0} p25 {:.0} p50 {:.0} p75 {:.0} p90 {:.0}",
         q(&offsets, 0.1),

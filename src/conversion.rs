@@ -1604,7 +1604,10 @@ fn step_ticks(
         for dodge in pending.iter() {
             let mut controls = dodge.base;
             controls.jump = false;
-            if arena_tick == dodge.start_tick {
+            if arena_tick < dodge.start_tick {
+                // Release jump before the press, so the press at the start tick is a new edge.
+                arena.set_car_controls(dodge.slot, controls);
+            } else if arena_tick == dodge.start_tick {
                 controls.jump = true;
                 controls.pitch = dodge.pitch;
                 controls.yaw = dodge.yaw;
@@ -1826,13 +1829,31 @@ fn fit_dodge_start(
             return None;
         }
     }
-    // The later packet: first fresh position, velocity and angular velocity at or after activation.
-    let mut later = None;
-    for g in activation_frame..=(activation_frame + 6).min(frames.len() - 1) {
-        if !active(g) || withheld(g) {
-            return None;
+    // Later packets: up to three fresh position, velocity and angular-velocity packets at or after the
+    // activation. The counter can turn odd a few ticks before the flip physically starts, so the
+    // start may fall after the first of them; every one constrains the fit.
+    let lag_at = |g: usize| -> i64 {
+        match packet_lags {
+            Some(lags) => lags
+                .car_actor
+                .get(&(car.actor_id, car.actor_created_frame, g))
+                .copied()
+                .or(lags.cars[g])
+                .map_or((timeline(g) - timeline(g - 1)).max(0) / 2, |lag| {
+                    lag.round().max(0.0) as i64
+                }),
+            None => 0,
         }
-        let other = frames[g].cars.iter().find(same_car)?;
+    };
+    let origin_tick = timeline(index) - lag_a as i64;
+    let mut targets: Vec<(u64, Vec3A, Vec3A, Vec3A)> = Vec::new();
+    for g in activation_frame..=(activation_frame + 12).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            break;
+        }
+        let Some(other) = frames[g].cars.iter().find(same_car) else {
+            break;
+        };
         let b = &other.body;
         if let (Some(p), Some(v), Some(w)) = (
             b.position.as_ref().filter(|x| x.frame == g),
@@ -1841,28 +1862,25 @@ fn fit_dodge_start(
                 .as_ref()
                 .filter(|x| x.frame == g),
         ) {
-            later = Some((g, vec3(p.value), vec3(v.value), vec3(w.value) * 0.01));
-            break;
+            let tick = (timeline(g) - lag_at(g)) - origin_tick;
+            if !(1..=45).contains(&tick) {
+                break;
+            }
+            targets.push((
+                tick as u64,
+                vec3(p.value),
+                vec3(v.value),
+                vec3(w.value) * 0.01,
+            ));
+            if targets.len() == 3 {
+                break;
+            }
         }
     }
-    let (b_frame, target_pos, target_vel, target_omega) = later?;
-    let lag_b = match packet_lags {
-        Some(lags) => lags
-            .car_actor
-            .get(&(car.actor_id, car.actor_created_frame, b_frame))
-            .copied()
-            .or(lags.cars[b_frame])
-            .map_or(
-                (timeline(b_frame) - timeline(b_frame - 1)).max(0) / 2,
-                |lag| lag.round().max(0.0) as i64,
-            ),
-        None => 0,
-    };
-    let ticks = (timeline(b_frame) - lag_b) - (timeline(index) - lag_a as i64);
-    if !(2..=30).contains(&ticks) {
+    if targets.is_empty() {
         return None;
     }
-    let ticks = ticks as u64;
+    let horizon = targets.iter().map(|target| target.0).max()?;
     let [tx, ty, _] = torque;
     let (pitch, yaw) = ((-ty / 2.24).clamp(-1.0, 1.0), (-tx / 2.60).clamp(-1.0, 1.0));
     if (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
@@ -1878,13 +1896,15 @@ fn fit_dodge_start(
     let mut path = vec![start];
     scratch.set_car_state(0, start);
     scratch.set_car_controls(0, base);
-    for _ in 0..ticks {
+    for _ in 0..horizon {
         scratch.step_tick();
         path.push(*scratch.get_car_state(0));
     }
-    let run = |scratch: &mut Arena, dodge_tick: u64, cancel: f32| -> CarState {
+    // States at every target tick for a dodge at `dodge_tick` with `cancel`.
+    let run = |scratch: &mut Arena, dodge_tick: u64, cancel: f32| -> Vec<CarState> {
         scratch.set_car_state(0, path[dodge_tick as usize - 1]);
-        for tick in dodge_tick..=ticks {
+        let mut after: Vec<CarState> = Vec::new();
+        for tick in dodge_tick..=horizon {
             let mut controls = base;
             if tick == dodge_tick {
                 controls.jump = true;
@@ -1896,19 +1916,36 @@ fn fit_dodge_start(
             }
             scratch.set_car_controls(0, controls);
             scratch.step_tick();
+            let mut end = *scratch.get_car_state(0);
+            let speed = end.phys.ang_vel.length();
+            if speed > 5.5 {
+                end.phys.ang_vel *= 5.5 / speed;
+            }
+            after.push(end);
         }
-        let mut end = *scratch.get_car_state(0);
-        let speed = end.phys.ang_vel.length();
-        if speed > 5.5 {
-            end.phys.ang_vel *= 5.5 / speed;
-        }
-        end
+        targets
+            .iter()
+            .map(|&(tick, ..)| {
+                if tick < dodge_tick {
+                    path[tick as usize]
+                } else {
+                    after[(tick - dodge_tick) as usize]
+                }
+            })
+            .collect()
+    };
+    let position_velocity_error = |states: &[CarState]| -> f32 {
+        targets
+            .iter()
+            .zip(states)
+            .map(|(target, end)| {
+                (end.phys.pos - target.1).length() + 0.1 * (end.phys.vel - target.2).length()
+            })
+            .sum()
     };
     let mut best: Option<(u64, f32)> = None;
-    for dodge_tick in 1..=ticks {
-        let end = run(scratch, dodge_tick, 0.0);
-        let error =
-            (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
+    for dodge_tick in 1..=horizon {
+        let error = position_velocity_error(&run(scratch, dodge_tick, 0.0));
         if best.is_none_or(|(_, e)| error < e - 1e-4) {
             best = Some((dodge_tick, error));
         }
@@ -1917,8 +1954,14 @@ fn fit_dodge_start(
     let mut best_cancel: Option<(f32, f32)> = None;
     for step in 0..=4 {
         let cancel = step as f32 * 0.25;
-        let end = run(scratch, dodge_tick, cancel);
-        let error = (end.phys.ang_vel - target_omega).length();
+        let states = run(scratch, dodge_tick, cancel);
+        // Angular velocity only counts at packets at or after the start.
+        let error: f32 = targets
+            .iter()
+            .zip(&states)
+            .filter(|(target, _)| target.0 >= dodge_tick)
+            .map(|(target, end)| (end.phys.ang_vel - target.3).length())
+            .sum();
         if best_cancel.is_none_or(|(_, e)| error < e - 1e-4) {
             best_cancel = Some((cancel, error));
         }
@@ -1926,7 +1969,7 @@ fn fit_dodge_start(
     Some(DodgePlan {
         activation_frame,
         start_offset: dodge_tick,
-        duration: ticks,
+        duration: horizon,
         pitch,
         yaw,
         cancel: best_cancel?.0,
