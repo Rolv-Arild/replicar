@@ -1637,7 +1637,9 @@ const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=8;
 /// to the *next* fresh packet, so that packet is not used by the fit and the residual there stays a
 /// held-out check. Uses later packets (offline reconstruction). Refused without exact chain lags for
 /// both later packets, with a withheld or inactive frame, a jump/dodge counter change, a car that
-/// is not flat on the ground at any of the three packets, or the ball or another car within 400 UU.
+/// is not flat on the ground at any of the three packets, or the ball within 400 UU (the scratch
+/// arena's ball is parked; other cars are not modelled either, and refusing spans near them removed
+/// coverage without protecting the fit: near-other-car velocity p90 65.5 to 54.5 UU/s without it).
 #[allow(clippy::too_many_arguments)]
 fn fit_ground_control_timing(
     observations: &ObservedReplay,
@@ -1695,13 +1697,6 @@ fn fit_ground_control_timing(
             ball.position
                 .as_ref()
                 .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
-        }) && frames[g].cars.iter().all(|other| {
-            other.actor_id == car.actor_id
-                || other
-                    .body
-                    .position
-                    .as_ref()
-                    .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
         })
     };
     if !clear(index, state.phys.pos) {
@@ -1876,9 +1871,8 @@ const JUMP_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=16;
 /// packet is not used by the fit and its residual stays a held-out check. Other controls use the
 /// midpoint rule. Uses later packets (offline reconstruction). Refused without exact chain lags for
 /// both later packets, spans over 30 ticks, a withheld or inactive frame, a change of double-jump,
-/// dodge or flip counter, or another car within 400 UU at the three packets. The ball is simulated
-/// too (its state at this packet's time in the main arena), so jumps at the ball are fitted with
-/// their contacts.
+/// dodge or flip counter. The ball is simulated (its state at this packet's time in the main
+/// arena), so jumps at the ball are fitted with their contacts; other cars are not modelled.
 #[allow(clippy::too_many_arguments)]
 fn fit_jump_timing(
     observations: &ObservedReplay,
@@ -1941,21 +1935,6 @@ fn fit_jump_timing(
     if a_others.iter().flatten().any(|c| c % 2 == 1) || jump_odd(car) {
         return None;
     }
-    // Only other cars keep a span out (their contacts are not modelled in the scratch arena); the
-    // ball is in it, from the main arena's state at this packet's time.
-    let clear = |g: usize, pos: Vec3A| {
-        frames[g].cars.iter().all(|other| {
-            other.actor_id == car.actor_id
-                || other
-                    .body
-                    .position
-                    .as_ref()
-                    .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
-        })
-    };
-    if !clear(index, state.phys.pos) {
-        return None;
-    }
     let t_a = timeline(index) - lag_a as i64;
     let mut found: Vec<(usize, i64, Vec3A, Vec3A)> = Vec::new();
     for g in index + 1..=(index + 12).min(frames.len() - 1) {
@@ -1980,9 +1959,6 @@ fn fit_jump_timing(
         else {
             continue;
         };
-        if !clear(g, vec3(p.value)) {
-            return None;
-        }
         found.push((
             g,
             timeline(g) - lag.round().max(0.0) as i64,
@@ -2097,6 +2073,362 @@ fn fit_jump_timing(
     })
 }
 
+/// A ground jump followed by a dodge, fitted together: the jump schedule for the interval to the next
+/// fresh packet and, when the dodge press falls inside it, the dodge plan.
+struct FlipFit {
+    schedule: GroundSchedule,
+    dodge: Option<DodgePlan>,
+}
+
+/// Fits a jump from the ground and the dodge that follows it (both counters turn odd before the
+/// second-next fresh packet). One shift of the jump counter's switches and the dodge press tick
+/// (relative to the midpoint-rule tick of the activation frame) are searched on the *second* next
+/// fresh packet (exact chain lag; position and velocity), the dodge press from a saved no-dodge
+/// path per jump shift, then the pitch cancel from its angular velocity. The plan drives only the
+/// interval to the *next* fresh packet (the jump input per tick, and the dodge if its press falls
+/// inside it), so that packet is not used by the fit. Uses later packets (offline reconstruction).
+/// Refused for a car not flat on the ground, uneven double-jump or flip counters, spans over 45
+/// ticks, or a withheld or inactive frame. The ball is simulated (its state at this packet's time in
+/// the main arena); other cars are not.
+#[allow(clippy::too_many_arguments)]
+fn fit_ground_flip_timing(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    lag_a: u64,
+    slot: usize,
+    now_tick: u64,
+    ball: &rocketsim::BallState,
+    scratch: &mut Arena,
+) -> Option<FlipFit> {
+    let frames = &observations.frames;
+    let lags = packet_lags.as_ref()?;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    if !options.infer_jump_from_active
+        || !options.infer_dodge_from_active
+        || !active(index)
+        || !state.is_on_ground
+        || state.phys.pos.z >= 25.0
+        || state.phys.rot_mat.z_axis.z <= 0.97
+    {
+        return None;
+    }
+    let same_car = |c: &&observations::Car| {
+        c.actor_id == car.actor_id
+            && c.actor_created_frame == car.actor_created_frame
+            && c.player_key == car.player_key
+    };
+    let parity = |v: &Option<observations::Value<u8>>| v.as_ref().map(|v| v.value);
+    let others = |c: &observations::Car| {
+        [
+            parity(&c.inputs.double_jump_active_raw),
+            parity(&c.inputs.flip_car_active_raw),
+        ]
+    };
+    let jump_odd =
+        |c: &observations::Car| parity(&c.inputs.jump_active_raw).is_some_and(|v| v % 2 == 1);
+    let dodge_of = |c: &observations::Car| parity(&c.inputs.dodge_active_raw);
+    let a_others = others(car);
+    if a_others.iter().flatten().any(|c| c % 2 == 1)
+        || jump_odd(car)
+        || dodge_of(car).is_none_or(|d| d % 2 == 1)
+    {
+        return None;
+    }
+    let t_a = timeline(index) - lag_a as i64;
+    // The dodge activation: the first frame with a fresh odd dodge counter and a fresh torque.
+    let last = (index + 14).min(frames.len() - 1);
+    let mut activation = None;
+    for g in index + 1..=last {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        if others(other) != a_others {
+            return None;
+        }
+        if let (Some(dodge), Some(torque)) = (
+            other
+                .inputs
+                .dodge_active_raw
+                .as_ref()
+                .filter(|d| d.frame == g),
+            other
+                .inputs
+                .dodge_torque_replay_units
+                .as_ref()
+                .filter(|t| t.frame == g),
+        ) {
+            if dodge.value % 2 == 1 {
+                activation = Some((g, torque.value));
+                break;
+            }
+        }
+    }
+    let (activation_frame, torque) = activation?;
+    let [tx, ty, _] = torque;
+    let (pitch, yaw) = ((-ty / 2.24).clamp(-1.0, 1.0), (-tx / 2.60).clamp(-1.0, 1.0));
+    if (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
+        return None;
+    }
+    // The next two fresh packets after a: the first is the next reset of the state (its own lag,
+    // exact or not) and stays held out; the second needs an exact chain lag and is the fit target.
+    let mut fresh: Vec<(usize, i64, Vec3A, Vec3A, Vec3A)> = Vec::new();
+    for g in index + 1..=(index + 16).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        if others(other) != a_others {
+            return None;
+        }
+        let b = &other.body;
+        let (Some(p), Some(v), Some(w)) = (
+            b.position.as_ref().filter(|x| x.frame == g),
+            b.linear_velocity.as_ref().filter(|x| x.frame == g),
+            b.angular_velocity_replay_units
+                .as_ref()
+                .filter(|x| x.frame == g),
+        ) else {
+            continue;
+        };
+        let chain = lags
+            .car_actor
+            .get(&(car.actor_id, car.actor_created_frame, g))
+            .copied();
+        let lag = if fresh.is_empty() {
+            chain
+                .or(lags.cars[g])
+                .unwrap_or((timeline(g) - timeline(g - 1)).max(0) as f32 / 2.0)
+        } else {
+            let Some(lag) = chain else {
+                continue;
+            };
+            lag
+        };
+        fresh.push((
+            g,
+            timeline(g) - lag.round().max(0.0) as i64,
+            vec3(p.value),
+            vec3(v.value),
+            vec3(w.value) * 0.01,
+        ));
+        if fresh.len() == 2 {
+            break;
+        }
+    }
+    let [
+        (_, t_b, ..),
+        (last_frame, t_c, target_pos, target_vel, target_ang),
+    ] = fresh[..]
+    else {
+        return None;
+    };
+    let (ticks_ab, ticks_ac) = (t_b - t_a, t_c - t_a);
+    if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 45 || activation_frame > last_frame {
+        return None;
+    }
+    // (nominal tick, midpoint-rule start tick, throttle, steer, handbrake, boost, jump) per frame.
+    let mut entries: Vec<(i64, i64, f32, f32, bool, bool, bool)> = Vec::new();
+    for g in index.saturating_sub(3)..=(last_frame + 1).min(frames.len() - 1) {
+        if !active(g) {
+            continue;
+        }
+        let Some(other) = frames[g].cars.iter().find(same_car) else {
+            continue;
+        };
+        let spacing = if g == 0 {
+            4
+        } else {
+            timeline(g) - timeline(g - 1)
+        };
+        let mut controls = controls_from_observation(other, options);
+        controls.jump = jump_odd(other);
+        entries.push((
+            timeline(g),
+            timeline(g) - 2 - spacing / 2,
+            controls.throttle,
+            controls.steer,
+            controls.handbrake,
+            controls.boost,
+            controls.jump,
+        ));
+    }
+    // The jump counter must turn odd after a and no later than the activation.
+    if !entries
+        .iter()
+        .any(|e| e.6 && e.0 > t_a - 4 && e.0 <= timeline(activation_frame) + 4)
+    {
+        return None;
+    }
+    let act_start = entries
+        .iter()
+        .find(|e| e.0 == timeline(activation_frame))
+        .map(|e| e.1)?;
+    let own = controls_from_observation(car, options);
+    let own_entry = (own.throttle, own.steer, own.handbrake, own.boost);
+    let controls_at = |shift: i64, tau: i64| -> (f32, f32, bool, bool, bool) {
+        let i = entries.partition_point(|e| e.1 <= tau);
+        let base = if i == 0 {
+            own_entry
+        } else {
+            let e = entries[i - 1];
+            (e.2, e.3, e.4, e.5)
+        };
+        let j = entries.partition_point(|e| e.1 + shift <= tau);
+        let jump = j > 0 && entries[j - 1].6;
+        (base.0, base.1, base.2, base.3, jump)
+    };
+    let horizon = ticks_ac as usize;
+    let mut best: Option<(i64, i64, f32)> = None; // (jump shift, press tick relative to a, cost)
+    for shift in JUMP_TIMING_SHIFTS {
+        // The path with the jump at this shift and no dodge, saved tick by tick.
+        let mut path = vec![*state];
+        let mut path_ball = vec![*ball];
+        scratch.set_ball_state(*ball);
+        scratch.set_car_state(0, *state);
+        for step in 1..=horizon {
+            let c = controls_at(shift, t_a + step as i64);
+            scratch.set_car_controls(
+                0,
+                CarControls {
+                    throttle: c.0,
+                    steer: c.1,
+                    handbrake: c.2,
+                    boost: c.3,
+                    jump: c.4,
+                    ..CarControls::default()
+                },
+            );
+            scratch.step_tick();
+            path.push(*scratch.get_car_state(0));
+            path_ball.push(*scratch.get_ball_state());
+        }
+        for d in JUMP_TIMING_SHIFTS {
+            let press = act_start + d - t_a;
+            if !(2..=horizon as i64).contains(&press) {
+                continue;
+            }
+            let press = press as usize;
+            scratch.set_ball_state(path_ball[press - 1]);
+            scratch.set_car_state(0, path[press - 1]);
+            for step in press..=horizon {
+                let c = controls_at(shift, t_a + step as i64);
+                let mut controls = CarControls {
+                    throttle: c.0,
+                    steer: c.1,
+                    handbrake: c.2,
+                    boost: c.3,
+                    ..CarControls::default()
+                };
+                if step == press {
+                    controls.jump = true;
+                    controls.pitch = pitch;
+                    controls.yaw = yaw;
+                }
+                scratch.set_car_controls(0, controls);
+                scratch.step_tick();
+            }
+            let end = scratch.get_car_state(0);
+            let cost =
+                (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
+            if best.is_none_or(|(_, _, c)| cost < c - 1e-4) {
+                best = Some((shift, press as i64, cost));
+            }
+        }
+    }
+    let (shift, press, _) = best?;
+    // The pitch cancel from the angular velocity at the second-next packet.
+    let press_u = press as usize;
+    let mut best_cancel: Option<(f32, f32)> = None;
+    for step in 0..=4 {
+        let cancel = step as f32 * 0.25;
+        // Rebuild the state at the press for this jump shift.
+        scratch.set_ball_state(*ball);
+        scratch.set_car_state(0, *state);
+        for step_tick in 1..=horizon {
+            let c = controls_at(shift, t_a + step_tick as i64);
+            let mut controls = CarControls {
+                throttle: c.0,
+                steer: c.1,
+                handbrake: c.2,
+                boost: c.3,
+                jump: c.4,
+                ..CarControls::default()
+            };
+            if step_tick == press_u {
+                controls.jump = true;
+                controls.pitch = pitch;
+                controls.yaw = yaw;
+            } else if step_tick > press_u {
+                controls.jump = false;
+                let sign = scratch.get_car_state(0).flip_rel_torque.y.signum();
+                controls.pitch = cancel * sign;
+            }
+            scratch.set_car_controls(0, controls);
+            scratch.step_tick();
+        }
+        let mut end = *scratch.get_car_state(0);
+        let speed = end.phys.ang_vel.length();
+        if speed > 5.5 {
+            end.phys.ang_vel *= 5.5 / speed;
+        }
+        let error = (end.phys.ang_vel - target_ang).length();
+        if best_cancel.is_none_or(|(_, e)| error < e - 1e-4) {
+            best_cancel = Some((cancel, error));
+        }
+    }
+    let cancel = best_cancel?.0;
+    // The jump schedule for the interval to the next packet, up to the dodge press if it falls in it.
+    let mut entries_out: Vec<(u64, f32, f32, bool, bool, Option<bool>)> = Vec::new();
+    let mut previous = None;
+    let until = if press <= ticks_ab {
+        press - 1
+    } else {
+        ticks_ab
+    };
+    for step in 1..=until {
+        let c = controls_at(shift, t_a + step);
+        if previous != Some(c) {
+            entries_out.push((now_tick + step as u64, c.0, c.1, c.2, c.3, Some(c.4)));
+            previous = Some(c);
+        }
+    }
+    Some(FlipFit {
+        schedule: GroundSchedule {
+            slot,
+            end_tick: now_tick + ticks_ab as u64,
+            entries: entries_out,
+        },
+        dodge: (press <= ticks_ab).then_some(DodgePlan {
+            activation_frame,
+            start_offset: press as u64,
+            duration: ticks_ab as u64,
+            pitch,
+            yaw,
+            cancel,
+        }),
+    })
+}
+
 fn step_ticks(
     arena: &mut Arena,
     ticks: u64,
@@ -2110,6 +2442,13 @@ fn step_ticks(
         pending.retain(|dodge| dodge.end_tick >= arena_tick);
         ground.retain(|schedule| schedule.end_tick >= arena_tick);
         for schedule in ground.iter() {
+            // From its press tick a pending dodge drives the car.
+            if pending
+                .iter()
+                .any(|dodge| dodge.slot == schedule.slot && arena_tick >= dodge.start_tick)
+            {
+                continue;
+            }
             if let Some(entry) = schedule.entries.iter().rev().find(|e| e.0 <= arena_tick) {
                 let mut controls = *arena.get_car_controls(schedule.slot);
                 controls.throttle = entry.1;
@@ -2126,8 +2465,11 @@ fn step_ticks(
             let mut controls = dodge.base;
             controls.jump = false;
             if arena_tick < dodge.start_tick {
-                // Release jump before the press, so the press at the start tick is a new edge.
-                arena.set_car_controls(dodge.slot, controls);
+                // Release jump before the press, so the press at the start tick is a new edge (a
+                // jump schedule for the same car sets the jump input itself).
+                if !ground.iter().any(|schedule| schedule.slot == dodge.slot) {
+                    arena.set_car_controls(dodge.slot, controls);
+                }
             } else if arena_tick == dodge.start_tick {
                 controls.jump = true;
                 controls.pitch = dodge.pitch;
@@ -2274,9 +2616,9 @@ struct DodgePlan {
 /// then chosen from its angular velocity. The plan drives only the interval to the *next* packet,
 /// so that packet is not used by the fit and its residual stays a held-out check (fitting the next
 /// packet itself was in-sample and made later angular velocity worse). Uses later packets (offline
-/// reconstruction); spans with a withheld or inactive frame, or with another car within 400 UU at
-/// the packets, are refused. The ball is simulated too (its state at this packet's time in the main
-/// arena), so dodges at the ball are fitted with their contacts.
+/// reconstruction); spans with a withheld or inactive frame are refused. The ball is simulated too
+/// (its state at this packet's time in the main arena), so dodges at the ball are fitted with their
+/// contacts; other cars are not modelled.
 #[allow(clippy::too_many_arguments)]
 fn fit_dodge_start(
     observations: &ObservedReplay,
@@ -2320,21 +2662,6 @@ fn fit_dodge_start(
             && candidate.actor_created_frame == car.actor_created_frame
             && candidate.player_key == car.player_key
     };
-    // Only other cars keep a span out (their contacts are not modelled in the scratch arena); the
-    // ball is in it, from the main arena's state at this packet's time.
-    let clear = |g: usize, pos: Vec3A| {
-        frames[g].cars.iter().all(|other| {
-            other.actor_id == car.actor_id
-                || other
-                    .body
-                    .position
-                    .as_ref()
-                    .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
-        })
-    };
-    if !clear(index, state.phys.pos) {
-        return None;
-    }
     let last = (index + 14).min(frames.len() - 1);
     // Activation: the first frame whose fresh dodge counter is odd with a fresh torque.
     let mut activation = None;
@@ -2409,9 +2736,6 @@ fn fit_dodge_start(
                 };
                 lag
             };
-            if !clear(g, vec3(p.value)) {
-                return None;
-            }
             let tick = (timeline(g) - lag.round().max(0.0) as i64) - origin_tick;
             if !(1..=45).contains(&tick) {
                 break;
@@ -3278,6 +3602,49 @@ pub fn convert_observations_with(
                             &ball_now,
                             scratch,
                         );
+                    }
+                    if schedule.is_none()
+                        && options.fit_jump_timing
+                        && options.infer_dodge_start
+                        && !pending_dodges.iter().any(|dodge| dodge.slot == slot)
+                    {
+                        let ball_now = *arena.get_ball_state();
+                        if let Some(flip) = fit_ground_flip_timing(
+                            observations,
+                            options,
+                            &packet_lags,
+                            first_time,
+                            frame_idx,
+                            car,
+                            &current,
+                            car_lag(car),
+                            slot,
+                            arena.tick_count(),
+                            &ball_now,
+                            scratch,
+                        ) {
+                            if let Some(plan) = flip.dodge {
+                                let now = arena.tick_count();
+                                pending_dodges.push(PendingDodge {
+                                    slot,
+                                    start_tick: now + plan.start_offset,
+                                    end_tick: now + plan.duration,
+                                    pitch: plan.pitch,
+                                    yaw: plan.yaw,
+                                    cancel: plan.cancel,
+                                    base: controls,
+                                });
+                                handled_dodges.insert((
+                                    car.actor_id,
+                                    car.actor_created_frame,
+                                    plan.activation_frame,
+                                ));
+                                diagnostics.dodge_starts_fitted += 1;
+                                flip_last
+                                    .insert((car.actor_id, car.actor_created_frame), plan.cancel);
+                            }
+                            schedule = Some(flip.schedule);
+                        }
                     }
                     if let Some(schedule) = schedule {
                         ground_schedules.push(schedule);
@@ -4300,6 +4667,171 @@ mod tests {
         assert_eq!(plan.duration, 8);
         assert_eq!(plan.cancel, 0.0);
         assert!((plan.pitch - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ground_flip_fit_recovers_the_jump_shift_and_the_dodge_press_together() {
+        // Truth: a grounded car whose jump is held over ticks 3..7 and whose forward dodge is
+        // pressed at tick 10. The jump counter is odd at frame 1 and even from frame 2; the dodge
+        // counter turns odd at frame 3 with a fresh torque; fresh packets at frames 0, 4, 6.
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(1);
+        let mut parked = rocketsim::BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        let mut truth = Arena::new_with_config(config.clone());
+        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        truth.set_ball_state(parked);
+        let mut start = CarState::default();
+        start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
+        start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
+        start.is_on_ground = true;
+        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+        truth.set_car_state(0, start);
+        let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
+        for tick in 1..=24u64 {
+            let mut controls = CarControls::default();
+            controls.jump = (3..7).contains(&tick) || tick == 10;
+            if tick == 10 {
+                controls.pitch = 1.0;
+            }
+            truth.set_car_controls(0, controls);
+            truth.step_tick();
+            packets.push(*truth.get_car_state(0));
+        }
+        let fresh_frames = [0usize, 4, 6];
+        let make_car = |frame: usize| {
+            let source = *fresh_frames.iter().rev().find(|f| **f <= frame).unwrap();
+            let state = &packets[source * 4];
+            let stamp = |v: [f32; 3]| {
+                Some(Value {
+                    value: v,
+                    frame: source,
+                    source: Source::Replay,
+                })
+            };
+            let q = Quat::from_mat3a(&state.phys.rot_mat);
+            let counter = |value: u8| {
+                Some(Value {
+                    value,
+                    frame,
+                    source: Source::Replay,
+                })
+            };
+            observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("p1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body {
+                    position: stamp(state.phys.pos.to_array()),
+                    linear_velocity: stamp(state.phys.vel.to_array()),
+                    rotation_xyzw: Some(Value {
+                        value: [q.x, q.y, q.z, q.w],
+                        frame: source,
+                        source: Source::Replay,
+                    }),
+                    angular_velocity_replay_units: stamp((state.phys.ang_vel * 100.0).to_array()),
+                    ..Body::default()
+                },
+                boost: None,
+                boost_raw: None,
+                inputs: observations::Inputs {
+                    jump_active_raw: counter(match frame {
+                        0 => 0,
+                        1 => 1,
+                        _ => 2,
+                    }),
+                    dodge_active_raw: counter(u8::from(frame >= 3)),
+                    dodge_torque_replay_units: (frame >= 3).then_some(Value {
+                        value: [0.0, -2.24, 0.0],
+                        frame: 3,
+                        source: Source::Replay,
+                    }),
+                    ..observations::Inputs::default()
+                },
+            }
+        };
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..9)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * 4.0 / 120.0,
+                    delta: 4.0 / 120.0,
+                    ball: None,
+                    cars: vec![make_car(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        };
+        let mut lags = PacketLags {
+            ball: vec![None; 9],
+            cars: vec![None; 9],
+            car_actor: HashMap::new(),
+        };
+        for frame in fresh_frames {
+            lags.car_actor.insert((1, 0, frame), 0.0);
+        }
+        let mut options = ConvertOptions::default();
+        options.infer_jump_from_active = true;
+        options.infer_dodge_from_active = true;
+        let mut scratch = Arena::new_with_config(config);
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let flip = fit_ground_flip_timing(
+            &replay,
+            &options,
+            &Some(lags),
+            0.0,
+            0,
+            &replay.frames[0].cars[0],
+            &start,
+            0,
+            0,
+            0,
+            &parked,
+            &mut scratch,
+        )
+        .expect(
+            "a grounded car whose jump and dodge counters turn odd before the second next packet",
+        );
+        // Fitted on the packet at tick 24; the plan covers the interval to the packet at tick 16.
+        assert_eq!(flip.schedule.end_tick, 16);
+        let dodge = flip
+            .dodge
+            .expect("the dodge press (tick 10) is inside the interval");
+        assert_eq!(
+            (dodge.activation_frame, dodge.start_offset, dodge.duration),
+            (3, 10, 16)
+        );
+        assert_eq!(dodge.cancel, 0.0);
+        // The jump is pressed at tick 3 and released at tick 7 (a shift of +3 from the midpoint rule).
+        let entries = &flip.schedule.entries;
+        assert!(
+            entries.iter().any(|e| e.0 == 3 && e.5 == Some(true)),
+            "{entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| e.0 == 7 && e.5 == Some(false)),
+            "{entries:?}"
+        );
     }
 
     #[test]
