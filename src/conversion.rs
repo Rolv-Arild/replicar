@@ -76,6 +76,11 @@ pub struct ConvertOptions {
     /// ticks; without them every state sits at its frame time) and is not used for a frame withheld
     /// by an evaluator.
     pub lookahead_ground_controls: bool,
+    /// Offline: fit one common timing shift of a grounded car's observed control changes against the
+    /// second-next fresh car packet and drive the interval to the next fresh packet with it
+    /// (`fit_ground_control_timing`). Needs the inferred packet lags; overrides
+    /// `lookahead_ground_controls` on the intervals it covers.
+    pub fit_ground_control_timing: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -157,6 +162,7 @@ impl Default for ConvertOptions {
             infer_air_steer_controls: true,
             infer_dodge_start: false,
             lookahead_ground_controls: true,
+            fit_ground_control_timing: true,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
@@ -1601,16 +1607,269 @@ struct PendingDodge {
     base: CarControls,
 }
 
+/// Per-tick ground controls for one car over the interval to its next fresh packet, from a fitted
+/// timing of the observed control changes (`fit_ground_control_timing`).
+struct GroundSchedule {
+    slot: usize,
+    /// Last arena tick the schedule covers (the tick that reaches the next fresh packet).
+    end_tick: u64,
+    /// (first arena tick, throttle, steer, handbrake, boost), in order.
+    entries: Vec<(u64, f32, f32, bool, bool)>,
+}
+
+/// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
+const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=8;
+
+/// Fits when the observed throttle, steer, handbrake and boost changes took effect. A control change
+/// is first seen in the frame after it happened and each frame's state is 0-4 ticks older than its
+/// time, so the change tick is uncertain by several ticks per event (`diagnose_control_latency`
+/// shows the best shift is spread over the whole range and does not carry from one interval to
+/// the next). For a grounded car with a fresh packet at `index`, one common shift of every control
+/// switch (relative to the midpoint rule of `lookahead_ground_controls`) is chosen by simulating the
+/// span to the *second* next fresh packet in a scratch arena and comparing angular velocity (per
+/// 0.3 rad/s) and velocity (per 50 UU/s) with it. The returned schedule covers only the interval
+/// to the *next* fresh packet, so that packet is not used by the fit and the residual there stays a
+/// held-out check. Uses later packets (offline reconstruction). Refused without exact chain lags for
+/// both later packets, with a withheld or inactive frame, a jump/dodge counter change, a car that
+/// is not flat on the ground at any of the three packets, or the ball or another car within 400 UU.
+#[allow(clippy::too_many_arguments)]
+fn fit_ground_control_timing(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    lag_a: u64,
+    slot: usize,
+    now_tick: u64,
+    scratch: &mut Arena,
+) -> Option<GroundSchedule> {
+    let frames = &observations.frames;
+    let lags = packet_lags.as_ref()?;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    let flat = |pos: Vec3A, up: Vec3A| pos.z < 30.0 && up.z > 0.97;
+    if !active(index) || !state.is_on_ground || !flat(state.phys.pos, state.phys.rot_mat.z_axis) {
+        return None;
+    }
+    let same_car = |c: &&observations::Car| {
+        c.actor_id == car.actor_id
+            && c.actor_created_frame == car.actor_created_frame
+            && c.player_key == car.player_key
+    };
+    let counters = |c: &observations::Car| {
+        [
+            c.inputs.jump_active_raw.as_ref().map(|v| v.value),
+            c.inputs.double_jump_active_raw.as_ref().map(|v| v.value),
+            c.inputs.dodge_active_raw.as_ref().map(|v| v.value),
+            c.inputs.flip_car_active_raw.as_ref().map(|v| v.value),
+        ]
+    };
+    let a_counters = counters(car);
+    if a_counters.iter().flatten().any(|c| c % 2 == 1) {
+        return None;
+    }
+    let clear = |g: usize, pos: Vec3A| {
+        frames[g].ball.as_ref().is_none_or(|ball| {
+            ball.position
+                .as_ref()
+                .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
+        }) && frames[g].cars.iter().all(|other| {
+            other.actor_id == car.actor_id
+                || other
+                    .body
+                    .position
+                    .as_ref()
+                    .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
+        })
+    };
+    if !clear(index, state.phys.pos) {
+        return None;
+    }
+    let t_a = timeline(index) - lag_a as i64;
+    // The next two fresh packets with exact chain lags.
+    let mut found: Vec<(usize, i64, Vec3A, Vec3A)> = Vec::new();
+    for g in index + 1..=(index + 12).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        if counters(other) != a_counters {
+            return None;
+        }
+        let b = &other.body;
+        let (Some(p), Some(v), Some(r), Some(w)) = (
+            b.position.as_ref().filter(|x| x.frame == g),
+            b.linear_velocity.as_ref().filter(|x| x.frame == g),
+            b.rotation_xyzw.as_ref().filter(|x| x.frame == g),
+            b.angular_velocity_replay_units
+                .as_ref()
+                .filter(|x| x.frame == g),
+        ) else {
+            continue;
+        };
+        let Some(lag) = lags
+            .car_actor
+            .get(&(car.actor_id, car.actor_created_frame, g))
+            .copied()
+        else {
+            continue;
+        };
+        let quat = Quat::from_xyzw(r.value[0], r.value[1], r.value[2], r.value[3]);
+        if !quat.is_finite() || quat.length_squared() < 0.5 {
+            continue;
+        }
+        let up = Mat3A::from_quat(quat.normalize()).z_axis;
+        if !flat(vec3(p.value), up) || !clear(g, vec3(p.value)) {
+            return None;
+        }
+        found.push((
+            g,
+            timeline(g) - lag.round().max(0.0) as i64,
+            vec3(v.value),
+            vec3(w.value) * 0.01,
+        ));
+        if found.len() == 2 {
+            break;
+        }
+    }
+    let [(_, t_b, _, _), (last_frame, t_c, target_vel, target_ang)] = found[..] else {
+        return None;
+    };
+    let (ticks_ab, ticks_ac) = (t_b - t_a, t_c - t_a);
+    if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 24 {
+        return None;
+    }
+    // Observed controls of the frames around the span, with midpoint-rule switch ticks.
+    let mut entries: Vec<(i64, f32, f32, bool, bool)> = Vec::new();
+    for g in index.saturating_sub(3)..=(last_frame + 1).min(frames.len() - 1) {
+        if !active(g) {
+            continue;
+        }
+        let Some(other) = frames[g].cars.iter().find(same_car) else {
+            continue;
+        };
+        let spacing = if g == 0 {
+            4
+        } else {
+            timeline(g) - timeline(g - 1)
+        };
+        let controls = controls_from_observation(other, options);
+        entries.push((
+            timeline(g) - 2 - spacing / 2,
+            controls.throttle,
+            controls.steer,
+            controls.handbrake,
+            controls.boost,
+        ));
+    }
+    let own = controls_from_observation(car, options);
+    let own_entry = (t_a, own.throttle, own.steer, own.handbrake, own.boost);
+    let changes = entries
+        .iter()
+        .filter(|e| e.0 >= t_a - 16 && e.0 <= t_c + 16)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| {
+            (w[0].1 - w[1].1).abs() > 0.1 || (w[0].2 - w[1].2).abs() > 0.1 || w[0].3 != w[1].3
+        });
+    if !changes {
+        return None;
+    }
+    let controls_at = |entries: &[(i64, f32, f32, bool, bool)], shift: i64, tau: i64| {
+        let i = entries.partition_point(|e| e.0 + shift <= tau);
+        if i == 0 { own_entry } else { entries[i - 1] }
+    };
+    let mut costs: Vec<(i64, f32)> = Vec::new();
+    // The scratch arena holds only this car: the ball is parked out of reach so that it cannot
+    // touch the car (the fit uses spans with no ball or car nearby).
+    let mut parked = rocketsim::BallState::default();
+    parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+    for shift in GROUND_TIMING_SHIFTS {
+        scratch.set_ball_state(parked);
+        scratch.set_car_state(0, *state);
+        for tau in t_a + 1..=t_c {
+            let e = controls_at(&entries, shift, tau);
+            scratch.set_car_controls(
+                0,
+                CarControls {
+                    throttle: e.1,
+                    steer: e.2,
+                    handbrake: e.3,
+                    boost: e.4,
+                    ..CarControls::default()
+                },
+            );
+            scratch.step_tick();
+        }
+        let end = scratch.get_car_state(0);
+        let cost = (end.phys.ang_vel - target_ang).length() / 0.3
+            + (end.phys.vel - target_vel).length() / 50.0;
+        costs.push((shift, cost));
+    }
+    // The midpoint rule (shift 0) unless another shift is strictly better.
+    let mut best = costs.iter().position(|(shift, _)| *shift == 0)?;
+    for (i, (_, cost)) in costs.iter().enumerate() {
+        if *cost < costs[best].1 - 1e-6 {
+            best = i;
+        }
+    }
+    let shift = costs[best].0;
+    // The schedule for the interval to the next packet, in arena ticks.
+    let mut schedule = vec![(now_tick, own_entry.1, own_entry.2, own_entry.3, own_entry.4)];
+    for e in &entries {
+        let tick = now_tick as i64 + (e.0 + shift - t_a);
+        if tick > now_tick as i64 {
+            schedule.push((tick as u64, e.1, e.2, e.3, e.4));
+        } else {
+            // A switch at or before the packet replaces the starting controls.
+            schedule[0] = (now_tick, e.1, e.2, e.3, e.4);
+        }
+    }
+    Some(GroundSchedule {
+        slot,
+        end_tick: now_tick + ticks_ab as u64,
+        entries: schedule,
+    })
+}
+
 fn step_ticks(
     arena: &mut Arena,
     ticks: u64,
     apply_hit_impulse: bool,
     pending: &mut Vec<PendingDodge>,
+    ground: &mut Vec<GroundSchedule>,
     events: &mut Vec<SimEvent>,
 ) {
     for _ in 0..ticks {
         let arena_tick = arena.tick_count() + 1;
         pending.retain(|dodge| dodge.end_tick >= arena_tick);
+        ground.retain(|schedule| schedule.end_tick >= arena_tick);
+        for schedule in ground.iter() {
+            if let Some(entry) = schedule.entries.iter().rev().find(|e| e.0 <= arena_tick) {
+                let mut controls = *arena.get_car_controls(schedule.slot);
+                controls.throttle = entry.1;
+                controls.steer = entry.2;
+                controls.handbrake = entry.3;
+                controls.boost = entry.4;
+                arena.set_car_controls(schedule.slot, controls);
+            }
+        }
         for dodge in pending.iter() {
             let mut controls = dodge.base;
             controls.jump = false;
@@ -2057,6 +2316,9 @@ pub fn convert_observations_with(
     let mut previous_active = false;
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
+    let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    let mut ground_scratch: HashMap<&'static str, Arena> = HashMap::new();
+    let mut slot_bodies: HashMap<usize, (&'static str, CarBodyConfig)> = HashMap::new();
     let mut handled_dodges: HashSet<(i32, usize, usize)> = HashSet::new();
     let mut flip_scratch = (options.infer_flip_cancel || options.infer_dodge_start).then(|| {
         let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
@@ -2200,6 +2462,7 @@ pub fn convert_observations_with(
                     switch,
                     options.apply_hit_extra_impulse,
                     &mut pending_dodges,
+                    &mut ground_schedules,
                     &mut events,
                 );
                 if options.limit_reported_velocities {
@@ -2231,6 +2494,7 @@ pub fn convert_observations_with(
                 stepped,
                 options.apply_hit_extra_impulse,
                 &mut pending_dodges,
+                &mut ground_schedules,
                 &mut events,
             );
             if stepped > 0 && options.limit_reported_velocities {
@@ -2278,6 +2542,7 @@ pub fn convert_observations_with(
                         let (hitbox, config) =
                             known_hitbox.unwrap_or(("octane", CarBodyConfig::OCTANE));
                         let slot = arena.add_car(team(team_idx), config);
+                        slot_bodies.insert(slot, (hitbox, config));
                         slots.insert(key.clone(), slot);
                         car_slots.push(CarSlot {
                             slot,
@@ -2664,6 +2929,44 @@ pub fn convert_observations_with(
                     }
                 }
                 arena.set_car_controls(slot, controls);
+                if options.fit_ground_control_timing
+                    && simulated
+                    && !new_lifetime
+                    && car
+                        .body
+                        .position
+                        .as_ref()
+                        .is_some_and(|p| p.frame == frame.index)
+                {
+                    ground_schedules.retain(|schedule| schedule.slot != slot);
+                    let (name, config) = slot_bodies
+                        .get(&slot)
+                        .copied()
+                        .unwrap_or(("octane", CarBodyConfig::OCTANE));
+                    let scratch = ground_scratch.entry(name).or_insert_with(|| {
+                        let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
+                        scratch_config.rng_seed = Some(options.seed);
+                        let mut scratch = Arena::new_with_config(scratch_config);
+                        scratch.add_car(Team::Blue, config);
+                        scratch
+                    });
+                    let current = *arena.get_car_state(slot);
+                    if let Some(schedule) = fit_ground_control_timing(
+                        observations,
+                        options,
+                        &packet_lags,
+                        first_time,
+                        frame_idx,
+                        car,
+                        &current,
+                        car_lag(car),
+                        slot,
+                        arena.tick_count(),
+                        scratch,
+                    ) {
+                        ground_schedules.push(schedule);
+                    }
+                }
             }
         }
         step_ticks(
@@ -2671,6 +2974,7 @@ pub fn convert_observations_with(
             remaining,
             options.apply_hit_extra_impulse,
             &mut pending_dodges,
+            &mut ground_schedules,
             &mut events,
         );
         if remaining > 0 && options.limit_reported_velocities {
@@ -3188,6 +3492,174 @@ mod tests {
         let unlagged = speed_at_last_frame(&options);
         options.lookahead_ground_controls = false;
         assert_eq!(unlagged, speed_at_last_frame(&options));
+    }
+
+    #[test]
+    fn ground_control_timing_fit_recovers_a_change_seen_a_frame_late() {
+        // Truth: a grounded car coasting at 500 UU/s whose throttle is pressed at tick 5. The
+        // replay shows throttle 1 first at frame 2 (tick 8), and fresh packets at frames 0, 2, 4.
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(1);
+        let mut truth = Arena::new_with_config(config.clone());
+        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let mut start = CarState::default();
+        start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
+        start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
+        start.is_on_ground = true;
+        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+        let mut parked = BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        truth.set_ball_state(parked);
+        truth.set_car_state(0, start);
+        let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
+        for tick in 1..=16u64 {
+            truth.set_car_controls(
+                0,
+                CarControls {
+                    throttle: if tick >= 5 { 1.0 } else { 0.0 },
+                    ..CarControls::default()
+                },
+            );
+            truth.step_tick();
+            packets.push(*truth.get_car_state(0));
+        }
+        let fresh_frames = [0usize, 2, 4];
+        let value = |value: f32, frame: usize| {
+            Some(Value {
+                value,
+                frame,
+                source: Source::Replay,
+            })
+        };
+        let make_car = |frame: usize| {
+            let source = *fresh_frames.iter().rev().find(|f| **f <= frame).unwrap();
+            let state = &packets[source * 4];
+            let stamp = |v: [f32; 3]| {
+                Some(Value {
+                    value: v,
+                    frame: source,
+                    source: Source::Replay,
+                })
+            };
+            let q = Quat::from_mat3a(&state.phys.rot_mat);
+            observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("p1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body {
+                    position: stamp(state.phys.pos.to_array()),
+                    linear_velocity: stamp(state.phys.vel.to_array()),
+                    rotation_xyzw: Some(Value {
+                        value: [q.x, q.y, q.z, q.w],
+                        frame: source,
+                        source: Source::Replay,
+                    }),
+                    angular_velocity_replay_units: stamp((state.phys.ang_vel * 100.0).to_array()),
+                    ..Body::default()
+                },
+                boost: None,
+                boost_raw: None,
+                inputs: observations::Inputs {
+                    throttle: value(if frame >= 2 { 1.0 } else { 0.0 }, frame),
+                    steer: value(0.0, frame),
+                    handbrake: Some(Value {
+                        value: false,
+                        frame,
+                        source: Source::Replay,
+                    }),
+                    ..observations::Inputs::default()
+                },
+            }
+        };
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..7)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * 4.0 / 120.0,
+                    delta: 4.0 / 120.0,
+                    ball: None,
+                    cars: vec![make_car(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        };
+        let mut lags = PacketLags {
+            ball: vec![None; 7],
+            cars: vec![None; 7],
+            car_actor: HashMap::new(),
+        };
+        for frame in fresh_frames {
+            lags.car_actor.insert((1, 0, frame), 0.0);
+        }
+        let options = ConvertOptions::default();
+        let mut scratch = Arena::new_with_config(config.clone());
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let car = &replay.frames[0].cars[0];
+        let schedule = fit_ground_control_timing(
+            &replay,
+            &options,
+            &Some(lags.clone()),
+            0.0,
+            0,
+            car,
+            &start,
+            0,
+            0,
+            0,
+            &mut scratch,
+        )
+        .expect("a flat grounded car with a control change and two later exact packets");
+        // The midpoint rule puts the switch at tick 4; the truth is tick 5, so the fit shifts by +1.
+        assert_eq!(schedule.end_tick, 8);
+        assert!(
+            schedule.entries.iter().any(|e| e.0 == 5 && e.1 == 1.0),
+            "{:?}",
+            schedule.entries
+        );
+        // Driving the main arena with the schedule reproduces the packet at frame 2 (tick 8).
+        let mut arena = Arena::new_with_config(config);
+        arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        arena.set_ball_state(parked);
+        arena.set_car_state(0, start);
+        let (mut pending, mut ground, mut events) = (Vec::new(), vec![schedule], Vec::new());
+        step_ticks(&mut arena, 8, false, &mut pending, &mut ground, &mut events);
+        let end = arena.get_car_state(0);
+        assert!(
+            (end.phys.pos - packets[8].phys.pos).length() < 0.01
+                && (end.phys.vel - packets[8].phys.vel).length() < 0.1,
+            "{:?} vs {:?}",
+            end.phys.pos,
+            packets[8].phys.pos
+        );
+        // Without the fit (throttle from the frame-2 packet time, tick 8) the car coasts instead.
+        let mut coasting = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
+        coasting.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        coasting.set_ball_state(parked);
+        coasting.set_car_state(0, start);
+        for _ in 0..8 {
+            coasting.step_tick();
+        }
+        assert!((coasting.get_car_state(0).phys.vel - packets[8].phys.vel).length() > 10.0);
     }
 
     #[test]

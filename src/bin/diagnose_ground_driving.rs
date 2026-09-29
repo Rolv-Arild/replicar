@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use glam::{Mat3A, Quat, Vec3A};
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
 use replay_to_rocketsim::observations::{Body, Car};
-use rocketsim::{Arena, ArenaConfig, CarBodyConfig, CarControls, CarState, GameMode, Team};
+use rocketsim::{
+    Arena, ArenaConfig, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
+};
 
 fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     if path.is_file() {
@@ -74,6 +76,14 @@ fn physics(body: &Body, frame: usize) -> Option<(Vec3A, Vec3A, Mat3A, Vec3A)> {
         Mat3A::from_quat(quat.normalize()),
         Vec3A::from_array(ang) * 0.01,
     ))
+}
+
+/// The scratch arena's ball is parked out of reach; at kickoff it would sit in the way of cars
+/// crossing the centre.
+fn parked_ball() -> BallState {
+    let mut ball = BallState::default();
+    ball.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+    ball
 }
 
 fn hitbox(name: &str) -> CarBodyConfig {
@@ -167,6 +177,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = ConvertOptions::default();
     // By default the handbrake ramp starts from the observed history, as the converter's arena
     // does; --reset-handbrake-value starts every pair from zero.
+    // --trace N: print N frame-by-frame windows from each unexplained hard-steer class.
+    let trace_limit: usize = env::args()
+        .skip_while(|arg| arg != "--trace")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let trace_stride: usize = env::args()
+        .skip_while(|arg| arg != "--trace-stride")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(97);
+    let mut trace_seen: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut trace_printed: BTreeMap<&'static str, usize> = BTreeMap::new();
     let with_handbrake_history = !env::args_os().any(|arg| arg == "--reset-handbrake-value");
     rocketsim::init(Path::new("collision_meshes"), true)?;
     let mut arenas: BTreeMap<String, Arena> = BTreeMap::new();
@@ -410,6 +433,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 let mut pair_eval: [Option<f32>; 2] = [None, None];
                 for hypothesis in hypotheses.iter().map(String::as_str) {
+                    arena.set_ball_state(parked_ball());
                     arena.set_car_state(
                         0,
                         ground_state(
@@ -616,6 +640,125 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let nearby = timeline
                         .iter()
                         .any(|(t, _, i)| i.handbrake && *t >= a.tick - 32 && *t <= b.tick + 32);
+                    if trace_limit > 0
+                        && (class == "forced handbrake fits" || class == "neither fits")
+                    {
+                        let seen = trace_seen.entry(class).or_default();
+                        *seen += 1;
+                        let printed = trace_printed.entry(class).or_default();
+                        if *seen % trace_stride == 0 && *printed < trace_limit {
+                            *printed += 1;
+                            let sign = a.inputs.steer.signum();
+                            println!(
+                                "\nTRACE {class} #{printed}: {} car {} frames {}..{} ticks {}..{} (k {k}) speed {:.0} lateral {:.0} yaw {:.2} true-yaw-at-b {:.2}",
+                                replay_path.file_name().unwrap().to_string_lossy(),
+                                key.0,
+                                a.frame,
+                                b.frame,
+                                a.tick,
+                                b.tick,
+                                a.phys.1.length(),
+                                a.phys.1.dot(a.phys.2.y_axis) * sign,
+                                a.phys.3.dot(a.phys.2.z_axis) * sign,
+                                b.phys.3.dot(b.phys.2.z_axis) * sign,
+                            );
+                            for f in a.frame.saturating_sub(3)..=(b.frame + 3).min(frames.len() - 1)
+                            {
+                                let Some(car) = frames[f]
+                                    .cars
+                                    .iter()
+                                    .find(|c| (c.actor_id, c.actor_created_frame) == *key)
+                                else {
+                                    continue;
+                                };
+                                let stamp = |frame: Option<usize>| {
+                                    frame.map_or("-".to_string(), |x| {
+                                        if x == f {
+                                            "fresh".to_string()
+                                        } else {
+                                            format!("f{x}")
+                                        }
+                                    })
+                                };
+                                let fresh_yaw = physics(&car.body, f)
+                                    .map_or("      ".to_string(), |ph| {
+                                        format!("{:>6.2}", ph.3.dot(ph.2.z_axis) * sign)
+                                    });
+                                println!(
+                                    "  frame {f} nominal tick {:>5}{}  steer {:>5.2}@{:<6} throttle {:>5.2}@{:<6} handbrake {}@{:<6} boost-raw {}@{:<6} true yaw {fresh_yaw}",
+                                    tick_of(f),
+                                    if f == a.frame {
+                                        " (a)"
+                                    } else if f == b.frame {
+                                        " (b)"
+                                    } else {
+                                        "    "
+                                    },
+                                    car.inputs.steer.as_ref().map_or(f32::NAN, |v| v.value),
+                                    stamp(car.inputs.steer.as_ref().map(|v| v.frame)),
+                                    car.inputs.throttle.as_ref().map_or(f32::NAN, |v| v.value),
+                                    stamp(car.inputs.throttle.as_ref().map(|v| v.frame)),
+                                    car.inputs
+                                        .handbrake
+                                        .as_ref()
+                                        .map_or("?".to_string(), |v| v.value.to_string()),
+                                    stamp(car.inputs.handbrake.as_ref().map(|v| v.frame)),
+                                    car.inputs
+                                        .boost_active_raw
+                                        .as_ref()
+                                        .map_or("?".to_string(), |v| v.value.to_string()),
+                                    stamp(car.inputs.boost_active_raw.as_ref().map(|v| v.frame)),
+                                );
+                            }
+                            for forced_run in [false, true] {
+                                arena.set_ball_state(parked_ball());
+                                arena.set_car_state(
+                                    0,
+                                    ground_state(
+                                        &a.phys,
+                                        if with_handbrake_history {
+                                            handbrake_value(timeline, a.tick)
+                                        } else {
+                                            0.0
+                                        },
+                                    ),
+                                );
+                                let mut line = format!(
+                                    "  sim, handbrake {:<8} yaw x sign / lateral x sign per tick:",
+                                    if forced_run { "forced" } else { "observed" }
+                                );
+                                for step in 0..k {
+                                    let tau = a.tick + step + 1;
+                                    let index =
+                                        timeline.partition_point(|(_, start, _)| *start <= tau);
+                                    let mut inputs = if index == 0 {
+                                        a.inputs
+                                    } else {
+                                        timeline[index - 1].2
+                                    };
+                                    inputs.handbrake |= forced_run;
+                                    arena.set_car_controls(
+                                        0,
+                                        CarControls {
+                                            throttle: inputs.throttle,
+                                            steer: inputs.steer,
+                                            handbrake: inputs.handbrake,
+                                            boost: inputs.boost,
+                                            ..CarControls::default()
+                                        },
+                                    );
+                                    arena.step_tick();
+                                    let st = arena.get_car_state(0);
+                                    line += &format!(
+                                        " {:.2}/{:.0}",
+                                        st.phys.ang_vel.dot(st.phys.rot_mat.z_axis) * sign,
+                                        st.phys.vel.dot(st.phys.rot_mat.y_axis) * sign
+                                    );
+                                }
+                                println!("{line}");
+                            }
+                        }
+                    }
                     brake_classes.entry(class).or_default().push([
                         a.phys.1.dot(a.phys.2.y_axis).abs(),
                         a.phys.3.dot(a.phys.2.z_axis).abs(),
