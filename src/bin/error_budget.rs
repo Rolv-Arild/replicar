@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         !env::args_os().any(|arg| arg == "--no-lookahead-ground-controls");
     options.fit_ground_control_timing =
         !env::args_os().any(|arg| arg == "--no-fit-ground-control-timing");
+    options.fit_jump_timing = !env::args_os().any(|arg| arg == "--no-fit-jump-timing");
     options.apply_hit_extra_impulse = env::args_os().any(|arg| arg == "--apply-hit-impulse");
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
@@ -83,6 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Parity of each car's dodge counter at its previous residual, to spot the first packet after
     // an activation.
     let mut previous_dodge_parity: std::collections::HashMap<i32, bool> = Default::default();
+    let mut previous_jump_parity: BTreeMap<i32, bool> = BTreeMap::new();
     let mut previous_altitude: std::collections::HashMap<i32, f32> = Default::default();
     let mut skipped = 0usize;
     let (mut activations, mut fitted) = (0usize, 0usize);
@@ -130,6 +132,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let first_after_activation =
                     dodge_odd_now && previous_dodge_parity.get(&actor).copied() == Some(false);
                 previous_dodge_parity.insert(actor, dodge_odd_now);
+                let jump_odd_now = odd(&car.inputs.jump_active_raw);
+                let first_jump =
+                    jump_odd_now && previous_jump_parity.get(&actor).copied() == Some(false);
+                previous_jump_parity.insert(actor, jump_odd_now);
                 let previous_z =
                     previous_altitude.insert(actor, residual.altitude_z.unwrap_or(f32::NAN));
                 let flipping = active_counter(car) || previous.is_some_and(active_counter);
@@ -147,6 +153,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "CAR double-jump counter odd"
                 } else if odd(&car.inputs.flip_car_active_raw) {
                     "CAR flip-car counter odd"
+                } else if first_jump {
+                    match previous_z {
+                        Some(z) if z < 50.0 => "CAR first packet after jump start, previous z < 50",
+                        _ => "CAR first packet after jump start, previous z >= 50",
+                    }
                 } else if odd(&car.inputs.jump_active_raw) {
                     "CAR jump counter odd"
                 } else {

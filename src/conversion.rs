@@ -81,6 +81,10 @@ pub struct ConvertOptions {
     /// (`fit_ground_control_timing`). Needs the inferred packet lags; overrides
     /// `lookahead_ground_controls` on the intervals it covers.
     pub fit_ground_control_timing: bool,
+    /// Offline: fit one shift of the jump counter's switches for a jump from the ground against the
+    /// second-next fresh car packet and drive the interval to the next fresh packet with it
+    /// (`fit_jump_timing`). Needs the inferred packet lags and `infer_jump_from_active`.
+    pub fit_jump_timing: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -163,6 +167,7 @@ impl Default for ConvertOptions {
             infer_dodge_start: false,
             lookahead_ground_controls: true,
             fit_ground_control_timing: true,
+            fit_jump_timing: true,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
@@ -1613,8 +1618,9 @@ struct GroundSchedule {
     slot: usize,
     /// Last arena tick the schedule covers (the tick that reaches the next fresh packet).
     end_tick: u64,
-    /// (first arena tick, throttle, steer, handbrake, boost), in order.
-    entries: Vec<(u64, f32, f32, bool, bool)>,
+    /// (first arena tick, throttle, steer, handbrake, boost, jump), in order; a jump of `None`
+    /// leaves the jump control as it is.
+    entries: Vec<(u64, f32, f32, bool, bool, Option<bool>)>,
 }
 
 /// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
@@ -1831,14 +1837,257 @@ fn fit_ground_control_timing(
     }
     let shift = costs[best].0;
     // The schedule for the interval to the next packet, in arena ticks.
-    let mut schedule = vec![(now_tick, own_entry.1, own_entry.2, own_entry.3, own_entry.4)];
+    let mut schedule = vec![(
+        now_tick,
+        own_entry.1,
+        own_entry.2,
+        own_entry.3,
+        own_entry.4,
+        None,
+    )];
     for e in &entries {
         let tick = now_tick as i64 + (e.0 + shift - t_a);
         if tick > now_tick as i64 {
-            schedule.push((tick as u64, e.1, e.2, e.3, e.4));
+            schedule.push((tick as u64, e.1, e.2, e.3, e.4, None));
         } else {
             // A switch at or before the packet replaces the starting controls.
-            schedule[0] = (now_tick, e.1, e.2, e.3, e.4);
+            schedule[0] = (now_tick, e.1, e.2, e.3, e.4, None);
+        }
+    }
+    Some(GroundSchedule {
+        slot,
+        end_tick: now_tick + ticks_ab as u64,
+        entries: schedule,
+    })
+}
+
+/// Shifts, in ticks later than the midpoint rule, tried for the jump counter's switches.
+const JUMP_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=16;
+
+/// Fits when a jump physically started. The jump counter turns odd in the frame after the press was
+/// applied and each frame's state is 0-4 ticks older than its time, and the two windows do not
+/// line up: the fitted start is at 0-3 ticks after the midpoint-rule tick in two thirds of the
+/// events and up to 12 ticks later in the rest, per event (`diagnose_jump_latency`: a per-player
+/// median of other events' shifts does not remove the tail, while a per-event fit does). For a car
+/// flat on the ground with a fresh packet at `index` and an even jump counter that turns odd before
+/// the second next fresh packet, one shift of the jump counter's switches (press and release move
+/// together) is chosen by simulating the span to that packet in a scratch arena (position error plus
+/// 0.1 x velocity error), and the interval to the *next* fresh packet is driven with it, so that
+/// packet is not used by the fit and its residual stays a held-out check. Other controls use the
+/// midpoint rule. Uses later packets (offline reconstruction). Refused without exact chain lags for
+/// both later packets, spans over 30 ticks, a withheld or inactive frame, a change of double-jump,
+/// dodge or flip counter, or another car within 400 UU at the three packets. The ball is simulated
+/// too (its state at this packet's time in the main arena), so jumps at the ball are fitted with
+/// their contacts.
+#[allow(clippy::too_many_arguments)]
+fn fit_jump_timing(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    lag_a: u64,
+    slot: usize,
+    now_tick: u64,
+    ball: &rocketsim::BallState,
+    scratch: &mut Arena,
+) -> Option<GroundSchedule> {
+    let frames = &observations.frames;
+    let lags = packet_lags.as_ref()?;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    if !options.infer_jump_from_active
+        || !active(index)
+        || !state.is_on_ground
+        || state.phys.pos.z >= 25.0
+        || state.phys.rot_mat.z_axis.z <= 0.97
+    {
+        return None;
+    }
+    let same_car = |c: &&observations::Car| {
+        c.actor_id == car.actor_id
+            && c.actor_created_frame == car.actor_created_frame
+            && c.player_key == car.player_key
+    };
+    let others = |c: &observations::Car| {
+        [
+            c.inputs.double_jump_active_raw.as_ref().map(|v| v.value),
+            c.inputs.dodge_active_raw.as_ref().map(|v| v.value),
+            c.inputs.flip_car_active_raw.as_ref().map(|v| v.value),
+        ]
+    };
+    let a_others = others(car);
+    let jump_odd = |c: &observations::Car| {
+        c.inputs
+            .jump_active_raw
+            .as_ref()
+            .is_some_and(|v| v.value % 2 == 1)
+    };
+    if a_others.iter().flatten().any(|c| c % 2 == 1) || jump_odd(car) {
+        return None;
+    }
+    // Only other cars keep a span out (their contacts are not modelled in the scratch arena); the
+    // ball is in it, from the main arena's state at this packet's time.
+    let clear = |g: usize, pos: Vec3A| {
+        frames[g].cars.iter().all(|other| {
+            other.actor_id == car.actor_id
+                || other
+                    .body
+                    .position
+                    .as_ref()
+                    .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
+        })
+    };
+    if !clear(index, state.phys.pos) {
+        return None;
+    }
+    let t_a = timeline(index) - lag_a as i64;
+    let mut found: Vec<(usize, i64, Vec3A, Vec3A)> = Vec::new();
+    for g in index + 1..=(index + 12).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        if others(other) != a_others {
+            return None;
+        }
+        let b = &other.body;
+        let (Some(p), Some(v)) = (
+            b.position.as_ref().filter(|x| x.frame == g),
+            b.linear_velocity.as_ref().filter(|x| x.frame == g),
+        ) else {
+            continue;
+        };
+        let Some(lag) = lags
+            .car_actor
+            .get(&(car.actor_id, car.actor_created_frame, g))
+            .copied()
+        else {
+            continue;
+        };
+        if !clear(g, vec3(p.value)) {
+            return None;
+        }
+        found.push((
+            g,
+            timeline(g) - lag.round().max(0.0) as i64,
+            vec3(p.value),
+            vec3(v.value),
+        ));
+        if found.len() == 2 {
+            break;
+        }
+    }
+    let [(_, t_b, _, _), (last_frame, t_c, target_pos, target_vel)] = found[..] else {
+        return None;
+    };
+    let (ticks_ab, ticks_ac) = (t_b - t_a, t_c - t_a);
+    if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 30 {
+        return None;
+    }
+    // (nominal tick, midpoint-rule start tick, throttle, steer, handbrake, boost, jump) per frame.
+    let mut entries: Vec<(i64, i64, f32, f32, bool, bool, bool)> = Vec::new();
+    for g in index.saturating_sub(3)..=(last_frame + 1).min(frames.len() - 1) {
+        if !active(g) {
+            continue;
+        }
+        let Some(other) = frames[g].cars.iter().find(same_car) else {
+            continue;
+        };
+        let spacing = if g == 0 {
+            4
+        } else {
+            timeline(g) - timeline(g - 1)
+        };
+        let mut controls = controls_from_observation(other, options);
+        controls.jump = jump_odd(other);
+        entries.push((
+            timeline(g),
+            timeline(g) - 2 - spacing / 2,
+            controls.throttle,
+            controls.steer,
+            controls.handbrake,
+            controls.boost,
+            controls.jump,
+        ));
+    }
+    // The counter must turn odd after a and no later than the second next packet.
+    if !entries
+        .iter()
+        .any(|e| e.6 && e.0 > t_a - 4 && e.0 <= t_c + 4)
+    {
+        return None;
+    }
+    let own = controls_from_observation(car, options);
+    let own_entry = (own.throttle, own.steer, own.handbrake, own.boost);
+    // Controls at arena-independent tick `tau` for a jump shift `shift`.
+    let controls_at = |shift: i64, tau: i64| -> (f32, f32, bool, bool, bool) {
+        let i = entries.partition_point(|e| e.1 <= tau);
+        let base = if i == 0 {
+            own_entry
+        } else {
+            let e = entries[i - 1];
+            (e.2, e.3, e.4, e.5)
+        };
+        let j = entries.partition_point(|e| e.1 + shift <= tau);
+        let jump = j > 0 && entries[j - 1].6;
+        (base.0, base.1, base.2, base.3, jump)
+    };
+    let mut costs: Vec<(i64, f32)> = Vec::new();
+    for shift in JUMP_TIMING_SHIFTS {
+        scratch.set_ball_state(*ball);
+        scratch.set_car_state(0, *state);
+        for tau in t_a + 1..=t_c {
+            let c = controls_at(shift, tau);
+            scratch.set_car_controls(
+                0,
+                CarControls {
+                    throttle: c.0,
+                    steer: c.1,
+                    handbrake: c.2,
+                    boost: c.3,
+                    jump: c.4,
+                    ..CarControls::default()
+                },
+            );
+            scratch.step_tick();
+        }
+        let end = scratch.get_car_state(0);
+        let cost =
+            (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
+        costs.push((shift, cost));
+    }
+    // The midpoint rule (shift 0) unless another shift is strictly better.
+    let mut best = costs.iter().position(|(shift, _)| *shift == 0)?;
+    for (i, (_, cost)) in costs.iter().enumerate() {
+        if *cost < costs[best].1 - 1e-4 {
+            best = i;
+        }
+    }
+    let shift = costs[best].0;
+    // Per-tick schedule for the interval to the next packet, in arena ticks.
+    let mut schedule: Vec<(u64, f32, f32, bool, bool, Option<bool>)> = Vec::new();
+    let mut previous = None;
+    for step in 1..=ticks_ab {
+        let c = controls_at(shift, t_a + step);
+        if previous != Some(c) {
+            schedule.push((now_tick + step as u64, c.0, c.1, c.2, c.3, Some(c.4)));
+            previous = Some(c);
         }
     }
     Some(GroundSchedule {
@@ -1867,6 +2116,9 @@ fn step_ticks(
                 controls.steer = entry.2;
                 controls.handbrake = entry.3;
                 controls.boost = entry.4;
+                if let Some(jump) = entry.5 {
+                    controls.jump = jump;
+                }
                 arena.set_car_controls(schedule.slot, controls);
             }
         }
@@ -2929,7 +3181,7 @@ pub fn convert_observations_with(
                     }
                 }
                 arena.set_car_controls(slot, controls);
-                if options.fit_ground_control_timing
+                if (options.fit_ground_control_timing || options.fit_jump_timing)
                     && simulated
                     && !new_lifetime
                     && car
@@ -2951,19 +3203,42 @@ pub fn convert_observations_with(
                         scratch
                     });
                     let current = *arena.get_car_state(slot);
-                    if let Some(schedule) = fit_ground_control_timing(
-                        observations,
-                        options,
-                        &packet_lags,
-                        first_time,
-                        frame_idx,
-                        car,
-                        &current,
-                        car_lag(car),
-                        slot,
-                        arena.tick_count(),
-                        scratch,
-                    ) {
+                    let mut schedule = options
+                        .fit_ground_control_timing
+                        .then(|| {
+                            fit_ground_control_timing(
+                                observations,
+                                options,
+                                &packet_lags,
+                                first_time,
+                                frame_idx,
+                                car,
+                                &current,
+                                car_lag(car),
+                                slot,
+                                arena.tick_count(),
+                                scratch,
+                            )
+                        })
+                        .flatten();
+                    if schedule.is_none() && options.fit_jump_timing {
+                        let ball_now = *arena.get_ball_state();
+                        schedule = fit_jump_timing(
+                            observations,
+                            options,
+                            &packet_lags,
+                            first_time,
+                            frame_idx,
+                            car,
+                            &current,
+                            car_lag(car),
+                            slot,
+                            arena.tick_count(),
+                            &ball_now,
+                            scratch,
+                        );
+                    }
+                    if let Some(schedule) = schedule {
                         ground_schedules.push(schedule);
                     }
                 }
@@ -3660,6 +3935,188 @@ mod tests {
             coasting.step_tick();
         }
         assert!((coasting.get_car_state(0).phys.vel - packets[8].phys.vel).length() > 10.0);
+    }
+
+    #[test]
+    fn jump_timing_fit_recovers_a_press_before_the_counter_shows_it() {
+        // Truth: a grounded car whose jump is held from tick 6 to 18. The counter turns odd at
+        // frame 2 (tick 8) and even at frame 5 (tick 20); fresh packets at frames 0, 2, 4.
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(1);
+        let mut parked = rocketsim::BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        let mut truth = Arena::new_with_config(config.clone());
+        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        truth.set_ball_state(parked);
+        let mut start = CarState::default();
+        start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
+        start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
+        start.is_on_ground = true;
+        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+        truth.set_car_state(0, start);
+        let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
+        for tick in 1..=16u64 {
+            truth.set_car_controls(
+                0,
+                CarControls {
+                    jump: (6..18).contains(&tick),
+                    ..CarControls::default()
+                },
+            );
+            truth.step_tick();
+            packets.push(*truth.get_car_state(0));
+        }
+        let fresh_frames = [0usize, 2, 4];
+        let make_car = |frame: usize| {
+            let source = *fresh_frames.iter().rev().find(|f| **f <= frame).unwrap();
+            let state = &packets[source * 4];
+            let stamp = |v: [f32; 3]| {
+                Some(Value {
+                    value: v,
+                    frame: source,
+                    source: Source::Replay,
+                })
+            };
+            let counter = if frame < 2 {
+                0u8
+            } else if frame < 5 {
+                1
+            } else {
+                2
+            };
+            observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("p1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body {
+                    position: stamp(state.phys.pos.to_array()),
+                    linear_velocity: stamp(state.phys.vel.to_array()),
+                    ..Body::default()
+                },
+                boost: None,
+                boost_raw: None,
+                inputs: observations::Inputs {
+                    throttle: Some(Value {
+                        value: 0.0,
+                        frame,
+                        source: Source::Replay,
+                    }),
+                    steer: Some(Value {
+                        value: 0.0,
+                        frame,
+                        source: Source::Replay,
+                    }),
+                    jump_active_raw: Some(Value {
+                        value: counter,
+                        frame,
+                        source: Source::Replay,
+                    }),
+                    ..observations::Inputs::default()
+                },
+            }
+        };
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..7)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * 4.0 / 120.0,
+                    delta: 4.0 / 120.0,
+                    ball: None,
+                    cars: vec![make_car(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        };
+        let mut lags = PacketLags {
+            ball: vec![None; 7],
+            cars: vec![None; 7],
+            car_actor: HashMap::new(),
+        };
+        for frame in fresh_frames {
+            lags.car_actor.insert((1, 0, frame), 0.0);
+        }
+        let mut options = ConvertOptions::default();
+        options.infer_jump_from_active = true;
+        let mut scratch = Arena::new_with_config(config.clone());
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let schedule = fit_jump_timing(
+            &replay,
+            &options,
+            &Some(lags),
+            0.0,
+            0,
+            &replay.frames[0].cars[0],
+            &start,
+            0,
+            0,
+            0,
+            &parked,
+            &mut scratch,
+        )
+        .expect("a grounded car whose jump counter turns odd before the second next exact packet");
+        // The midpoint rule puts the press at tick 4; the truth is tick 6, a shift of +2.
+        assert_eq!(schedule.end_tick, 8);
+        assert!(
+            schedule
+                .entries
+                .iter()
+                .any(|e| e.0 == 6 && e.5 == Some(true)),
+            "{:?}",
+            schedule.entries
+        );
+        let run = |schedule: Option<GroundSchedule>, from: u64| {
+            let mut arena = Arena::new_with_config(config.clone());
+            arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
+            arena.set_ball_state(parked);
+            arena.set_car_state(0, start);
+            let mut pending: Vec<PendingDodge> = Vec::new();
+            let mut ground: Vec<GroundSchedule> = schedule.into_iter().collect();
+            let mut events: Vec<SimEvent> = Vec::new();
+            for tick in 1..=8u64 {
+                if ground.is_empty() {
+                    arena.set_car_controls(
+                        0,
+                        CarControls {
+                            jump: tick >= from,
+                            ..CarControls::default()
+                        },
+                    );
+                }
+                step_ticks(&mut arena, 1, false, &mut pending, &mut ground, &mut events);
+            }
+            *arena.get_car_state(0)
+        };
+        let fitted = run(Some(schedule), 0);
+        assert!(
+            (fitted.phys.pos - packets[8].phys.pos).length() < 0.05
+                && (fitted.phys.vel - packets[8].phys.vel).length() < 0.5,
+            "{:?} vs {:?}",
+            fitted.phys.vel,
+            packets[8].phys.vel
+        );
+        // Pressing at the midpoint-rule tick (4) instead leaves the car off by the extra ticks.
+        let early = run(None, 4);
+        assert!((early.phys.vel - packets[8].phys.vel).length() > 5.0);
     }
 
     #[test]
