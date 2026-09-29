@@ -311,6 +311,9 @@ struct FrameLine<'a> {
     observations: &'a observations::Frame,
     simulated_events: Vec<TimedSimEventRecord>,
     position_residuals: &'a [PositionResidual],
+    /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    packet_lag_ticks: &'a [crate::conversion::AppliedPacketLag],
 }
 
 pub(crate) fn header_json(
@@ -357,6 +360,7 @@ fn frame_line<'a>(
         observations: observed,
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
         position_residuals: residuals,
+        packet_lag_ticks: &converted.packet_lags,
     }
 }
 

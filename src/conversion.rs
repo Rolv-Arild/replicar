@@ -63,6 +63,9 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// Offline: infer when inside its frame each ball and car packet was generated (its lag behind
+    /// the frame time, in ticks) from chained packet motion, and apply corrections at that time.
+    pub infer_packet_lag: bool,
     /// While airborne with the replicated handbrake held, route steer to roll instead of yaw.
     pub infer_air_roll_from_handbrake: bool,
     /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
@@ -123,6 +126,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
             air_lookahead_max_frames: 10_000,
@@ -152,6 +156,17 @@ pub struct SimEvent {
     pub event: ArenaEvent,
 }
 
+/// The packet lag applied to one object in a frame (`infer_packet_lag`): its packet was treated as
+/// generated `ticks` 120 Hz ticks before the frame time. `source` is `chain` (the object's own
+/// motion chain), `frame_median` (median of the frame's chained cars) or `default` (half the frame
+/// window, the median of an unknown lag). Inferred from neighboring packets; not observed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AppliedPacketLag {
+    pub actor_id: Option<i32>,
+    pub ticks: u64,
+    pub source: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConvertedFrame {
     pub replay_frame: usize,
@@ -160,6 +175,8 @@ pub struct ConvertedFrame {
     pub timeline_tick: u64,
     pub state: ArenaState,
     pub simulated_events: Vec<SimEvent>,
+    /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
+    pub packet_lags: Vec<AppliedPacketLag>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -169,6 +186,10 @@ pub struct Diagnostics {
     pub default_hitbox_players: usize,
     pub active_pawn_demo_corrections: usize,
     pub shadowed_car_frames: usize,
+    /// Simulated frames with an inferred ball packet lag (`infer_packet_lag`).
+    pub ball_lag_frames: usize,
+    /// Simulated frames with an inferred car packet lag (`infer_packet_lag`).
+    pub car_lag_frames: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +239,10 @@ pub struct PositionResidual {
     pub actor_id: Option<i32>,
     pub seconds_since_previous_position: f32,
     pub simulated_error_uu: f32,
+    /// Predicted minus observed position before correction.
+    pub simulated_error_vector_uu: [f32; 3],
+    /// Last observed linear velocity before this packet, when a recent one exists.
+    pub previous_linear_velocity_uu_per_second: Option<[f32; 3]>,
     pub hold_error_uu: f32,
     pub linear_extrapolation_error_uu: Option<f32>,
     pub simulated_velocity_error_uu_per_sec: Option<f32>,
@@ -982,6 +1007,11 @@ fn position_residual(
         actor_id,
         seconds_since_previous_position: dt,
         simulated_error_uu: (predicted.pos - actual_pos).length(),
+        simulated_error_vector_uu: (predicted.pos - actual_pos).to_array(),
+        previous_linear_velocity_uu_per_second: previous
+            .and_then(|body| body.linear_velocity.as_ref())
+            .filter(|velocity| recent(velocity.frame))
+            .map(|velocity| velocity.value),
         hold_error_uu: (previous_pos_val - actual_pos).length(),
         linear_extrapolation_error_uu,
         simulated_velocity_error_uu_per_sec,
@@ -1118,6 +1148,246 @@ fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
     })
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PacketLags {
+    /// Ball packet lag in ticks behind each frame time, when inferred.
+    pub ball: Vec<Option<f32>>,
+    /// Median lag of the cars with a fresh packet in each frame, when inferred.
+    pub cars: Vec<Option<f32>>,
+    /// Lag of one car's own packet, keyed by (actor id, creation frame, frame).
+    pub car_actor: HashMap<(i32, usize, usize), f32>,
+}
+
+/// One fresh packet of a chained object: frame index, position, and velocity.
+struct ChainPacket {
+    frame: usize,
+    pos: [f32; 3],
+    vel: [f32; 3],
+}
+
+/// Ticks of physical time between two packets, from the displacement along their mean velocity.
+fn implied_interval_ticks(a: &ChainPacket, b: &ChainPacket) -> Option<f32> {
+    let mean = [
+        0.5 * (a.vel[0] + b.vel[0]),
+        0.5 * (a.vel[1] + b.vel[1]),
+        0.5 * (a.vel[2] + b.vel[2]),
+    ];
+    let speed_sq = mean[0] * mean[0] + mean[1] * mean[1] + mean[2] * mean[2];
+    if speed_sq < 1.0 {
+        return None;
+    }
+    let dot = (0..3).map(|i| (b.pos[i] - a.pos[i]) * mean[i]).sum::<f32>();
+    let ticks = dot / speed_sq * 120.0;
+    ticks.is_finite().then_some(ticks)
+}
+
+/// Assigns lags to one run of chained packets. Each packet was generated inside its frame window
+/// `(previous frame time, frame time]`, so its lag lies in `[0, window)`. The chain fixes lag
+/// differences; the unknown constant is centered inside the feasible interval.
+fn finish_lag_run(run: &[(usize, f32, f32)], lo: f32, hi: f32, mut assign: impl FnMut(usize, f32)) {
+    if run.len() < 2 || lo > hi {
+        return;
+    }
+    let offset = 0.5 * (lo + hi);
+    for &(frame, u, window) in run {
+        assign(frame, (offset + u).clamp(0.0, (window - 1e-3).max(0.0)));
+    }
+}
+
+/// Walks one chain of fresh packets. `valid(prev, next)` decides whether a pair's implied interval
+/// is trustworthy; an invalid pair or an infeasible window ends the run.
+fn chain_packet_lags(
+    observations: &ObservedReplay,
+    packets: &[ChainPacket],
+    valid: impl Fn(&ChainPacket, &ChainPacket) -> bool,
+    mut assign: impl FnMut(usize, f32),
+) {
+    let frame_window = |frame: usize| -> f32 {
+        let previous = frame.saturating_sub(1);
+        ((observations.frames[frame].time - observations.frames[previous].time) * 120.0).max(0.0)
+    };
+    let mut run: Vec<(usize, f32, f32)> = Vec::new();
+    let (mut lo, mut hi) = (f32::NEG_INFINITY, f32::INFINITY);
+    for pair in packets.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let interval = if valid(a, b) {
+            implied_interval_ticks(a, b)
+        } else {
+            None
+        };
+        let Some(interval) = interval else {
+            finish_lag_run(&run, lo, hi, &mut assign);
+            run.clear();
+            (lo, hi) = (f32::NEG_INFINITY, f32::INFINITY);
+            continue;
+        };
+        if run.is_empty() {
+            run.push((a.frame, 0.0, frame_window(a.frame)));
+            (lo, hi) = (-0.0, frame_window(a.frame));
+        }
+        let nominal =
+            (observations.frames[b.frame].time - observations.frames[a.frame].time) * 120.0;
+        let u_previous = run.last().map_or(0.0, |entry| entry.1);
+        let u = u_previous + nominal - interval;
+        let window = frame_window(b.frame);
+        let (new_lo, new_hi) = (lo.max(-u), hi.min(window - u));
+        if new_lo <= new_hi {
+            run.push((b.frame, u, window));
+            (lo, hi) = (new_lo, new_hi);
+        } else {
+            finish_lag_run(&run, lo, hi, &mut assign);
+            let window_a = frame_window(a.frame);
+            run = vec![(a.frame, 0.0, window_a)];
+            let u = nominal - interval;
+            let (start_lo, start_hi) = ((-0.0f32).max(-u), window_a.min(window - u));
+            if start_lo <= start_hi {
+                run.push((b.frame, u, window));
+                (lo, hi) = (start_lo, start_hi);
+            } else {
+                run.clear();
+                (lo, hi) = (f32::NEG_INFINITY, f32::INFINITY);
+            }
+        }
+    }
+    finish_lag_run(&run, lo, hi, &mut assign);
+}
+
+/// Offline inference of packet lags from chained ball and car motion. Uses packets after a frame,
+/// so it is reconstruction, not prediction. Chains never bridge a withheld frame.
+pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions) -> PacketLags {
+    let frames = &observations.frames;
+    let mut lags = PacketLags {
+        ball: vec![None; frames.len()],
+        cars: vec![None; frames.len()],
+        car_actor: HashMap::new(),
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    let bridge_ok = |a: usize, b: usize| {
+        b > a && (a..=b).all(&active) && (a + 1..b).all(|f| !withheld(f)) && !withheld(b)
+    };
+    let fresh = |body: &Body, frame: usize| -> Option<ChainPacket> {
+        let position = body.position.as_ref().filter(|v| v.frame == frame)?;
+        let velocity = body.linear_velocity.as_ref().filter(|v| v.frame == frame)?;
+        Some(ChainPacket {
+            frame,
+            pos: position.value,
+            vel: velocity.value,
+        })
+    };
+    let norm = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+
+    // Ball: smooth motion between consecutive frames.
+    let ball_packets: Vec<ChainPacket> = frames
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .ball
+                .as_ref()
+                .and_then(|body| fresh(body, frame.index))
+        })
+        .collect();
+    chain_packet_lags(
+        observations,
+        &ball_packets,
+        |a, b| {
+            // The implied interval is a displacement along the mean velocity: exact for constant
+            // acceleration and biased only at second order in the turn angle, so smooth motion
+            // (including rolling and low bounces) is usable; sharp direction or speed changes
+            // (hits, bounces) are not.
+            let (na, nb) = (norm(a.vel), norm(b.vel));
+            let cosine = if na > 1.0 && nb > 1.0 {
+                (0..3).map(|i| a.vel[i] * b.vel[i]).sum::<f32>() / (na * nb)
+            } else {
+                0.0
+            };
+            bridge_ok(a.frame, b.frame)
+                && b.frame - a.frame <= 2
+                && na.min(nb) > 300.0
+                && cosine >= 0.97
+                && (na - nb).abs() <= 0.25 * na.max(nb)
+        },
+        |frame, lag| lags.ball[frame] = Some(lag),
+    );
+
+    // Cars: fast, smooth motion between packets of one actor lifetime (dodges excluded).
+    let mut chains: HashMap<(i32, usize), Vec<ChainPacket>> = HashMap::new();
+    let mut dodge_frames: HashSet<(i32, usize, usize)> = HashSet::new();
+    for frame in frames {
+        for car in &frame.cars {
+            if car
+                .inputs
+                .dodge_active_raw
+                .as_ref()
+                .is_some_and(|d| d.frame == frame.index && d.value % 2 == 1)
+            {
+                dodge_frames.insert((car.actor_id, car.actor_created_frame, frame.index));
+            }
+            if let Some(packet) = fresh(&car.body, frame.index) {
+                chains
+                    .entry((car.actor_id, car.actor_created_frame))
+                    .or_default()
+                    .push(packet);
+            }
+        }
+    }
+    let mut per_frame: Vec<Vec<f32>> = vec![Vec::new(); frames.len()];
+    for ((actor, created), packets) in &chains {
+        chain_packet_lags(
+            observations,
+            packets,
+            |a, b| {
+                let (na, nb) = (norm(a.vel), norm(b.vel));
+                let cosine = if na > 1.0 && nb > 1.0 {
+                    (0..3).map(|i| a.vel[i] * b.vel[i]).sum::<f32>() / (na * nb)
+                } else {
+                    0.0
+                };
+                bridge_ok(a.frame, b.frame)
+                    && b.frame - a.frame <= 8
+                    && na.min(nb) > 350.0
+                    && cosine >= 0.95
+                    && (na - nb).abs() <= 0.4 * na.max(nb)
+                    && (a.frame..=b.frame).all(|f| !dodge_frames.contains(&(*actor, *created, f)))
+            },
+            |frame, lag| {
+                per_frame[frame].push(lag);
+                lags.car_actor.insert((*actor, *created, frame), lag);
+            },
+        );
+    }
+    for (frame, values) in per_frame.iter_mut().enumerate() {
+        if !values.is_empty() {
+            values.sort_by(|a, b| a.total_cmp(b));
+            lags.cars[frame] = Some(values[values.len() / 2]);
+        }
+    }
+    lags
+}
+
+fn step_ticks(arena: &mut Arena, ticks: u64, events: &mut Vec<SimEvent>) {
+    for _ in 0..ticks {
+        let arena_tick = arena.tick_count() + 1;
+        let tick_events = arena.step_tick();
+        events.extend(
+            tick_events
+                .iter()
+                .copied()
+                .map(|event| SimEvent { arena_tick, event }),
+        );
+    }
+}
+
 /// Parse and convert a soccar replay. The returned frame and observation vectors align by index.
 pub fn convert_bytes(
     bytes: &[u8],
@@ -1182,6 +1452,9 @@ pub fn convert_observations_with(
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut diagnostics = Diagnostics::default();
     let first_time = observations.frames.first().map_or(0.0, |frame| frame.time);
+    let packet_lags = options
+        .infer_packet_lag
+        .then(|| infer_packet_lags(observations, options));
     let mut previous_tick = 0;
     let mut previous_active = false;
     let mut ball_initialized = false;
@@ -1204,47 +1477,23 @@ pub fn convert_observations_with(
             .is_some_and(|state| state.value == "Active");
         let mut events = Vec::new();
         let simulated = active && previous_active && gap > 0 && gap <= options.max_gap_ticks;
-        if simulated {
-            for _ in 0..gap {
-                let arena_tick = arena.tick_count() + 1;
-                let tick_events = arena.step_tick();
-                events.extend(
-                    tick_events
-                        .iter()
-                        .copied()
-                        .map(|event| SimEvent { arena_tick, event }),
-                );
-            }
-        } else {
-            diagnostics.skipped_timeline_ticks += gap;
-        }
         previous_tick = timeline_tick;
         previous_active = active;
 
-        if let Some(body) = &frame.ball {
-            if simulated && ball_initialized {
-                if let Some(residual) = position_residual(
-                    frame.index,
-                    None,
-                    body,
-                    observations
-                        .frames
-                        .get(frame.index.wrapping_sub(1))
-                        .and_then(|f| f.ball.as_ref()),
-                    &arena.get_ball_state().phys,
-                    None,
-                    &observations.frames,
-                ) {
-                    frame_residuals.push(residual);
-                }
-            }
-            let mut ball = *arena.get_ball_state();
-            if apply_body(&mut ball.phys, body, frame.index, !ball_initialized) {
-                arena.set_ball_state(ball);
-            }
-            ball_initialized = true;
+        if !simulated {
+            diagnostics.skipped_timeline_ticks += gap;
         }
-
+        // Without inference a packet is equally likely to have been generated anywhere in its
+        // frame window (inferred lags are close to uniform), so half the window is the median.
+        let default_lag = gap / 2;
+        let lag_ticks = |lag: Option<f32>| -> u64 {
+            lag.map_or(default_lag, |lag| lag.round().max(0.0) as u64)
+                .min(gap)
+        };
+        if let (Some(lags), true) = (&packet_lags, simulated) {
+            diagnostics.ball_lag_frames += usize::from(lags.ball[frame_idx].is_some());
+            diagnostics.car_lag_frames += usize::from(lags.cars[frame_idx].is_some());
+        }
         let primary = observations::primary_linked_cars(frame);
         diagnostics.shadowed_car_frames += frame
             .cars
@@ -1252,289 +1501,404 @@ pub fn convert_observations_with(
             .filter(|car| car.player_key.is_some())
             .count()
             - primary.len();
-        let mut selected_slots = HashSet::new();
-        for car in primary
+        let frame_cars: Vec<&observations::Car> = primary
             .into_iter()
             .chain(frame.cars.iter().filter(|car| car.player_key.is_none()))
-        {
-            let slot = if let Some(key) = &car.player_key {
-                if let Some(slot) = slots.get(key).copied() {
-                    actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
-                    Some((slot, car.actor_created_frame == frame.index))
-                } else if let Some(team_idx) = car.team {
-                    let body_product_id = car.body_product_id.as_ref().map(|v| v.value);
-                    let known_hitbox = body_product_id
-                        .filter(|_| options.use_loadout_hitboxes)
-                        .and_then(hitbox_for_body_product);
-                    let (hitbox, config) =
-                        known_hitbox.unwrap_or(("octane", CarBodyConfig::OCTANE));
-                    let slot = arena.add_car(team(team_idx), config);
-                    slots.insert(key.clone(), slot);
-                    car_slots.push(CarSlot {
-                        slot,
-                        player_key: key.clone(),
-                        team: team_idx,
-                        body_product_id,
-                        hitbox: hitbox.to_owned(),
-                    });
-                    actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
-                    diagnostics.default_hitbox_players += usize::from(known_hitbox.is_none());
-                    Some((slot, true))
-                } else {
-                    None
-                }
-            } else {
-                actor_slots
-                    .get(&car.actor_id)
-                    .copied()
-                    .filter(|(_, created_frame)| *created_frame == car.actor_created_frame)
-                    .map(|(slot, _)| (slot, false))
-            };
-            let Some((slot, new_lifetime)) = slot else {
-                diagnostics.unlinked_car_frames += 1;
-                continue;
-            };
-            if car.player_key.is_none() && selected_slots.contains(&slot) {
-                diagnostics.shadowed_car_frames += 1;
-                continue;
+            .collect();
+        let mut selected_slots = HashSet::new();
+        let ball_lag = match (&packet_lags, simulated) {
+            (Some(lags), true) => lag_ticks(lags.ball[frame_idx]),
+            _ => 0,
+        };
+        // Each car's packet time is its own inferred lag, else the frame's median car lag.
+        let car_lag = |car: &observations::Car| -> u64 {
+            match (&packet_lags, simulated) {
+                (Some(lags), true) => lag_ticks(
+                    lags.car_actor
+                        .get(&(car.actor_id, car.actor_created_frame, frame_idx))
+                        .copied()
+                        .or(lags.cars[frame_idx]),
+                ),
+                _ => 0,
             }
-            selected_slots.insert(slot);
-            if simulated && !new_lifetime {
-                let previous = observations
-                    .frames
-                    .get(frame.index.wrapping_sub(1))
-                    .and_then(|f| {
-                        f.cars
-                            .iter()
-                            .find(|previous| previous.actor_id == car.actor_id)
-                    })
-                    .map(|car| &car.body);
-                let mut car_state = *arena.get_car_state(slot);
-                if options.hold_low_air_angular {
-                    if let Some(held) = low_air_angular_hold(
-                        observations,
+        };
+        let mut applied_lags = Vec::new();
+        if let (Some(lags), true) = (&packet_lags, simulated) {
+            if frame
+                .ball
+                .as_ref()
+                .and_then(|body| body.position.as_ref())
+                .is_some_and(|p| p.frame == frame.index)
+            {
+                applied_lags.push(AppliedPacketLag {
+                    actor_id: None,
+                    ticks: ball_lag,
+                    source: if lags.ball[frame_idx].is_some() {
+                        "chain"
+                    } else {
+                        "default"
+                    },
+                });
+            }
+            for car in &frame_cars {
+                if !car
+                    .body
+                    .position
+                    .as_ref()
+                    .is_some_and(|p| p.frame == frame.index)
+                {
+                    continue;
+                }
+                let own = lags.car_actor.contains_key(&(
+                    car.actor_id,
+                    car.actor_created_frame,
+                    frame_idx,
+                ));
+                applied_lags.push(AppliedPacketLag {
+                    actor_id: Some(car.actor_id),
+                    ticks: car_lag(car),
+                    source: if own {
+                        "chain"
+                    } else if lags.cars[frame_idx].is_some() {
+                        "frame_median"
+                    } else {
+                        "default"
+                    },
+                });
+            }
+        }
+        let mut phase_lags: Vec<u64> = std::iter::once(ball_lag)
+            .chain(frame_cars.iter().map(|car| car_lag(car)))
+            .collect();
+        phase_lags.sort_unstable_by(|a, b| b.cmp(a));
+        phase_lags.dedup();
+        let mut remaining = if simulated { gap } else { 0 };
+        for lag in phase_lags {
+            // Advance to this group's packet time (`lag` ticks before the frame time).
+            step_ticks(&mut arena, remaining - lag.min(remaining), &mut events);
+            remaining = lag.min(remaining);
+            if ball_lag == lag {
+                if let Some(body) = &frame.ball {
+                    if simulated && ball_initialized {
+                        if let Some(residual) = position_residual(
+                            frame.index,
+                            None,
+                            body,
+                            observations
+                                .frames
+                                .get(frame.index.wrapping_sub(1))
+                                .and_then(|f| f.ball.as_ref()),
+                            &arena.get_ball_state().phys,
+                            None,
+                            &observations.frames,
+                        ) {
+                            frame_residuals.push(residual);
+                        }
+                    }
+                    let mut ball = *arena.get_ball_state();
+                    if apply_body(&mut ball.phys, body, frame.index, !ball_initialized) {
+                        arena.set_ball_state(ball);
+                    }
+                    ball_initialized = true;
+                }
+            }
+            for car in frame_cars.iter().copied() {
+                if car_lag(car) != lag {
+                    continue;
+                }
+                let slot = if let Some(key) = &car.player_key {
+                    if let Some(slot) = slots.get(key).copied() {
+                        actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
+                        Some((slot, car.actor_created_frame == frame.index))
+                    } else if let Some(team_idx) = car.team {
+                        let body_product_id = car.body_product_id.as_ref().map(|v| v.value);
+                        let known_hitbox = body_product_id
+                            .filter(|_| options.use_loadout_hitboxes)
+                            .and_then(hitbox_for_body_product);
+                        let (hitbox, config) =
+                            known_hitbox.unwrap_or(("octane", CarBodyConfig::OCTANE));
+                        let slot = arena.add_car(team(team_idx), config);
+                        slots.insert(key.clone(), slot);
+                        car_slots.push(CarSlot {
+                            slot,
+                            player_key: key.clone(),
+                            team: team_idx,
+                            body_product_id,
+                            hitbox: hitbox.to_owned(),
+                        });
+                        actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
+                        diagnostics.default_hitbox_players += usize::from(known_hitbox.is_none());
+                        Some((slot, true))
+                    } else {
+                        None
+                    }
+                } else {
+                    actor_slots
+                        .get(&car.actor_id)
+                        .copied()
+                        .filter(|(_, created_frame)| *created_frame == car.actor_created_frame)
+                        .map(|(slot, _)| (slot, false))
+                };
+                let Some((slot, new_lifetime)) = slot else {
+                    diagnostics.unlinked_car_frames += 1;
+                    continue;
+                };
+                if car.player_key.is_none() && selected_slots.contains(&slot) {
+                    diagnostics.shadowed_car_frames += 1;
+                    continue;
+                }
+                selected_slots.insert(slot);
+                if simulated && !new_lifetime {
+                    let previous = observations
+                        .frames
+                        .get(frame.index.wrapping_sub(1))
+                        .and_then(|f| {
+                            f.cars
+                                .iter()
+                                .find(|previous| previous.actor_id == car.actor_id)
+                        })
+                        .map(|car| &car.body);
+                    let mut car_state = *arena.get_car_state(slot);
+                    if options.hold_low_air_angular {
+                        if let Some(held) = low_air_angular_hold(
+                            observations,
+                            frame.index,
+                            car,
+                            &car_state,
+                            slot,
+                            &events,
+                            if options.gate_low_air_angular_by_speed {
+                                5.48
+                            } else {
+                                0.0
+                            },
+                        ) {
+                            car_state.phys.ang_vel = held;
+                            arena.set_car_state(slot, car_state);
+                        }
+                    }
+                    if let Some(residual) = position_residual(
                         frame.index,
-                        car,
-                        &car_state,
-                        slot,
-                        &events,
-                        if options.gate_low_air_angular_by_speed {
-                            5.48
-                        } else {
-                            0.0
-                        },
+                        Some(car.actor_id),
+                        &car.body,
+                        previous,
+                        &car_state.phys,
+                        Some(car_state.is_on_ground),
+                        &observations.frames,
                     ) {
-                        car_state.phys.ang_vel = held;
-                        arena.set_car_state(slot, car_state);
+                        frame_residuals.push(residual);
                     }
                 }
-                if let Some(residual) = position_residual(
-                    frame.index,
-                    Some(car.actor_id),
-                    &car.body,
-                    previous,
-                    &car_state.phys,
-                    Some(car_state.is_on_ground),
-                    &observations.frames,
-                ) {
-                    frame_residuals.push(residual);
-                }
-            }
-            let mut state = if new_lifetime {
-                CarState::default()
-            } else {
-                *arena.get_car_state(slot)
-            };
-            let mut dirty =
-                apply_body(&mut state.phys, &car.body, frame.index, new_lifetime) || new_lifetime;
-            if car.player_link_active && state.is_demoed {
-                state.is_demoed = false;
-                state.demo_respawn_timer = 0.0;
-                diagnostics.active_pawn_demo_corrections += 1;
-                dirty = true;
-            }
-            if let Some(boost) = &car.boost {
-                if should_apply(boost, frame.index, new_lifetime) {
-                    state.boost = boost.value;
+                let mut state = if new_lifetime {
+                    CarState::default()
+                } else {
+                    *arena.get_car_state(slot)
+                };
+                let mut dirty = apply_body(&mut state.phys, &car.body, frame.index, new_lifetime)
+                    || new_lifetime;
+                if car.player_link_active && state.is_demoed {
+                    state.is_demoed = false;
+                    state.demo_respawn_timer = 0.0;
+                    diagnostics.active_pawn_demo_corrections += 1;
                     dirty = true;
                 }
-            }
+                if let Some(boost) = &car.boost {
+                    if should_apply(boost, frame.index, new_lifetime) {
+                        state.boost = boost.value;
+                        dirty = true;
+                    }
+                }
 
-            let mut dodge_jump_control = false;
-            let mut dodge_pitch_control = 0.0;
-            let mut dodge_yaw_control = 0.0;
+                let mut dodge_jump_control = false;
+                let mut dodge_pitch_control = 0.0;
+                let mut dodge_yaw_control = 0.0;
 
-            if options.infer_dodge_from_active {
-                let key = (car.actor_id, car.actor_created_frame);
-                let dodge_raw = car
-                    .inputs
-                    .dodge_active_raw
-                    .as_ref()
-                    .filter(|raw| raw.frame == frame.index)
-                    .map(|raw| raw.value);
-                if let Some(raw) = dodge_raw {
-                    let prev = last_dodge_raw.insert(key, raw);
-                    let activated = match prev {
-                        Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
-                        None => raw % 2 == 1,
-                    };
-                    if activated {
-                        if let Some(torque) = car
-                            .inputs
-                            .dodge_torque_replay_units
-                            .as_ref()
-                            .filter(|torque| torque.frame == frame.index)
-                        {
-                            let [tx, ty, _] = torque.value;
-                            let pitch = -ty / 2.24;
-                            let yaw = -tx / 2.60;
-                            if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
-                                if !options.gate_dodge_on_observed_impulse
-                                    || dodge_impulse_unobserved(car, frame.index, &state)
-                                {
-                                    dodge_jump_control = true;
-                                    dodge_pitch_control = pitch;
-                                    dodge_yaw_control = yaw;
-                                } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
-                                    state.has_flipped = true;
-                                    state.is_flipping = true;
-                                    state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
-                                    state.flip_time = 0.0;
-                                    dirty = true;
+                if options.infer_dodge_from_active {
+                    let key = (car.actor_id, car.actor_created_frame);
+                    let dodge_raw = car
+                        .inputs
+                        .dodge_active_raw
+                        .as_ref()
+                        .filter(|raw| raw.frame == frame.index)
+                        .map(|raw| raw.value);
+                    if let Some(raw) = dodge_raw {
+                        let prev = last_dodge_raw.insert(key, raw);
+                        let activated = match prev {
+                            Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
+                            None => raw % 2 == 1,
+                        };
+                        if activated {
+                            if let Some(torque) = car
+                                .inputs
+                                .dodge_torque_replay_units
+                                .as_ref()
+                                .filter(|torque| torque.frame == frame.index)
+                            {
+                                let [tx, ty, _] = torque.value;
+                                let pitch = -ty / 2.24;
+                                let yaw = -tx / 2.60;
+                                if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
+                                    if !options.gate_dodge_on_observed_impulse
+                                        || dodge_impulse_unobserved(car, frame.index, &state)
+                                    {
+                                        dodge_jump_control = true;
+                                        dodge_pitch_control = pitch;
+                                        dodge_yaw_control = yaw;
+                                    } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                                        state.has_flipped = true;
+                                        state.is_flipping = true;
+                                        state.flip_rel_torque =
+                                            Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
+                                        state.flip_time = 0.0;
+                                        dirty = true;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            if dirty {
-                arena.set_car_state(slot, state);
-            }
-            let mut controls = controls_from_observation(car, options);
-            if options.gate_jump_on_observed_impulse {
-                let key = (car.actor_id, car.actor_created_frame);
-                if let Some(raw) = car
-                    .inputs
-                    .jump_active_raw
-                    .as_ref()
-                    .filter(|raw| raw.frame == frame.index)
-                {
-                    gated_jump_active.insert(
-                        key,
-                        raw.value % 2 == 1 && jump_impulse_unobserved(car, frame.index),
-                    );
+                if dirty {
+                    arena.set_car_state(slot, state);
                 }
-                controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
-            }
-            let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
-            let min_lookahead_z = if options.infer_transition_air_lookahead {
-                50.0
-            } else {
-                100.0
-            };
-            let mut air_controls_applied = false;
-            if options.infer_air_controls_from_lookahead
-                && airborne
-                && !dodge_jump_control
-                && active
-            {
-                if let Some(solved) = span_lookahead_air_controls(
-                    observations,
-                    frame_idx,
-                    car,
-                    min_lookahead_z,
-                    options,
-                ) {
+                let mut controls = controls_from_observation(car, options);
+                if options.gate_jump_on_observed_impulse {
+                    let key = (car.actor_id, car.actor_created_frame);
+                    if let Some(raw) = car
+                        .inputs
+                        .jump_active_raw
+                        .as_ref()
+                        .filter(|raw| raw.frame == frame.index)
+                    {
+                        gated_jump_active.insert(
+                            key,
+                            raw.value % 2 == 1 && jump_impulse_unobserved(car, frame.index),
+                        );
+                    }
+                    controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
+                }
+                let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
+                let min_lookahead_z = if options.infer_transition_air_lookahead {
+                    50.0
+                } else {
+                    100.0
+                };
+                let mut air_controls_applied = false;
+                if options.infer_air_controls_from_lookahead
+                    && airborne
+                    && !dodge_jump_control
+                    && active
+                {
+                    if let Some(solved) = span_lookahead_air_controls(
+                        observations,
+                        frame_idx,
+                        car,
+                        min_lookahead_z,
+                        options,
+                    ) {
+                        controls.pitch = solved.pitch;
+                        controls.yaw = solved.yaw;
+                        controls.roll = solved.roll;
+                        air_controls_applied = true;
+                    }
+                }
+
+                if !air_controls_applied
+                    && options.persist_past_air_controls
+                    && airborne
+                    && !dodge_jump_control
+                    && active
+                {
+                    if let Some((solved, lag)) = past_persisted_air_controls(
+                        observations,
+                        frame_idx,
+                        car,
+                        min_lookahead_z,
+                        options,
+                    ) {
+                        if options.air_persist_calibrated {
+                            let keep = |axis: usize, value: f32| {
+                                value * air_control_median_ratio(axis, lag, value.abs())
+                            };
+                            controls.pitch = keep(0, solved.pitch);
+                            let steer_observed =
+                                options.infer_air_steer_controls && car.inputs.steer.is_some();
+                            if !steer_observed {
+                                controls.yaw = keep(1, solved.yaw);
+                                controls.roll = keep(2, solved.roll);
+                            } else if options.infer_air_roll_from_handbrake && controls.handbrake {
+                                controls.roll = controls.steer;
+                                controls.yaw = keep(1, solved.yaw);
+                            } else {
+                                controls.yaw = controls.steer;
+                                controls.roll = keep(2, solved.roll);
+                            }
+                        } else {
+                            controls.pitch = solved.pitch;
+                            controls.yaw = solved.yaw;
+                            controls.roll = solved.roll;
+                        }
+                        air_controls_applied = true;
+                    }
+                }
+
+                if !air_controls_applied
+                    && options.compensate_transition_air_damping
+                    && airborne
+                    && !dodge_jump_control
+                    && (50.0..=100.0).contains(&state.phys.pos.z)
+                {
+                    let angular = state.phys.ang_vel;
+                    let solved = solve_inverse_air_controls(
+                        state.phys.rot_mat,
+                        angular,
+                        angular,
+                        1.0 / 120.0,
+                    );
                     controls.pitch = solved.pitch;
                     controls.yaw = solved.yaw;
                     controls.roll = solved.roll;
                     air_controls_applied = true;
                 }
-            }
-
-            if !air_controls_applied
-                && options.persist_past_air_controls
-                && airborne
-                && !dodge_jump_control
-                && active
-            {
-                if let Some((solved, lag)) = past_persisted_air_controls(
-                    observations,
-                    frame_idx,
-                    car,
-                    min_lookahead_z,
-                    options,
-                ) {
-                    if options.air_persist_calibrated {
-                        let keep = |axis: usize, value: f32| {
-                            value * air_control_median_ratio(axis, lag, value.abs())
-                        };
-                        controls.pitch = keep(0, solved.pitch);
-                        let steer_observed =
-                            options.infer_air_steer_controls && car.inputs.steer.is_some();
-                        if !steer_observed {
-                            controls.yaw = keep(1, solved.yaw);
-                            controls.roll = keep(2, solved.roll);
-                        } else if options.infer_air_roll_from_handbrake && controls.handbrake {
-                            controls.roll = controls.steer;
-                            controls.yaw = keep(1, solved.yaw);
-                        } else {
-                            controls.yaw = controls.steer;
-                            controls.roll = keep(2, solved.roll);
-                        }
-                    } else {
-                        controls.pitch = solved.pitch;
-                        controls.yaw = solved.yaw;
-                        controls.roll = solved.roll;
-                    }
-                    air_controls_applied = true;
-                }
-            }
-
-            if !air_controls_applied
-                && options.compensate_transition_air_damping
-                && airborne
-                && !dodge_jump_control
-                && (50.0..=100.0).contains(&state.phys.pos.z)
-            {
-                let angular = state.phys.ang_vel;
-                let solved =
-                    solve_inverse_air_controls(state.phys.rot_mat, angular, angular, 1.0 / 120.0);
-                controls.pitch = solved.pitch;
-                controls.yaw = solved.yaw;
-                controls.roll = solved.roll;
-                air_controls_applied = true;
-            }
-            if !air_controls_applied && options.feedback_low_air_angular && active && !new_lifetime
-            {
-                if let Some(solved) =
-                    low_air_feedback_controls(observations, frame.index, car, &state, slot, &events)
+                if !air_controls_applied
+                    && options.feedback_low_air_angular
+                    && active
+                    && !new_lifetime
                 {
-                    controls.pitch = solved.pitch;
-                    controls.roll = solved.roll;
-                    controls.yaw = if options.infer_air_steer_controls {
-                        controls.steer
+                    if let Some(solved) = low_air_feedback_controls(
+                        observations,
+                        frame.index,
+                        car,
+                        &state,
+                        slot,
+                        &events,
+                    ) {
+                        controls.pitch = solved.pitch;
+                        controls.roll = solved.roll;
+                        controls.yaw = if options.infer_air_steer_controls {
+                            controls.steer
+                        } else {
+                            0.0
+                        };
+                        air_controls_applied = true;
+                    }
+                }
+                if !air_controls_applied && options.infer_air_steer_controls && airborne {
+                    if options.infer_air_roll_from_handbrake && controls.handbrake {
+                        controls.roll = controls.steer;
                     } else {
-                        0.0
-                    };
-                    air_controls_applied = true;
+                        controls.yaw = controls.steer;
+                    }
                 }
-            }
-            if !air_controls_applied && options.infer_air_steer_controls && airborne {
-                if options.infer_air_roll_from_handbrake && controls.handbrake {
-                    controls.roll = controls.steer;
-                } else {
-                    controls.yaw = controls.steer;
+                if dodge_jump_control {
+                    controls.jump = true;
+                    controls.pitch = dodge_pitch_control;
+                    controls.yaw = dodge_yaw_control;
                 }
+                arena.set_car_controls(slot, controls);
             }
-            if dodge_jump_control {
-                controls.jump = true;
-                controls.pitch = dodge_pitch_control;
-                controls.yaw = dodge_yaw_control;
-            }
-            arena.set_car_controls(slot, controls);
         }
+        step_ticks(&mut arena, remaining, &mut events);
         if options.sync_boost_pad_pickups {
             for pickup in &frame.pad_pickups {
                 let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {
@@ -1617,6 +1981,7 @@ pub fn convert_observations_with(
             timeline_tick,
             state: arena.get_arena_state(),
             simulated_events: events,
+            packet_lags: applied_lags,
         };
         on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }
@@ -2333,6 +2698,89 @@ mod tests {
         let long = controls(&late, &options);
         let pitch = long[13].pitch;
         assert_eq!(pitch, 0.0);
+    }
+
+    #[test]
+    fn packet_lag_inference_recovers_lags_and_never_bridges_withheld_frames() {
+        let ticks_per_frame = 4.0f32;
+        let true_lags = [
+            0.5f32, 3.4, 1.2, 2.9, 0.3, 3.7, 1.8, 2.2, 0.9, 3.1, 1.5, 2.6,
+        ];
+        let velocity = [1200.0f32, 300.0, 0.0];
+        let frames: Vec<observations::Frame> = true_lags
+            .iter()
+            .enumerate()
+            .map(|(index, lag)| {
+                let frame_tick = index as f32 * ticks_per_frame;
+                let physical_seconds = (frame_tick - lag) / 120.0;
+                let body = Body {
+                    position: Some(Value {
+                        value: [
+                            velocity[0] * physical_seconds,
+                            velocity[1] * physical_seconds,
+                            400.0,
+                        ],
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    linear_velocity: Some(Value {
+                        value: velocity,
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    ..Body::default()
+                };
+                observations::Frame {
+                    index,
+                    time: frame_tick / 120.0,
+                    delta: ticks_per_frame / 120.0,
+                    ball: Some(body),
+                    cars: Vec::new(),
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                }
+            })
+            .collect();
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let options = ConvertOptions::default();
+        let lags = infer_packet_lags(&replay, &options);
+        // The chain fixes lag differences; only a common constant is ambiguous, centered in the
+        // feasible window, so every lag is recovered to well within a tick.
+        for (index, truth) in true_lags.iter().enumerate().skip(1) {
+            let estimate = lags.ball[index].expect("lag inferred");
+            assert!(
+                (estimate - truth).abs() < 0.6,
+                "frame {index}: {estimate} vs {truth}"
+            );
+        }
+        // A withheld frame breaks the chain: frames on both sides are estimated independently
+        // and no pair bridges it.
+        let mut withheld = options.clone();
+        withheld.withheld_frames = Some(Arc::new(
+            (0..true_lags.len()).map(|index| index == 5).collect(),
+        ));
+        let mut masked = replay.clone();
+        masked.frames[5].ball = masked.frames[4].ball.clone();
+        let blocked = infer_packet_lags(&masked, &withheld);
+        assert!(blocked.ball[5].is_none());
+        assert!(blocked.ball[4].is_some() && blocked.ball[6].is_some());
     }
 
     #[test]

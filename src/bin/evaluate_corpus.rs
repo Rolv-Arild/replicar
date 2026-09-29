@@ -412,6 +412,8 @@ struct ReplayReport {
     skipped_timeline_ticks: u64,
     unlinked_car_frames: usize,
     shadowed_car_frames: usize,
+    ball_lag_frames: usize,
+    car_lag_frames: usize,
     active_pawn_demo_corrections: usize,
     default_hitbox_players: usize,
     car_slots: Vec<CarSlot>,
@@ -767,6 +769,12 @@ fn add_masked_error(
         actor_id: None,
         seconds_since_previous_position: dt,
         simulated_error_uu: distance(predicted, position.value),
+        simulated_error_vector_uu: [
+            predicted[0] - position.value[0],
+            predicted[1] - position.value[1],
+            predicted[2] - position.value[2],
+        ],
+        previous_linear_velocity_uu_per_second: None,
         hold_error_uu: distance(previous.value, position.value),
         linear_extrapolation_error_uu: linear,
         simulated_velocity_error_uu_per_sec: None,
@@ -1128,6 +1136,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("--air-persist-gain requires a scale")?
                 .to_string_lossy()
                 .parse()?;
+        } else if arg == "--infer-packet-lag" {
+            options.infer_packet_lag = true;
+        } else if arg == "--no-infer-packet-lag" {
+            options.infer_packet_lag = false;
         } else if arg == "--infer-air-roll-from-handbrake" {
             options.infer_air_roll_from_handbrake = true;
         } else if arg == "--no-infer-air-roll-from-handbrake" {
@@ -1159,7 +1171,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1296,6 +1308,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 let masked = masked_observations(&conversion.observations, schedule);
                 let mut masked_options = options.clone();
+                // A withheld target's own packet lag is unknowable, so masked prediction keeps
+                // every state at its frame time; packet-lag inference is an offline improvement
+                // measured by the one-step residuals instead.
+                masked_options.infer_packet_lag = false;
                 masked_options.withheld_frames = Some(std::sync::Arc::new(
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())
@@ -1386,6 +1402,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     skipped_timeline_ticks: conversion.diagnostics.skipped_timeline_ticks,
                     unlinked_car_frames: conversion.diagnostics.unlinked_car_frames,
                     shadowed_car_frames: conversion.diagnostics.shadowed_car_frames,
+                    ball_lag_frames: conversion.diagnostics.ball_lag_frames,
+                    car_lag_frames: conversion.diagnostics.car_lag_frames,
                     active_pawn_demo_corrections: conversion
                         .diagnostics
                         .active_pawn_demo_corrections,

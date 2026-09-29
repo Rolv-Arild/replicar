@@ -98,6 +98,9 @@ fn live_car_wins_over_retired_car_with_same_player() {
         &fs::read(path).unwrap(),
         &ConvertOptions {
             collision_meshes: meshes,
+            // This checks which actor wins, by requiring the state to equal its packet; packet lag
+            // inference deliberately advances a packet to the frame time.
+            infer_packet_lag: false,
             ..ConvertOptions::default()
         },
     )
