@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(
         env::args_os()
             .nth(1)
-            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag]")?,
+            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--no-infer-flip-cancel]")?,
     );
     if path.to_string_lossy().contains("test") {
         return Err("refusing to inspect a path containing 'test'".into());
@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
+    options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     let mut skipped = 0usize;
     let mut used = 0usize;

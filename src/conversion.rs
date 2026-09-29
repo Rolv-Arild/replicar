@@ -63,6 +63,10 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
+    /// (opposite pitch input, which replays do not carry) by simulating candidates against the
+    /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
+    pub infer_flip_cancel: bool,
     /// Clamp reported car and ball velocities to RocketSim's limits after each step. RocketSim
     /// applies its limits at the start of the next tick, so the state it reports after a step can
     /// exceed them (a flipping car by up to 2.2 rad/s), whereas replay states never do.
@@ -130,6 +134,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            infer_flip_cancel: true,
             limit_reported_velocities: true,
             infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
@@ -1424,6 +1429,114 @@ fn step_ticks(arena: &mut Arena, ticks: u64, events: &mut Vec<SimEvent>) {
     }
 }
 
+/// Fits the flip's pitch-cancel amount over the span from this fresh car packet to the next one.
+/// Candidate cancels (opposite pitch input of 0, 0.25, ..., 1) are simulated in a scratch arena
+/// from the current corrected state to the next packet's physical tick, and the one whose angular
+/// velocity is closest to that packet wins. Uses a later packet, so it is offline reconstruction;
+/// spans containing a withheld frame, an inactive frame, or a change of dodge counter are refused.
+#[allow(clippy::too_many_arguments)]
+fn fit_flip_cancel(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    base_controls: &CarControls,
+    lag_a: u64,
+    scratch: &mut Arena,
+) -> Option<f32> {
+    let frames = &observations.frames;
+    let ang0 = car.body.angular_velocity_replay_units.as_ref()?;
+    if ang0.frame != index {
+        return None;
+    }
+    let counter = car.inputs.dodge_active_raw.as_ref()?.value;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    if !active(index) {
+        return None;
+    }
+    for candidate in index + 1..=(index + 8).min(frames.len() - 1) {
+        if !active(candidate) || withheld(candidate) {
+            return None;
+        }
+        let Some(other) = frames[candidate].cars.iter().find(|c| {
+            c.actor_id == car.actor_id
+                && c.actor_created_frame == car.actor_created_frame
+                && c.player_key == car.player_key
+        }) else {
+            return None;
+        };
+        let Some(ang1) = other
+            .body
+            .angular_velocity_replay_units
+            .as_ref()
+            .filter(|a| a.frame == candidate)
+        else {
+            continue;
+        };
+        if other.inputs.dodge_active_raw.as_ref().map(|d| d.value) != Some(counter) {
+            return None;
+        }
+        let lag_b = match packet_lags {
+            Some(lags) => lags
+                .car_actor
+                .get(&(car.actor_id, car.actor_created_frame, candidate))
+                .copied()
+                .or(lags.cars[candidate])
+                .map_or(
+                    (timeline(candidate) - timeline(candidate - 1)).max(0) / 2,
+                    |lag| lag.round().max(0.0) as i64,
+                ),
+            None => 0,
+        };
+        let ticks = (timeline(candidate) - lag_b) - (timeline(index) - lag_a as i64);
+        if !(1..=40).contains(&ticks) {
+            return None;
+        }
+        let target = vec3(ang1.value) * 0.01;
+        let sign = state.flip_rel_torque.y.signum();
+        let mut best: Option<(f32, f32)> = None;
+        for step in 0..=4 {
+            let cancel = step as f32 * 0.25;
+            scratch.set_car_state(0, *state);
+            let mut controls = *base_controls;
+            controls.jump = false;
+            controls.pitch = cancel * sign;
+            scratch.set_car_controls(0, controls);
+            for _ in 0..ticks {
+                scratch.step_tick();
+            }
+            let mut end = *scratch.get_car_state(0);
+            let speed = end.phys.ang_vel.length();
+            if speed > 5.5 {
+                end.phys.ang_vel *= 5.5 / speed;
+            }
+            let error = (end.phys.ang_vel - target).length();
+            if best.is_none_or(|(_, e)| error < e - 1e-4) {
+                best = Some((cancel, error));
+            }
+        }
+        return best.map(|(cancel, _)| cancel);
+    }
+    None
+}
+
 /// Parse and convert a soccar replay. The returned frame and observation vectors align by index.
 pub fn convert_bytes(
     bytes: &[u8],
@@ -1494,6 +1607,15 @@ pub fn convert_observations_with(
     let mut previous_tick = 0;
     let mut previous_active = false;
     let mut ball_initialized = false;
+    let mut flip_scratch = options.infer_flip_cancel.then(|| {
+        let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
+        scratch_config.rng_seed = Some(options.seed);
+        let mut scratch = Arena::new_with_config(scratch_config);
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        scratch
+    });
+    let mut flip_cache: HashMap<(i32, usize, usize), Option<f32>> = HashMap::new();
+    let mut flip_last: HashMap<(i32, usize), f32> = HashMap::new();
 
     for (frame_idx, frame) in observations.frames.iter().enumerate() {
         let mut frame_residuals = Vec::new();
@@ -1921,6 +2043,58 @@ pub fn convert_observations_with(
                             0.0
                         };
                         air_controls_applied = true;
+                    }
+                }
+                if options.infer_flip_cancel {
+                    let key = (car.actor_id, car.actor_created_frame);
+                    if airborne
+                        && !dodge_jump_control
+                        && state.is_flipping
+                        && state.flip_rel_torque.y != 0.0
+                    {
+                        let sign = state.flip_rel_torque.y.signum();
+                        let mut cancel = flip_last.get(&key).copied().unwrap_or(0.0);
+                        let packet_frame = car
+                            .body
+                            .angular_velocity_replay_units
+                            .as_ref()
+                            .map(|value| value.frame);
+                        if let Some(packet_frame) = packet_frame {
+                            let cache_key = (car.actor_id, car.actor_created_frame, packet_frame);
+                            if !flip_cache.contains_key(&cache_key) && packet_frame == frame_idx {
+                                let mut base = controls;
+                                if options.infer_air_steer_controls {
+                                    if options.infer_air_roll_from_handbrake && controls.handbrake {
+                                        base.roll = controls.steer;
+                                    } else {
+                                        base.yaw = controls.steer;
+                                    }
+                                }
+                                let fitted = match flip_scratch.as_mut() {
+                                    Some(scratch) if active && !new_lifetime => fit_flip_cancel(
+                                        observations,
+                                        options,
+                                        &packet_lags,
+                                        first_time,
+                                        frame_idx,
+                                        car,
+                                        &state,
+                                        &base,
+                                        car_lag(car),
+                                        scratch,
+                                    ),
+                                    _ => None,
+                                };
+                                flip_cache.insert(cache_key, fitted);
+                            }
+                            if let Some(Some(fitted)) = flip_cache.get(&cache_key) {
+                                cancel = *fitted;
+                                flip_last.insert(key, cancel);
+                            }
+                        }
+                        controls.pitch = cancel * sign;
+                    } else if !state.is_flipping {
+                        flip_last.remove(&key);
                     }
                 }
                 if !air_controls_applied && options.infer_air_steer_controls && airborne {
@@ -2824,6 +2998,102 @@ mod tests {
         let blocked = infer_packet_lags(&masked, &withheld);
         assert!(blocked.ball[5].is_none());
         assert!(blocked.ball[4].is_some() && blocked.ball[6].is_some());
+    }
+
+    #[test]
+    fn flip_cancel_fit_recovers_a_simulated_cancel_and_respects_barriers() {
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(0);
+        let mut truth = Arena::new_with_config(config);
+        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let mut start = CarState::default();
+        start.phys.pos = Vec3A::new(0.0, 0.0, 900.0);
+        start.is_on_ground = false;
+        start.has_jumped = true;
+        start.air_time_since_jump = 0.05;
+        truth.set_car_state(0, start);
+        truth.set_car_controls(
+            0,
+            CarControls {
+                jump: true,
+                pitch: -0.7,
+                yaw: -0.7,
+                ..CarControls::default()
+            },
+        );
+        for _ in 0..3 {
+            truth.step_tick();
+            truth.set_car_controls(0, CarControls::default());
+        }
+        let flipping = *truth.get_car_state(0);
+        assert!(flipping.is_flipping && flipping.flip_rel_torque.y != 0.0);
+        // The player cancelled 75% of the pitch torque for the next ten ticks.
+        let ticks = 10u64;
+        truth.set_car_state(0, flipping);
+        truth.set_car_controls(
+            0,
+            CarControls {
+                pitch: 0.75 * flipping.flip_rel_torque.y.signum(),
+                ..CarControls::default()
+            },
+        );
+        for _ in 0..ticks {
+            truth.step_tick();
+        }
+        let mut end = *truth.get_car_state(0);
+        let speed = end.phys.ang_vel.length();
+        if speed > 5.5 {
+            end.phys.ang_vel *= 5.5 / speed;
+        }
+
+        let dt = ticks as f32 / 120.0;
+        let mut replay = span_test_replay(&[0, 1], 2, dt);
+        for (index, frame) in replay.frames.iter_mut().enumerate() {
+            let car = &mut frame.cars[0];
+            car.inputs.dodge_active_raw = Some(Value {
+                value: 3,
+                frame: index,
+                source: Source::Replay,
+            });
+        }
+        replay.frames[1].cars[0]
+            .body
+            .angular_velocity_replay_units
+            .as_mut()
+            .unwrap()
+            .value = (end.phys.ang_vel * 100.0).to_array();
+        let mut scratch = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let options = ConvertOptions::default();
+        let fit = |replay: &ObservedReplay, options: &ConvertOptions, scratch: &mut Arena| {
+            fit_flip_cancel(
+                replay,
+                options,
+                &None,
+                0.0,
+                0,
+                &replay.frames[0].cars[0],
+                &flipping,
+                &CarControls::default(),
+                0,
+                scratch,
+            )
+        };
+        let fitted = fit(&replay, &options, &mut scratch).expect("fit");
+        assert!((fitted - 0.75).abs() < 1e-6, "fitted cancel {fitted}");
+        // A withheld frame between the packets, or a dodge counter change, refuses the fit.
+        let mut withheld = options.clone();
+        withheld.withheld_frames = Some(Arc::new(vec![false, true]));
+        assert!(fit(&replay, &withheld, &mut scratch).is_none());
+        let mut changed = replay.clone();
+        changed.frames[1].cars[0]
+            .inputs
+            .dodge_active_raw
+            .as_mut()
+            .unwrap()
+            .value = 4;
+        assert!(fit(&changed, &options, &mut scratch).is_none());
     }
 
     #[test]
