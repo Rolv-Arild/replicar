@@ -790,6 +790,30 @@ fn add_masked_error(
     });
 }
 
+/// A copy of a packet body whose fresh fields hold the offline reconstruction at the frame time:
+/// the packet advanced by its inferred lag. It removes each packet's unknowable timing offset
+/// (uniform over about one frame period) from a masked comparison, leaving the model error.
+fn aligned_body(packet: &Body, aligned: &PhysState, index: usize) -> Body {
+    let mut body = packet.clone();
+    if let Some(value) = body.position.as_mut().filter(|v| v.frame == index) {
+        value.value = aligned.pos.to_array();
+    }
+    if let Some(value) = body.linear_velocity.as_mut().filter(|v| v.frame == index) {
+        value.value = aligned.vel.to_array();
+    }
+    if let Some(value) = body.rotation_xyzw.as_mut().filter(|v| v.frame == index) {
+        value.value = glam::Quat::from_mat3a(&aligned.rot_mat).to_array();
+    }
+    if let Some(value) = body
+        .angular_velocity_replay_units
+        .as_mut()
+        .filter(|v| v.frame == index)
+    {
+        value.value = (aligned.ang_vel * 100.0).to_array();
+    }
+    body
+}
+
 fn masked_metrics(
     original: &ObservedReplay,
     conversion: &ConversionOutput,
@@ -801,7 +825,17 @@ fn masked_metrics(
     kinematics: &mut BTreeMap<usize, KinematicsByBody>,
     boost: &mut BTreeMap<usize, FieldSamples>,
     car_angular_by_altitude: &mut BTreeMap<String, FieldSamples>,
+    aligned: Option<&ConversionOutput>,
 ) {
+    let aligned_slots: BTreeMap<_, _> = aligned
+        .map(|output| {
+            output
+                .car_slots
+                .iter()
+                .map(|slot| (slot.player_key.as_str(), slot.slot))
+                .collect()
+        })
+        .unwrap_or_default();
     let slots: BTreeMap<_, _> = conversion
         .car_slots
         .iter()
@@ -818,6 +852,13 @@ fn masked_metrics(
         let by_kinematics = kinematics.entry(horizon).or_default();
         let by_boost = boost.entry(horizon).or_default();
         if let (Some(actual), Some(stale)) = (&original_frame.ball, &masked_frame.ball) {
+            let aligned_ball;
+            let actual = if let Some(output) = aligned {
+                aligned_ball = aligned_body(actual, &output.frames[index].state.ball.phys, index);
+                &aligned_ball
+            } else {
+                actual
+            };
             add_masked_error(
                 &mut by_body.ball,
                 actual,
@@ -849,9 +890,28 @@ fn masked_metrics(
             let Some((_, predicted)) = state.cars.iter().find(|(info, _)| info.idx == *slot) else {
                 continue;
             };
+            let aligned_car_body;
+            let car_target: &Body = match (aligned, car.player_key.as_deref()) {
+                (Some(output), Some(key)) => {
+                    match aligned_slots.get(key).and_then(|slot| {
+                        output.frames[index]
+                            .state
+                            .cars
+                            .iter()
+                            .find(|(info, _)| info.idx == *slot)
+                    }) {
+                        Some((_, truth)) => {
+                            aligned_car_body = aligned_body(&car.body, &truth.phys, index);
+                            &aligned_car_body
+                        }
+                        None => &car.body,
+                    }
+                }
+                _ => &car.body,
+            };
             add_masked_error(
                 &mut by_body.car,
-                &car.body,
+                car_target,
                 &stale.body,
                 index,
                 predicted.phys.pos.to_array(),
@@ -859,7 +919,7 @@ fn masked_metrics(
             );
             add_masked_kinematics(
                 &mut by_kinematics.car,
-                &car.body,
+                car_target,
                 &stale.body,
                 index,
                 &predicted.phys,
@@ -1051,6 +1111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let mut meshes = None;
     let mut mask_seed = None;
+    let mut aligned_targets = false;
     let mut rotation_trace_path = None;
     while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
@@ -1138,6 +1199,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .parse()?;
         } else if arg == "--infer-packet-lag" {
             options.infer_packet_lag = true;
+        } else if arg == "--aligned-targets" {
+            aligned_targets = true;
         } else if arg == "--no-infer-packet-lag" {
             options.infer_packet_lag = false;
         } else if arg == "--infer-air-roll-from-handbrake" {
@@ -1171,7 +1234,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1311,7 +1374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // A withheld target's own packet lag is unknowable, so masked prediction keeps
                 // every state at its frame time; packet-lag inference is an offline improvement
                 // measured by the one-step residuals instead.
-                masked_options.infer_packet_lag = false;
+                masked_options.infer_packet_lag = aligned_targets && options.infer_packet_lag;
                 masked_options.withheld_frames = Some(std::sync::Arc::new(
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())
@@ -1335,6 +1398,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut own_masked_kinematics,
                             &mut own_boost,
                             &mut own_angular_by_altitude,
+                            aligned_targets.then_some(&conversion),
                         );
                         if let Some(writer) = &mut rotation_trace {
                             for trace in own_rotation_traces {
