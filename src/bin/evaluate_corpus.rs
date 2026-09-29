@@ -1132,6 +1132,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_air_roll_from_handbrake = true;
         } else if arg == "--no-infer-air-roll-from-handbrake" {
             options.infer_air_roll_from_handbrake = false;
+        } else if arg == "--legacy-persist-gates" {
+            options.air_persist_calibrated = false;
         } else if arg == "--no-persist-past-air-controls" {
             options.persist_past_air_controls = false;
         } else if arg == "--air-lookahead-seconds" {
@@ -1157,7 +1159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {

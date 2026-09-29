@@ -2,6 +2,40 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## Input-process calibration replaces tuned persistence gates (2026-09-29)
+
+**Why.** The persistence gate (`max(|pitch|,|roll|) >= 0.5`, 0.15 s expiry) and the 4-frame span cap were chosen by sweeping masked error, so they were hill-climbed constants. Audit of the aerial controls added on this branch: *derived from mechanics or source* were the future-packet barrier, the forward model (mirrors RocketSim `update_air_torque`) and handbrake-as-air-roll (steer correlates with inferred roll at r = 0.64 with handbrake, 0.13 without); *tuned by error sweeps* were the 0.5 magnitude gate, the 0.15 s expiry, the 4-frame span cap and the off-by-default speed-drop gate. This section replaces the tuned constants by quantities measured on the input process itself (no state error involved); the tuned gates remain as `--legacy-persist-gates` for comparison. It supersedes the defaults named in the two sections below.
+
+**Span cap removed.** With no cap (any bracketing pair in the active phase; a constant control over the pair beats no control), one-step train car rotation p50/p90/p99 is 1.731/7.432/19.481 deg for 12 and 40 frames alike, versus 1.743/7.438/19.475 with the tuned 4 frames / 0.15 s. The default is now effectively unbounded.
+
+**Calibration tool.** `cargo run --release --bin calibrate_air_control_persistence -- replays/train [max_span_seconds]` fits the constant control for every pair of consecutive fresh car angular packets in the air (416,600 spans on the 60 train replays; refuses paths containing `test`) and pairs fitted controls of the same actor lifetime at increasing lag. Findings:
+
+- Persistence is strongly axis dependent. Least-squares rho(lag) is about 0.51 / 0.59 / 0.75 (pitch / yaw / roll) at lag 0-0.033 s, and 0.32 / 0.36 / 0.72 at 0.067-0.10 s. Pitch and yaw reach about 0 by 0.15-0.2 s, roll still 0.49 at 0.27-0.30 s.
+- There is no threshold structure in the conditional mean (later/earlier ratio roughly constant in magnitude), and a fitted roll of about 0.69 recurs at every magnitude: it is the roll that balances RocketSim's roll damping at the 5.5 rad/s angular speed cap (4.8 x 5.5 / 38.3), so a fit at the cap is a lower bound on a held input and persists. Regressions on the previous control and a cap flag add little (R2 0.11 for pitch/yaw, 0.54-0.57 for roll).
+- Conditioning on the joint magnitude of the other axes does not raise the pitch hold probability (0.43-0.49 at every level), so the tuned gate's joint rule has no support in the input process.
+- Errors are judged by quantiles of absolute error, for which the optimal point prediction of an uncertain input is its conditional median. The default (`air_persist_calibrated`) therefore multiplies each fitted control by the measured median-later-control ratio `AIR_CONTROL_MEDIAN_RATIO[axis][lag band][|u| bin]` (bands 0.033-0.083, 0.083-0.133, 0.133-0.2 s; nothing beyond 0.2 s or below 0.1 magnitude), and uses observed steer for yaw (or for roll while the handbrake is held) instead of a persisted value. The table is copied from the tool's train output.
+
+Alternatives evaluated on the input process and then on train horizon-four rotation p50/p90/p99 (deg): least-squares shrinkage rho(lag) 3.221/16.180/42.548; persist-iff-P(held)>0.5 3.202/16.682/43.825; **conditional-median ratios 3.187/16.097/42.147**; no persistence 3.227/20.130/45.784; tuned gate 3.189/15.372/39.268. Ignoring observed steer (persisting fitted yaw/roll) made no material tail difference (16.559/43.809).
+
+Masked car rotation (p50 / p90 / p99 deg), no persistence versus calibrated default versus tuned legacy gates. Same samples per row (train 10,120/9,931/9,877/10,053; validation 10,405/10,623/10,479/10,401 at horizons 1-4):
+
+| Split / h | No persistence | Calibrated (default) | Tuned legacy gate |
+| --- | --- | --- | --- |
+| train 1 | 1.835/8.919/22.652 | 1.809/8.219/20.736 | 1.810/7.944/19.691 |
+| train 2 | 1.858/9.247/23.375 | 1.806/8.474/21.059 | 1.813/8.012/20.286 |
+| train 3 | 2.642/15.301/38.702 | 2.566/12.329/36.510 | 2.595/11.833/34.193 |
+| train 4 | 3.227/20.130/45.784 | 3.187/16.097/42.147 | 3.189/15.372/39.268 |
+| validation 1 | 1.859/8.609/22.000 | 1.821/7.890/20.206 | 1.832/7.753/19.150 |
+| validation 2 | 1.845/9.175/23.292 | 1.806/8.183/21.953 | 1.791/7.830/21.645 |
+| validation 3 | 2.460/14.596/38.075 | 2.382/11.800/34.916 | 2.419/11.278/32.836 |
+| validation 4 | 3.060/19.916/46.867 | 3.019/16.438/44.443 | 3.013/15.631/41.734 |
+
+The alternate mask schedule (`--mask-seed 239847`) on validation horizon four: 3.130/20.500/47.885 (previous default without roll/persistence) and 3.046/15.156/42.351 (tuned) versus 3.044/16.027/44.411 (calibrated). Position is unchanged at every quantile (validation h4 15.953/39.604/76.639 UU). Per replay at horizon four, calibrated versus no persistence: rotation p90 improved/worse/tied 54/2/4 (validation) and 59/1/0 (train); p50 32/21/7 and 31/19/10 (worst regression +0.79 deg). Calibrated versus the tuned gate is *worse* at p90 in 43/60 validation replays (worst +6.0 deg) and 40/60 train replays.
+
+**Honest trade-off.** The measured model gives up about 5% of the tail (p90/p99) that the tuned gate captured, while matching its p50, and it needs no error-tuned constant. Diagnosis: forcing *pitch* to persist at full magnitude for |u| >= 0.5 within 0.15 s (a temporary switch, removed) recovers the tail (train h4 3.173/15.275/40.924), while forcing yaw or roll changes nothing. Fitted pitch is bimodal (held or released, about 50/50) so the control-space median cannot decide it, yet state error favors holding. A hypothesis that time-averaging over multi-frame fitted spans attenuates the calibration target was tested by restricting calibration to spans of at most 0.045 s (76,738 spans): pitch rho at lag 0-0.033 s stayed 0.51 and the |u|~1 median ratio 0.45, so the hypothesis is not supported. Open question: a calibration objective in state space (fitted on train with a held-out check on validation, low-dimensional, per axis) may explain the pitch gap.
+
+Reproduce: `evaluate_corpus replays/<split> ...` with defaults, `--no-persist-past-air-controls`, and `--legacy-persist-gates`; `replays/test` remains sealed.
+
 ## Residual harm in causal persistence and a speed-drop gate (2026-09-29)
 
 `python/analyze_persistence_harm.py` joins the previous-default and new-default horizon-four **train** traces (10,052 windows) and keeps the 2,541 windows where persistence changed the first-interval pitch/roll (1,417 better and 529 worse by more than 1 deg; median -2.517, mean -4.599 deg). Features use only packets before the mask window. Harm concentrates where prior angular speed had been **falling** between the two fitted packets: trend below -0.2 rad/s gave 110 better versus 140 worse (mean +1.5 deg), while flat trends gave 1,040 better versus 238 worse (median -3.785) and speeds at or above 5.48 rad/s gave 1,014 versus 192 (median -4.261). Speed 5 to 5.48 rad/s (121 windows, 44 better/62 worse) and pitch-dominant persisted controls (657/306, median -1.349, versus roll-dominant 760/223, median -3.854) were the weakest groups. Age since the latest packet (up to 0.12 s), handbrake, altitude and steer magnitude did not isolate harm.

@@ -68,7 +68,8 @@ pub struct ConvertOptions {
     /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
     pub infer_air_controls_from_lookahead: bool,
     /// Longest span, in replay frames, between fresh car angular packets that the offline aerial
-    /// inverse may bridge with one constant control (1 = adjacent frames only).
+    /// inverse may bridge with one constant control (1 = adjacent frames only). The default is
+    /// effectively unbounded: a constant control over a bracketing pair beats no control.
     pub air_lookahead_max_frames: usize,
     /// Longest replay-time span, in seconds, that the aerial inverse may bridge.
     pub air_lookahead_max_seconds: f32,
@@ -77,7 +78,11 @@ pub struct ConvertOptions {
     /// Causal: keep the aerial control implied by the two latest fresh car angular packets before
     /// the interval, when no later packet brackets it. Uses no data from after the interval.
     pub persist_past_air_controls: bool,
-    /// Longest time after the latest fresh packet for which a past control is kept.
+    /// Scale a past control by its measured conditional-median persistence
+    /// (`AIR_CONTROL_MEDIAN_RATIO`), and use observed steer/handbrake for the axis they drive.
+    /// When false, the legacy gates below (expiry, minimum magnitude, gain, speed drop) apply.
+    pub air_persist_calibrated: bool,
+    /// Legacy gate: longest time after the latest fresh packet for which a past control is kept.
     pub air_persist_max_seconds: f32,
     /// Scale applied to persisted pitch, yaw, and roll (1 keeps the fitted control).
     pub air_persist_gain: f32,
@@ -120,10 +125,11 @@ impl Default for ConvertOptions {
             infer_air_steer_controls: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
-            air_lookahead_max_frames: 4,
-            air_lookahead_max_seconds: 0.15,
+            air_lookahead_max_frames: 10_000,
+            air_lookahead_max_seconds: 1_000.0,
             air_lookahead_refine_iterations: 1,
             persist_past_air_controls: true,
+            air_persist_calibrated: true,
             air_persist_max_seconds: 0.15,
             air_persist_gain: 1.0,
             air_persist_min_control: 0.5,
@@ -545,6 +551,54 @@ fn span_lookahead_air_controls(
     ))
 }
 
+/// Conditional-median persistence of a fitted aerial control, measured on the 60 train replays by
+/// `calibrate_air_control_persistence` (416,600 fitted spans): the median later fitted control,
+/// aligned with the earlier control's sign and expressed per unit of the earlier magnitude.
+/// Indexed `[axis][lag band][|u| bin]` with axes pitch, yaw, roll; lag bands 0.033-0.083 s (also
+/// anything shorter), 0.083-0.133 s and 0.133-0.200 s between span midpoints; |u| bins
+/// [0.1,0.3), [0.3,0.5), [0.5,0.7), [0.7,0.9), [0.9,1]. Errors are judged by quantiles of absolute
+/// error, for which the optimal point prediction of an uncertain input is its conditional median.
+/// Roll ratios near 1 for |u| >= 0.5 reflect fits at the 5.5 rad/s angular speed cap: the fitted
+/// roll there is the minimum that balances RocketSim's roll damping (about 0.69) and it persists.
+const AIR_CONTROL_MEDIAN_RATIO: [[[f32; 5]; 3]; 3] = [
+    [
+        [0.210, 0.547, 0.758, 0.535, 0.464],
+        [0.119, 0.234, 0.524, 0.397, 0.268],
+        [0.014, 0.020, 0.130, 0.043, 0.019],
+    ],
+    [
+        [0.407, 0.676, 0.627, 0.562, 0.508],
+        [0.282, 0.412, 0.407, 0.438, 0.325],
+        [0.121, 0.109, 0.092, 0.093, 0.051],
+    ],
+    [
+        [0.087, 0.547, 1.031, 0.896, 0.705],
+        [0.162, 0.425, 1.022, 0.892, 0.699],
+        [0.125, 0.272, 1.004, 0.852, 0.642],
+    ],
+];
+
+/// Median persistence ratio for a fitted control on `axis` (0 pitch, 1 yaw, 2 roll) with the
+/// given `magnitude`, `lag` seconds after its span midpoint. Below the calibrated magnitude range
+/// (fit noise) or beyond 0.2 s there is no evidence, so nothing persists.
+fn air_control_median_ratio(axis: usize, lag: f32, magnitude: f32) -> f32 {
+    if !lag.is_finite() || lag < 0.0 || lag >= 0.2 || !(0.1..=1.0 + 1e-3).contains(&magnitude) {
+        return 0.0;
+    }
+    let band = if lag < 2.5 / 30.0 {
+        0
+    } else if lag < 4.0 / 30.0 {
+        1
+    } else {
+        2
+    };
+    let bin = [0.3, 0.5, 0.7, 0.9]
+        .iter()
+        .position(|&edge| magnitude < edge)
+        .unwrap_or(4);
+    AIR_CONTROL_MEDIAN_RATIO[axis][band][bin]
+}
+
 /// Causal aerial controls for the interval starting at `index`: the constant control that carried
 /// the car from its second-latest to its latest fresh angular packet, both at or before `index`.
 /// Nothing after `index` is read, so it is valid for prediction across withheld packets.
@@ -554,7 +608,7 @@ fn past_persisted_air_controls(
     car: &observations::Car,
     min_z: f32,
     options: &ConvertOptions,
-) -> Option<AirControls> {
+) -> Option<(AirControls, f32)> {
     let ang1 = car.body.angular_velocity_replay_units.as_ref()?;
     let end = ang1.frame;
     if end == 0
@@ -569,7 +623,9 @@ fn past_persisted_air_controls(
     }
     let end_frame = observations.frames.get(end)?;
     let elapsed = observations.frames.get(index)?.time - end_frame.time;
-    if !(0.0..=options.air_persist_max_seconds).contains(&elapsed) {
+    if !options.air_persist_calibrated
+        && !(0.0..=options.air_persist_max_seconds).contains(&elapsed)
+    {
         return None;
     }
     let same_car = |candidate: &&observations::Car| {
@@ -629,6 +685,16 @@ fn past_persisted_air_controls(
         (dt * 120.0).round().max(1.0) as u32,
         options.air_lookahead_refine_iterations,
     );
+    let span_mid = 0.5 * (observations.frames.get(start)?.time + end_frame.time);
+    let interval_end = observations
+        .frames
+        .get(index + 1)
+        .map_or(observations.frames.get(index)?.time, |frame| frame.time);
+    let interval_mid = 0.5 * (observations.frames.get(index)?.time + interval_end);
+    let lag = interval_mid - span_mid;
+    if options.air_persist_calibrated {
+        return Some((solved, lag));
+    }
     if solved.pitch.abs().max(solved.roll.abs()) < options.air_persist_min_control {
         return None;
     }
@@ -637,11 +703,14 @@ fn past_persisted_air_controls(
         return None;
     }
     let gain = options.air_persist_gain;
-    Some(AirControls {
-        pitch: solved.pitch * gain,
-        yaw: solved.yaw * gain,
-        roll: solved.roll * gain,
-    })
+    Some((
+        AirControls {
+            pitch: solved.pitch * gain,
+            yaw: solved.yaw * gain,
+            roll: solved.roll * gain,
+        },
+        lag,
+    ))
 }
 
 /// An intentionally narrow causal ablation. The current replay angular packet is not read.
@@ -1390,16 +1459,35 @@ pub fn convert_observations_with(
                 && !dodge_jump_control
                 && active
             {
-                if let Some(solved) = past_persisted_air_controls(
+                if let Some((solved, lag)) = past_persisted_air_controls(
                     observations,
                     frame_idx,
                     car,
                     min_lookahead_z,
                     options,
                 ) {
-                    controls.pitch = solved.pitch;
-                    controls.yaw = solved.yaw;
-                    controls.roll = solved.roll;
+                    if options.air_persist_calibrated {
+                        let keep = |axis: usize, value: f32| {
+                            value * air_control_median_ratio(axis, lag, value.abs())
+                        };
+                        controls.pitch = keep(0, solved.pitch);
+                        let steer_observed =
+                            options.infer_air_steer_controls && car.inputs.steer.is_some();
+                        if !steer_observed {
+                            controls.yaw = keep(1, solved.yaw);
+                            controls.roll = keep(2, solved.roll);
+                        } else if options.infer_air_roll_from_handbrake && controls.handbrake {
+                            controls.roll = controls.steer;
+                            controls.yaw = keep(1, solved.yaw);
+                        } else {
+                            controls.yaw = controls.steer;
+                            controls.roll = keep(2, solved.roll);
+                        }
+                    } else {
+                        controls.pitch = solved.pitch;
+                        controls.yaw = solved.yaw;
+                        controls.roll = solved.roll;
+                    }
                     air_controls_applied = true;
                 }
             }
@@ -2131,6 +2219,7 @@ mod tests {
         let with_future = span_test_replay(&[0, 2, 4], 5, dt);
         let mut options = ConvertOptions::default();
         options.infer_air_controls_from_lookahead = false;
+        options.air_persist_calibrated = false;
         let pitches = |replay: &ObservedReplay, options: &ConvertOptions| {
             convert_observations(replay.clone(), options)
                 .unwrap()
@@ -2165,6 +2254,85 @@ mod tests {
         let mut strict = options.clone();
         strict.air_persist_min_control = 1.1;
         assert_eq!(pitches(&past_only, &strict)[2], 0.0);
+    }
+
+    #[test]
+    fn median_ratios_follow_the_calibrated_table() {
+        // Large roll (sustained air roll at the angular speed cap) persists at every lag.
+        assert!(air_control_median_ratio(2, 0.05, 0.6) > 0.9);
+        assert!(air_control_median_ratio(2, 0.15, 0.6) > 0.9);
+        // Small controls are fit noise and lose most of their magnitude.
+        assert!(air_control_median_ratio(2, 0.05, 0.2) < 0.2);
+        assert_eq!(
+            air_control_median_ratio(2, 0.05, 0.05),
+            0.0,
+            "below the calibrated range"
+        );
+        // Pitch is short-lived: partial persistence soon after the span, none after 0.133 s.
+        assert!((0.3..0.9).contains(&air_control_median_ratio(0, 0.05, 0.6)));
+        assert!(air_control_median_ratio(0, 0.17, 0.6) < 0.2);
+        // Nothing persists beyond 0.2 s or for invalid lags.
+        assert_eq!(air_control_median_ratio(2, 0.25, 0.9), 0.0);
+        assert_eq!(air_control_median_ratio(2, -0.01, 0.9), 0.0);
+    }
+
+    #[test]
+    fn calibrated_persistence_is_causal_and_prefers_observed_steer() {
+        let dt = 1.0 / 30.0;
+        let mut replay = span_test_replay(&[0, 2], 5, dt);
+        for frame in &mut replay.frames {
+            let car = &mut frame.cars[0];
+            car.inputs.steer = Some(Value {
+                value: 0.4,
+                frame: frame.index,
+                source: Source::Replay,
+            });
+        }
+        let mut options = ConvertOptions::default();
+        options.infer_air_controls_from_lookahead = false;
+        let controls = |replay: &ObservedReplay, options: &ConvertOptions| {
+            convert_observations(replay.clone(), options)
+                .unwrap()
+                .frames
+                .iter()
+                .map(|frame| frame.state.cars[0].1.controls)
+                .collect::<Vec<_>>()
+        };
+        let calibrated = controls(&replay, &options);
+        let mut legacy_options = options.clone();
+        legacy_options.air_persist_calibrated = false;
+        let legacy = controls(&replay, &legacy_options);
+        // The calibrated model only ever shrinks the fitted control.
+        for (calibrated, legacy) in calibrated.iter().zip(&legacy) {
+            let (calibrated_pitch, legacy_pitch) = (calibrated.pitch, legacy.pitch);
+            assert!(calibrated_pitch.abs() <= legacy_pitch.abs() + 1e-6);
+        }
+        // Observed steer drives yaw exactly; without handbrake roll is the shrunk fitted roll.
+        let yaw = calibrated[2].yaw;
+        assert_eq!(yaw, 0.4);
+        // With the handbrake held steer drives roll instead.
+        for frame in &mut replay.frames {
+            frame.cars[0].inputs.handbrake = Some(Value {
+                value: true,
+                frame: frame.index,
+                source: Source::Replay,
+            });
+        }
+        let rolling = controls(&replay, &options);
+        let roll = rolling[2].roll;
+        assert_eq!(roll, 0.4);
+        // A later packet changes nothing before it, and lags beyond the table are dropped.
+        let mut late = span_test_replay(&[0, 2], 14, dt);
+        for frame in &mut late.frames {
+            frame.cars[0].inputs.steer = Some(Value {
+                value: 0.0,
+                frame: frame.index,
+                source: Source::Replay,
+            });
+        }
+        let long = controls(&late, &options);
+        let pitch = long[13].pitch;
+        assert_eq!(pitch, 0.0);
     }
 
     #[test]
