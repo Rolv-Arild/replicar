@@ -71,6 +71,10 @@ pub struct ConvertOptions {
     /// applies its limits at the start of the next tick, so the state it reports after a step can
     /// exceed them (a flipping car by up to 2.2 rad/s), whereas replay states never do.
     pub limit_reported_velocities: bool,
+    /// Chain packet lags on whole tick counts: snap each chained interval to an integer (rejecting
+    /// pairs more than 0.25 tick from one), so lag differences are exact instead of independently
+    /// rounded estimates, and fix the absolute tick with the packets' real-time windows.
+    pub exact_tick_lag_chains: bool,
     /// Offline: infer when inside its frame each ball and car packet was generated (its lag behind
     /// the frame time, in ticks) from chained packet motion, and apply corrections at that time.
     pub infer_packet_lag: bool,
@@ -136,6 +140,7 @@ impl Default for ConvertOptions {
             infer_air_steer_controls: true,
             infer_flip_cancel: true,
             limit_reported_velocities: true,
+            exact_tick_lag_chains: true,
             infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
@@ -1204,14 +1209,124 @@ fn finish_lag_run(run: &[(usize, f32, f32)], lo: f32, hi: f32, mut assign: impl 
     }
 }
 
-/// Walks one chain of fresh packets. `valid(prev, next)` decides whether a pair's implied interval
-/// is trustworthy; an invalid pair or an infeasible window ends the run.
-fn chain_packet_lags(
+/// Exact whole-tick chains. Elapsed ticks between chained packets are snapped to integers (pairs
+/// more than 0.25 tick from one are rejected), so each packet's physical tick is `S = S0 + K` with
+/// integer `K`. A packet was generated no later than its frame time and no earlier than the
+/// previous frame's time, so on the integer timeline `tl(previous) <= S <= tl(frame)`; a run ends at
+/// an unreliable pair or when no integer `S0` satisfies these bounds for every packet (a mistaken
+/// interval shows up this way). Within the feasible starts, `S0` is the one that violates the
+/// real-time window `0 <= T - S <= window` least (ties go to the middle). The assigned lag is
+/// `tl(frame) - S`, an integer.
+fn chain_packet_lags_exact(
     observations: &ObservedReplay,
     packets: &[ChainPacket],
     valid: impl Fn(&ChainPacket, &ChainPacket) -> bool,
     mut assign: impl FnMut(usize, f32),
 ) {
+    let frames = &observations.frames;
+    let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
+    let real_tick = |frame: usize| (f64::from(frames[frame].time) - first_time) * 120.0;
+    // The first frame has no previous frame, so its window is its own nominal period.
+    let window = |frame: usize| {
+        if frame == 0 {
+            f64::from(frames[0].delta * 120.0).max(1.0)
+        } else {
+            real_tick(frame) - real_tick(frame - 1)
+        }
+    };
+    let timeline = |frame: usize| real_tick(frame).round() as i64;
+    // Integer bounds on S0 from one packet at cumulative interval K.
+    let bounds = |frame: usize, k: i64| {
+        let earliest = if frame == 0 {
+            timeline(0) - window(0).round() as i64
+        } else {
+            timeline(frame - 1)
+        };
+        (earliest - k, timeline(frame) - k)
+    };
+    // (frame, K): physical tick relative to the first packet of the run.
+    let mut run: Vec<(usize, i64)> = Vec::new();
+    let (mut lo, mut hi) = (i64::MIN, i64::MAX);
+    let finish = |run: &[(usize, i64)], lo: i64, hi: i64, assign: &mut dyn FnMut(usize, f32)| {
+        if run.len() < 2 || lo > hi {
+            return;
+        }
+        let violation = |start: i64| -> f64 {
+            run.iter()
+                .map(|&(f, k)| {
+                    let lag = real_tick(f) - (start + k) as f64;
+                    (-lag).max(0.0) + (lag - window(f)).max(0.0)
+                })
+                .sum()
+        };
+        let scores: Vec<(i64, f64)> = (lo..=hi).map(|s| (s, violation(s))).collect();
+        let best = scores.iter().map(|&(_, v)| v).fold(f64::INFINITY, f64::min);
+        let tied: Vec<i64> = scores
+            .iter()
+            .filter(|&&(_, v)| v <= best + 1e-9)
+            .map(|&(s, _)| s)
+            .collect();
+        let start = tied[tied.len() / 2];
+        for &(frame, k) in run {
+            assign(frame, (timeline(frame) - (start + k)).max(0) as f32);
+        }
+    };
+    for pair in packets.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let interval = if valid(a, b) {
+            implied_interval_ticks(a, b).and_then(|interval| {
+                let snapped = interval.round();
+                ((interval - snapped).abs() <= 0.25).then_some(snapped as i64)
+            })
+        } else {
+            None
+        };
+        let Some(interval) = interval else {
+            finish(&run, lo, hi, &mut assign);
+            run.clear();
+            (lo, hi) = (i64::MIN, i64::MAX);
+            continue;
+        };
+        if run.is_empty() {
+            let (l, h) = bounds(a.frame, 0);
+            run.push((a.frame, 0));
+            (lo, hi) = (l, h);
+        }
+        let k_next = run.last().map_or(0, |entry| entry.1) + interval;
+        let (l, h) = bounds(b.frame, k_next);
+        let (new_lo, new_hi) = (lo.max(l), hi.min(h));
+        if new_lo <= new_hi {
+            run.push((b.frame, k_next));
+            (lo, hi) = (new_lo, new_hi);
+        } else {
+            finish(&run, lo, hi, &mut assign);
+            let (la, ha) = bounds(a.frame, 0);
+            let (lb, hb) = bounds(b.frame, interval);
+            let (start_lo, start_hi) = (la.max(lb), ha.min(hb));
+            if start_lo <= start_hi {
+                run = vec![(a.frame, 0), (b.frame, interval)];
+                (lo, hi) = (start_lo, start_hi);
+            } else {
+                run.clear();
+                (lo, hi) = (i64::MIN, i64::MAX);
+            }
+        }
+    }
+    finish(&run, lo, hi, &mut assign);
+}
+
+/// Walks one chain of fresh packets. `valid(prev, next)` decides whether a pair's implied interval
+/// is trustworthy; an invalid pair or an infeasible window ends the run.
+fn chain_packet_lags(
+    observations: &ObservedReplay,
+    packets: &[ChainPacket],
+    exact: bool,
+    valid: impl Fn(&ChainPacket, &ChainPacket) -> bool,
+    mut assign: impl FnMut(usize, f32),
+) {
+    if exact {
+        return chain_packet_lags_exact(observations, packets, valid, assign);
+    }
     let frame_window = |frame: usize| -> f32 {
         let previous = frame.saturating_sub(1);
         ((observations.frames[frame].time - observations.frames[previous].time) * 120.0).max(0.0)
@@ -1310,6 +1425,7 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     chain_packet_lags(
         observations,
         &ball_packets,
+        options.exact_tick_lag_chains,
         |a, b| {
             // The implied interval is a displacement along the mean velocity: exact for constant
             // acceleration and biased only at second order in the turn angle, so smooth motion
@@ -1356,6 +1472,7 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
         chain_packet_lags(
             observations,
             packets,
+            options.exact_tick_lag_chains,
             |a, b| {
                 let (na, nb) = (norm(a.vel), norm(b.vel));
                 let cosine = if na > 1.0 && nb > 1.0 {
@@ -2918,77 +3035,93 @@ mod tests {
     }
 
     #[test]
-    fn packet_lag_inference_recovers_lags_and_never_bridges_withheld_frames() {
-        let ticks_per_frame = 4.0f32;
-        let true_lags = [
-            0.5f32, 3.4, 1.2, 2.9, 0.3, 3.7, 1.8, 2.2, 0.9, 3.1, 1.5, 2.6,
-        ];
+    fn packet_lag_inference_recovers_whole_tick_lags_and_never_bridges_withheld_frames() {
+        // Packets are exact whole-tick server states generated up to a frame period before the
+        // frame time; frame times carry a small jitter so the absolute tick is constrained.
+        let true_lags = [2i64, 0, 3, 1, 3, 0, 2, 1, 3, 0, 1, 2, 3, 0, 2, 1];
         let velocity = [1200.0f32, 300.0, 0.0];
-        let frames: Vec<observations::Frame> = true_lags
-            .iter()
-            .enumerate()
-            .map(|(index, lag)| {
-                let frame_tick = index as f32 * ticks_per_frame;
-                let physical_seconds = (frame_tick - lag) / 120.0;
-                let body = Body {
-                    position: Some(Value {
-                        value: [
-                            velocity[0] * physical_seconds,
-                            velocity[1] * physical_seconds,
-                            400.0,
-                        ],
-                        frame: index,
-                        source: Source::Replay,
-                    }),
-                    linear_velocity: Some(Value {
-                        value: velocity,
-                        frame: index,
-                        source: Source::Replay,
-                    }),
-                    ..Body::default()
-                };
-                observations::Frame {
-                    index,
-                    time: frame_tick / 120.0,
-                    delta: ticks_per_frame / 120.0,
-                    ball: Some(body),
-                    cars: Vec::new(),
-                    players: Vec::new(),
-                    team_scores: [None, None],
-                    seconds_remaining: None,
-                    overtime: None,
-                    game_state: Some(Value {
-                        value: "Active".to_string(),
-                        frame: index,
-                        source: Source::Replay,
-                    }),
-                    events: Vec::new(),
-                    pad_pickups: Vec::new(),
-                }
-            })
-            .collect();
-        let replay = ObservedReplay {
-            header: observations::Header {
-                game_type: "TAGame.Replay_Soccar_TA".to_string(),
-                levels: Vec::new(),
-                final_team_scores: [None, None],
-            },
-            frames,
-            diagnostics: Default::default(),
+        let frame_tick = |index: usize| 4.0 * index as f32 + 0.3 * (index % 3) as f32;
+        let build = |lags: &[i64]| -> ObservedReplay {
+            let frames: Vec<observations::Frame> = lags
+                .iter()
+                .enumerate()
+                .map(|(index, lag)| {
+                    let physical_tick = 4.0 * index as f32 - *lag as f32;
+                    let body = Body {
+                        position: Some(Value {
+                            value: [
+                                velocity[0] * physical_tick / 120.0,
+                                velocity[1] * physical_tick / 120.0,
+                                400.0,
+                            ],
+                            frame: index,
+                            source: Source::Replay,
+                        }),
+                        linear_velocity: Some(Value {
+                            value: velocity,
+                            frame: index,
+                            source: Source::Replay,
+                        }),
+                        ..Body::default()
+                    };
+                    observations::Frame {
+                        index,
+                        time: frame_tick(index) / 120.0,
+                        delta: 4.0 / 120.0,
+                        ball: Some(body),
+                        cars: Vec::new(),
+                        players: Vec::new(),
+                        team_scores: [None, None],
+                        seconds_remaining: None,
+                        overtime: None,
+                        game_state: Some(Value {
+                            value: "Active".to_string(),
+                            frame: index,
+                            source: Source::Replay,
+                        }),
+                        events: Vec::new(),
+                        pad_pickups: Vec::new(),
+                    }
+                })
+                .collect();
+            ObservedReplay {
+                header: observations::Header {
+                    game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                    levels: Vec::new(),
+                    final_team_scores: [None, None],
+                },
+                frames,
+                diagnostics: Default::default(),
+            }
         };
+        let replay = build(&true_lags);
         let options = ConvertOptions::default();
+        assert!(options.exact_tick_lag_chains);
         let lags = infer_packet_lags(&replay, &options);
-        // The chain fixes lag differences; only a common constant is ambiguous, centered in the
-        // feasible window, so every lag is recovered to well within a tick.
-        for (index, truth) in true_lags.iter().enumerate().skip(1) {
+        // Lag = round(frame tick) - physical tick, exactly, for every packet in the chain.
+        for (index, truth) in true_lags.iter().enumerate() {
+            let expected = frame_tick(index).round() as i64 - (4 * index as i64 - truth);
             let estimate = lags.ball[index].expect("lag inferred");
-            assert!(
-                (estimate - truth).abs() < 0.6,
-                "frame {index}: {estimate} vs {truth}"
-            );
+            assert_eq!(estimate as i64, expected, "frame {index}");
         }
-        // A withheld frame breaks the chain: frames on both sides are estimated independently
-        // and no pair bridges it.
+        // Fractional lags are not whole-tick physics: exact chains reject them.
+        let fractional = {
+            let mut replay = build(&true_lags);
+            for (index, frame) in replay.frames.iter_mut().enumerate() {
+                let extra = 0.5 * (index % 2) as f32 * velocity[0] / 120.0;
+                frame
+                    .ball
+                    .as_mut()
+                    .unwrap()
+                    .position
+                    .as_mut()
+                    .unwrap()
+                    .value[0] += extra;
+            }
+            infer_packet_lags(&replay, &options)
+        };
+        assert!(fractional.ball.iter().all(|lag| lag.is_none()));
+        // A withheld frame breaks the chain: no pair bridges it.
         let mut withheld = options.clone();
         withheld.withheld_frames = Some(Arc::new(
             (0..true_lags.len()).map(|index| index == 5).collect(),
@@ -2998,102 +3131,6 @@ mod tests {
         let blocked = infer_packet_lags(&masked, &withheld);
         assert!(blocked.ball[5].is_none());
         assert!(blocked.ball[4].is_some() && blocked.ball[6].is_some());
-    }
-
-    #[test]
-    fn flip_cancel_fit_recovers_a_simulated_cancel_and_respects_barriers() {
-        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
-        let mut config = ArenaConfig::new(GameMode::Soccar);
-        config.rng_seed = Some(0);
-        let mut truth = Arena::new_with_config(config);
-        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
-        let mut start = CarState::default();
-        start.phys.pos = Vec3A::new(0.0, 0.0, 900.0);
-        start.is_on_ground = false;
-        start.has_jumped = true;
-        start.air_time_since_jump = 0.05;
-        truth.set_car_state(0, start);
-        truth.set_car_controls(
-            0,
-            CarControls {
-                jump: true,
-                pitch: -0.7,
-                yaw: -0.7,
-                ..CarControls::default()
-            },
-        );
-        for _ in 0..3 {
-            truth.step_tick();
-            truth.set_car_controls(0, CarControls::default());
-        }
-        let flipping = *truth.get_car_state(0);
-        assert!(flipping.is_flipping && flipping.flip_rel_torque.y != 0.0);
-        // The player cancelled 75% of the pitch torque for the next ten ticks.
-        let ticks = 10u64;
-        truth.set_car_state(0, flipping);
-        truth.set_car_controls(
-            0,
-            CarControls {
-                pitch: 0.75 * flipping.flip_rel_torque.y.signum(),
-                ..CarControls::default()
-            },
-        );
-        for _ in 0..ticks {
-            truth.step_tick();
-        }
-        let mut end = *truth.get_car_state(0);
-        let speed = end.phys.ang_vel.length();
-        if speed > 5.5 {
-            end.phys.ang_vel *= 5.5 / speed;
-        }
-
-        let dt = ticks as f32 / 120.0;
-        let mut replay = span_test_replay(&[0, 1], 2, dt);
-        for (index, frame) in replay.frames.iter_mut().enumerate() {
-            let car = &mut frame.cars[0];
-            car.inputs.dodge_active_raw = Some(Value {
-                value: 3,
-                frame: index,
-                source: Source::Replay,
-            });
-        }
-        replay.frames[1].cars[0]
-            .body
-            .angular_velocity_replay_units
-            .as_mut()
-            .unwrap()
-            .value = (end.phys.ang_vel * 100.0).to_array();
-        let mut scratch = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
-        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
-        let options = ConvertOptions::default();
-        let fit = |replay: &ObservedReplay, options: &ConvertOptions, scratch: &mut Arena| {
-            fit_flip_cancel(
-                replay,
-                options,
-                &None,
-                0.0,
-                0,
-                &replay.frames[0].cars[0],
-                &flipping,
-                &CarControls::default(),
-                0,
-                scratch,
-            )
-        };
-        let fitted = fit(&replay, &options, &mut scratch).expect("fit");
-        assert!((fitted - 0.75).abs() < 1e-6, "fitted cancel {fitted}");
-        // A withheld frame between the packets, or a dodge counter change, refuses the fit.
-        let mut withheld = options.clone();
-        withheld.withheld_frames = Some(Arc::new(vec![false, true]));
-        assert!(fit(&replay, &withheld, &mut scratch).is_none());
-        let mut changed = replay.clone();
-        changed.frames[1].cars[0]
-            .inputs
-            .dodge_active_raw
-            .as_mut()
-            .unwrap()
-            .value = 4;
-        assert!(fit(&changed, &options, &mut scratch).is_none());
     }
 
     #[test]

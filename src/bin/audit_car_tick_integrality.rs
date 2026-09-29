@@ -75,6 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (mut pos_err, mut vel_err, mut along, mut grav) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+    let mut interval_errors: Vec<f64> = Vec::new();
     let mut by_gap: [Vec<f64>; 4] = Default::default();
 
     for replay_path in replay_paths(&path)? {
@@ -200,6 +201,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         * 120.0,
                 );
                 grav.push(f64::from((vel - b.state.phys.vel).z) / (650.0 / 120.0));
+                {
+                    let mean = (a.state.phys.vel + b.state.phys.vel) * 0.5;
+                    let implied_k = f64::from(
+                        (b.state.phys.pos - a.state.phys.pos).dot(mean) / mean.length_squared(),
+                    ) * 120.0;
+                    if err < 0.05 {
+                        interval_errors.push((implied_k - k as f64).abs());
+                    }
+                }
                 *counts.entry(k as i64).or_default() += 1;
                 by_gap[gap].push(f64::from(err));
                 let _ = b.time - a.time;
@@ -259,5 +269,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     println!("\nbest whole-tick k between packets (count): {counts:?}");
+    interval_errors.sort_by(|a, b| a.total_cmp(b));
+    let q = |p: f64| interval_errors[((interval_errors.len() - 1) as f64 * p) as usize];
+    println!(
+        "car |estimated interval - exact k| (ticks), exact fits only, n={}: p50 {:.3} p90 {:.3} p99 {:.3} p99.9 {:.3} max {:.3}",
+        interval_errors.len(),
+        q(0.5),
+        q(0.9),
+        q(0.99),
+        q(0.999),
+        q(1.0)
+    );
     Ok(())
 }

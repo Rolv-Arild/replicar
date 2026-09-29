@@ -2,6 +2,35 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## Exact whole-tick lag chains (2026-09-29)
+
+**Problem.** Position p90 stayed near 13 UU in every category of the budget and the ball in free flight still showed p90 7.3 UU, which I attributed to lag inference. `audit_lag_accuracy replays/train` checks that against RocketSim's exact whole-tick identification on 105,360 clean free-flight ball frame pairs: the tick count implied by the inferred chain lags was exactly right for only **91.1%** of pairs (off by one tick for 8.6%, by two for 0.2%). Physical tick differences between packets are integers, so those errors were an artifact of rounding continuous, noisy lag estimates independently.
+
+**Measured basis for the fix.** The motion-based interval estimate is very close to the exact whole tick count: ball |estimate - exact k| p50/p90/p99/p99.9/max = 0.001/0.006/0.016/0.029/1.291 ticks (one outlier), airborne cars (5,536 exact fits) 0.004/0.016/0.045/0.068/0.094. So an estimate more than 0.25 tick from an integer is not reliable, and otherwise it can be snapped.
+
+**Method (`exact_tick_lag_chains`, default on; `--no-exact-tick-lag-chains`).** `chain_packet_lags_exact` snaps every chained interval to an integer (pairs more than 0.25 tick from one end the run), so each packet's physical tick is `S = S0 + K` with integer `K` and lag differences are exact. A packet was generated no later than its frame time and no earlier than the previous frame's time, so on the integer timeline `tl(previous) <= S <= tl(frame)`; a run ends when no integer `S0` satisfies this for every packet (a mistaken interval shows up this way). Within the feasible starts, `S0` is the one that violates the real-time window `0 <= T - S <= window` least (ties to the middle), and the applied lag is the integer `tl(frame) - S`. A unit test with whole-tick synthetic physics recovers every lag exactly, rejects fractional lags, and checks the withheld-frame barrier.
+
+Variants tried on train (ball |k'-k| = 0 share; car position p50/p90 UU): frame-integer chains centered on the feasible interval 99.6%, 0.223/5.566; hard real-time integer feasibility (runs cut whenever no integer fits with 0.15 tick slack) 96.6%, 0.284/10.737, worse because the window model is slightly loose and each cut loses the exact chain; no cuts at all (min-violation start only) 98.8%, 0.243/6.855, because one mistaken interval contaminates the rest of a run; **integer-timeline cuts plus min-violation start (default) 99.6%, 0.222/5.489**. The absolute tick cannot be checked with residual metrics (they are relative); the min-violation rule avoids the systematic one-tick shift that centering an interval about one tick wide can introduce, and the assigned lags come out spread over 0-4 ticks (about 10/33/29/18/10% for the ball on one replay, mean 1.85).
+
+One-step pre-correction error, RocketSim p50 / p90 / p99 (60/60 replays each, zero failures, same samples):
+
+| Split | Field | Before | After (default) |
+| --- | --- | --- | --- |
+| train | ball position UU | 0.005 / 10.208 / 25.903 | 0.005 / **0.009** / 19.231 |
+| train | ball rotation deg | 0.000 / 2.782 / 5.729 | 0.000 / **0.028** / 4.372 |
+| train | ball velocity UU/s | 0.010 / 5.443 / 1101.572 | 0.010 / **0.014** / 1073.418 |
+| train | car position UU | 0.428 / 15.170 / 38.274 | 0.222 / **5.489** / 37.342 |
+| train | car velocity UU/s | 7.400 / 89.100 / 567.531 | 5.875 / 87.378 / 566.508 |
+| train | car rotation deg | 0.601 / 3.654 / 11.998 | 0.468 / 3.421 / 11.804 |
+| validation | ball position UU | 0.006 / 13.862 / 26.504 | 0.005 / **0.011** / 20.434 |
+| validation | car position UU | 0.667 / 16.602 / 38.320 | 0.222 / **5.513** / 37.372 |
+| validation | car velocity UU/s | 8.268 / 89.895 / 559.008 | 5.846 / 87.810 / 557.026 |
+| validation | car rotation deg | 0.655 / 3.693 / 11.988 | 0.460 / 3.402 / 11.770 |
+
+Per replay (improved/worse/tied): car position p50 and p90 60/0/0 in both splits, p99 43/16/1 (train) and 49/11/0 (validation); ball position p50/p90/p99 60/0/0 in both splits (59/1 on validation p99); car rotation p50 60/0 and p90 58/2 (train), 60/0 and 56/4 (validation); car velocity p50 60/0 in both. The lag inference remains offline reconstruction; masked prediction is unchanged in method but its aligned targets are now more exact: validation masked car position p50/p90 at horizon 1 fall from 2.365/18.993 to 0.734/16.962 UU and at horizon 4 from 7.527/22.694 to 3.640/20.478 UU (train h4 7.361/23.359 to 4.294/20.926), with rotation p50 h1 1.129 to 0.978 deg and no material tail change. So the true four-frame (133 ms) forward position error of the causal model is about 3.6-4.3 UU at the median.
+
+**What is left.** The clean budget (chain-lag packets) now has ball residuals essentially exact except in contact: ball position p90 0.0 overall, and **ball near a car holds 66% of ball position and 92% of ball velocity squared error** (p99 29.6 UU, velocity p90 52 UU/s). For cars, position p50/p90/p99 0.2/4.3/28.7 UU. Next: car-ball contacts, jump activity (18% of velocity error), ground driving and the flip start tick. Reproduce: `audit_lag_accuracy replays/train [--no-exact-tick-lag-chains]`, `audit_tick_integrality`, `audit_car_tick_integrality` (interval accuracy), `evaluate_corpus`, `error_budget`. `replays/test` remains sealed.
+
 ## Flip-cancel inference (2026-09-29)
 
 **Problem.** Flips in the replays fade their pitch component at broad times because players cancel them (opposite pitch input); pitch is not replicated, so the converter never supplied the cancel and RocketSim's flip kept its pitch torque for the whole 0.65 s. The aerial inverse skipped every dodge interval. Dodge windows held 74% of car rotation squared error (median 6.3 deg) and 60% of angular-velocity error.

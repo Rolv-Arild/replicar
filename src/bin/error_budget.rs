@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
+    options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     let mut skipped = 0usize;
