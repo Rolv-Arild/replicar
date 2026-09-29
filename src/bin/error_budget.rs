@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
-    options.infer_dodge_start = env::args_os().any(|arg| arg == "--infer-dodge-start");
+    options.infer_dodge_start = !env::args_os().any(|arg| arg == "--no-infer-dodge-start");
     options.lookahead_ground_controls =
         !env::args_os().any(|arg| arg == "--no-lookahead-ground-controls");
     options.fit_ground_control_timing =
