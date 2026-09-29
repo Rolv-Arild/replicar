@@ -1102,6 +1102,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("--air-lookahead-refine requires an iteration count")?
                 .to_string_lossy()
                 .parse()?;
+        } else if arg == "--persist-past-air-controls" {
+            options.persist_past_air_controls = true;
+        } else if arg == "--air-persist-seconds" {
+            options.air_persist_max_seconds = args
+                .next()
+                .ok_or("--air-persist-seconds requires a duration")?
+                .to_string_lossy()
+                .parse()?;
+        } else if arg == "--air-persist-min-control" {
+            options.air_persist_min_control = args
+                .next()
+                .ok_or("--air-persist-min-control requires a magnitude")?
+                .to_string_lossy()
+                .parse()?;
+        } else if arg == "--air-persist-gain" {
+            options.air_persist_gain = args
+                .next()
+                .ok_or("--air-persist-gain requires a scale")?
+                .to_string_lossy()
+                .parse()?;
+        } else if arg == "--infer-air-roll-from-handbrake" {
+            options.infer_air_roll_from_handbrake = true;
+        } else if arg == "--no-infer-air-roll-from-handbrake" {
+            options.infer_air_roll_from_handbrake = false;
+        } else if arg == "--no-persist-past-air-controls" {
+            options.persist_past_air_controls = false;
         } else if arg == "--air-lookahead-seconds" {
             options.air_lookahead_max_seconds = args
                 .next()
@@ -1125,7 +1151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {

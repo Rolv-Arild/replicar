@@ -2,6 +2,42 @@
 
 Last updated: 2026-09-29. These are development measurements, not a final accuracy claim. Current reviewed baseline machine-readable reports are `target/train-reviewed.json` and `target/validation-reviewed.json`; the latest optional low-air gate reports are `target/train-low-air-cap-gated.json` and `target/validation-low-air-cap-gated.json`. Packet timing reports are `target/train-packet-timing.json` and `target/validation-packet-timing.json`. Older experiment reports are retained under `target/*-conversion-metrics*.json`. Each evaluator report includes replay SHA-256 values, settings, errors, and per-game-size aggregates. No `test` replay has been opened or converted.
 
+## Causal past-control persistence and handbrake air roll (2026-09-29)
+
+Two changes target *masked* (causal) prediction, which the gap-spanning inverse above leaves unchanged. Both are enabled by default; `--no-infer-air-roll-from-handbrake` and `--no-persist-past-air-controls` restore the previous behavior (verified: the two flags together reproduce the earlier default report exactly).
+
+**1. Handbrake air roll.** When airborne with the replicated handbrake held, steer now drives RocketSim `roll` instead of `yaw`. Evidence (five train replays, 13,426 airborne samples with an inferred pitch/roll control and |steer| >= 0.3): with handbrake held (1,683 samples) steer correlates with the span-inferred roll at r = 0.641 and yaw at 0.296; without handbrake (11,743) yaw 0.662 and roll 0.126. This matches RL's common "powerslide = air roll" binding. The correlation uses the offline inverse only to establish the direction of the mapping; the control itself uses observed steer and handbrake, which are available inside withheld windows. Alone it improves horizon-four train masked rotation p50/p90/p99 from 3.251/20.859/46.592 to 3.227/20.151/45.784 deg.
+
+**2. Causal persistence.** `past_persisted_air_controls` solves the constant control (same forward-model solver) between the two most recent fresh car angular packets at or before the interval and keeps it for up to 0.15 s after the latest packet, whenever no later bracketing packet is available. It reads nothing after the interval; a unit test shows that adding a later packet leaves the controls at earlier frames unchanged. Persisted values are used only when the larger of |pitch| and |roll| is at least 0.5 (`--air-persist-min-control`), the same altitude guard applies, and dodge/flip intervals are excluded.
+
+Paired train windows (10,052 horizon-four rotation targets, joined by replay hash, actor lifetime and window start; `python/analyze_persisted_air_controls.py`) with **ungated** persistence showed why a magnitude gate is needed. Delta = persistence minus default rotation error at horizon four:
+
+| Persisted max(abs pitch, abs roll) | Windows | Better by >1 deg | Worse by >1 deg | Median / mean delta (deg) |
+| --- | ---: | ---: | ---: | --- |
+| none | 6,664 | 13 | 11 | 0.000 / 0.000 |
+| below 0.3 | 703 | 71 | 202 | +0.150 / +0.611 |
+| 0.3 to 0.7 | 1,364 | 676 | 305 | -0.933 / -2.584 |
+| 0.7 and above | 1,321 | 755 | 297 | -3.352 / -5.710 |
+
+Prior angular speed 5.48 rad/s or higher (the apparent cap) gained most (median -1.757 deg, mean -5.715, 989 better versus 187 worse); 5 to 5.48 rad/s was net harmful (+0.899 mean). Small fitted controls are noise; large ones are sustained inputs. Threshold sweep on **train** (horizon-four rotation p50/p90/p99 deg; roll routing on): no gate 3.305/15.432/39.233, 0.2 3.278/15.296/39.236, 0.3 3.251/15.322/39.236, **0.5 3.189/15.372/39.268**, 0.7 3.185/17.202/42.064. Gain 0.5 without a gate was worse at p50 (3.327) than gain 1 (3.299), and a 0.08 s expiry was similar to 0.15 s, so neither was adopted. The 0.5 threshold was chosen on train before validation was run.
+
+Masked car errors, RocketSim p50 / p90 / p99, previous default (roll routing and persistence off) versus new default. Samples are identical (train 10,120/9,931/9,877/10,053 rotation targets at horizons 1-4; validation 10,405/10,623/10,479/10,401):
+
+| Split / horizon | Rotation deg: previous | Rotation deg: new | Angular rad/s: previous | Angular rad/s: new |
+| --- | --- | --- | --- | --- |
+| train h1 | 1.840/8.994/22.616 | 1.810/7.944/19.691 | 0.415/2.543/5.835 | 0.355/2.260/5.307 |
+| train h2 | 1.872/9.482/23.586 | 1.813/8.012/20.286 | 0.456/2.597/5.947 | 0.408/2.283/5.385 |
+| train h3 | 2.659/15.985/39.032 | 2.595/11.833/34.193 | 0.565/3.194/6.391 | 0.528/2.683/6.008 |
+| train h4 | 3.251/20.859/46.592 | **3.189/15.372/39.268** | 0.580/3.467/6.382 | 0.579/2.972/6.215 |
+| validation h1 | 1.861/8.855/22.029 | 1.832/7.744/19.150 | 0.391/2.517/5.848 | 0.337/2.242/5.462 |
+| validation h2 | 1.850/9.339/23.352 | 1.791/7.830/21.645 | 0.436/2.677/5.941 | 0.392/2.366/5.503 |
+| validation h3 | 2.475/15.155/38.429 | 2.419/11.264/32.836 | 0.516/3.131/6.209 | 0.487/2.661/5.873 |
+| validation h4 | 3.078/20.512/47.126 | **3.013/15.631/41.734** | 0.579/3.511/6.396 | 0.561/3.044/6.174 |
+
+Position is unchanged to within 0.15 UU at every quantile (validation h4 15.967/39.609/76.588 to 15.952/39.587/76.639 UU). The independent mask schedule (`--mask-seed 239847`) agrees: validation h4 rotation 3.130/20.500/47.885 to 3.046/15.156/42.351 deg and angular p50/p90 0.587/3.487 to 0.574/2.960; train h4 3.324/21.430/46.687 to 3.251/15.917/41.289 deg. Horizon-four rotation by validation game size (p50/p90/p99): 1v1 4.142/25.089/47.902 to 3.938/19.773/44.102, 2v2 3.028/20.812/48.140 to 2.924/16.235/42.626, 3v3 2.899/18.923/45.813 to 2.850/13.962/39.851; train sizes improve likewise (1v1 4.661/28.164/52.239 to 4.530/21.202/42.746). Per replay at horizon four, rotation **p90 improved in 60/60 train and 60/60 validation replays**. Rotation **p50 is mixed per replay**: improved/worse/tied 33/19/8 on train (largest regression 1.078 deg) and 36/16/8 on validation (0.342 deg) even though the pooled p50 improves. Angular p50 was 26/29/5 (train) and 37/18/5 (validation), p90 58/1/1 and 53/4/3 (largest validation regression 1.034 rad/s). Unmasked one-step car error changed slightly and positively (validation rotation 1.721/7.545/19.833 to 1.703/7.382/19.356 deg; linear velocity p99 571.3 to 572.3 UU/s, effectively noise).
+
+This is the first low-air candidate that improves p50, p90 and p99 pooled at every horizon and both mask schedules, unlike the earlier holds and feedback controls. Limits: the masked protocol still supplies observed steer, throttle, handbrake and boost inputs at withheld frames (only physics fields are withheld), persistence assumes a player keeps an input for at most about 0.15 s, per-replay medians are not uniformly better, and the fitted pitch/roll remain RocketSim-equivalent estimates rather than recovered player inputs. `replays/test` remains sealed. Reproduce with `cargo run --release --bin evaluate_corpus -- replays/<split> target/<split>-final.json` (and the two `--no-*` flags for the previous default); for the window table run the ungated variant (`--persist-past-air-controls --air-persist-min-control 0`) and the default with `--rotation-trace` for each, then `python python/analyze_persisted_air_controls.py BASE.jsonl PERSIST.jsonl`.
+
 ## Gap-spanning aerial inverse (2026-09-29)
 
 **Finding.** The offline aerial-control inverse used only the *next replay frame*, but car rigid-body packets usually arrive every 2-3 frames (see the raw-cadence audit). Most airborne intervals therefore kept zero pitch/roll while RocketSim's damping decayed spin the player was actually sustaining, which explains much of the long-standing full-match airborne angular deficit against hold. `span_lookahead_air_controls` now finds the fresh car angular packets that bracket each interval (same actor lifetime and player link, active phase, fresh position above the altitude guard at both ends, no odd dodge counter inside the span) and applies one constant control solved over the whole span to every interval inside it. Defaults are now spans up to 4 frames / 0.15 s, one forward-model refinement pass, and the 50-100 UU band included (`--air-lookahead-frames`, `--air-lookahead-seconds`, `--air-lookahead-refine`, `--no-infer-transition-air-lookahead`; `--air-lookahead-frames 1 --air-lookahead-seconds 0.05 --air-lookahead-refine 0 --no-infer-transition-air-lookahead` reproduces the previous behavior; the one-frame configuration was verified to give an identical train report).

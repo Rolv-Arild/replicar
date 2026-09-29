@@ -63,6 +63,8 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// While airborne with the replicated handbrake held, route steer to roll instead of yaw.
+    pub infer_air_roll_from_handbrake: bool,
     /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
     pub infer_air_controls_from_lookahead: bool,
     /// Longest span, in replay frames, between fresh car angular packets that the offline aerial
@@ -72,6 +74,15 @@ pub struct ConvertOptions {
     pub air_lookahead_max_seconds: f32,
     /// Extra forward-model correction passes for a multi-tick aerial inverse (0 = analytic only).
     pub air_lookahead_refine_iterations: usize,
+    /// Causal: keep the aerial control implied by the two latest fresh car angular packets before
+    /// the interval, when no later packet brackets it. Uses no data from after the interval.
+    pub persist_past_air_controls: bool,
+    /// Longest time after the latest fresh packet for which a past control is kept.
+    pub air_persist_max_seconds: f32,
+    /// Scale applied to persisted pitch, yaw, and roll (1 keeps the fitted control).
+    pub air_persist_gain: f32,
+    /// A past control is persisted only when its larger pitch/roll magnitude reaches this value.
+    pub air_persist_min_control: f32,
     /// Frames whose car/ball packets were withheld by an evaluator. A lookahead span that contains
     /// one would use a packet from after a withheld target, so it is refused.
     #[serde(skip)]
@@ -104,10 +115,15 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
             air_lookahead_max_frames: 4,
             air_lookahead_max_seconds: 0.15,
             air_lookahead_refine_iterations: 1,
+            persist_past_air_controls: true,
+            air_persist_max_seconds: 0.15,
+            air_persist_gain: 1.0,
+            air_persist_min_control: 0.5,
             withheld_frames: None,
             infer_transition_air_lookahead: true,
             compensate_transition_air_damping: false,
@@ -523,6 +539,101 @@ fn span_lookahead_air_controls(
         (dt * 120.0).round().max(1.0) as u32,
         options.air_lookahead_refine_iterations,
     ))
+}
+
+/// Causal aerial controls for the interval starting at `index`: the constant control that carried
+/// the car from its second-latest to its latest fresh angular packet, both at or before `index`.
+/// Nothing after `index` is read, so it is valid for prediction across withheld packets.
+fn past_persisted_air_controls(
+    observations: &ObservedReplay,
+    index: usize,
+    car: &observations::Car,
+    min_z: f32,
+    options: &ConvertOptions,
+) -> Option<AirControls> {
+    let ang1 = car.body.angular_velocity_replay_units.as_ref()?;
+    let end = ang1.frame;
+    if end == 0
+        || end > index
+        || !car
+            .body
+            .position
+            .as_ref()
+            .is_some_and(|p| p.frame == end && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let end_frame = observations.frames.get(end)?;
+    let elapsed = observations.frames.get(index)?.time - end_frame.time;
+    if !(0.0..=options.air_persist_max_seconds).contains(&elapsed) {
+        return None;
+    }
+    let same_car = |candidate: &&observations::Car| {
+        candidate.actor_id == car.actor_id
+            && candidate.actor_created_frame == car.actor_created_frame
+            && candidate.player_key == car.player_key
+            && candidate.player_link_active == car.player_link_active
+    };
+    let active = |frame: &observations::Frame| {
+        frame
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let before = observations
+        .frames
+        .get(end - 1)?
+        .cars
+        .iter()
+        .find(same_car)?;
+    let ang0 = before.body.angular_velocity_replay_units.as_ref()?;
+    let rot0 = before.body.rotation_xyzw.as_ref()?;
+    let start = ang0.frame;
+    if start >= end
+        || rot0.frame != start
+        || !before
+            .body
+            .position
+            .as_ref()
+            .is_some_and(|p| p.frame == start && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let dt = end_frame.time - observations.frames.get(start)?.time;
+    if !(dt > 0.0 && dt <= options.air_lookahead_max_seconds) {
+        return None;
+    }
+    for frame_index in start..=end {
+        let frame = &observations.frames[frame_index];
+        let candidate = frame.cars.iter().find(same_car)?;
+        if !active(frame)
+            || (frame_index > start
+                && candidate
+                    .inputs
+                    .dodge_active_raw
+                    .as_ref()
+                    .is_some_and(|d| d.frame == frame_index && d.value % 2 == 1))
+        {
+            return None;
+        }
+    }
+    let q0 = quaternion(rot0.value)?;
+    let solved = solve_span_air_controls(
+        Mat3A::from_quat(q0),
+        vec3(ang0.value) * 0.01,
+        vec3(ang1.value) * 0.01,
+        (dt * 120.0).round().max(1.0) as u32,
+        options.air_lookahead_refine_iterations,
+    );
+    if solved.pitch.abs().max(solved.roll.abs()) < options.air_persist_min_control {
+        return None;
+    }
+    let gain = options.air_persist_gain;
+    Some(AirControls {
+        pitch: solved.pitch * gain,
+        yaw: solved.yaw * gain,
+        roll: solved.roll * gain,
+    })
 }
 
 /// An intentionally narrow causal ablation. The current replay angular packet is not read.
@@ -1266,6 +1377,26 @@ pub fn convert_observations_with(
             }
 
             if !air_controls_applied
+                && options.persist_past_air_controls
+                && airborne
+                && !dodge_jump_control
+                && active
+            {
+                if let Some(solved) = past_persisted_air_controls(
+                    observations,
+                    frame_idx,
+                    car,
+                    min_lookahead_z,
+                    options,
+                ) {
+                    controls.pitch = solved.pitch;
+                    controls.yaw = solved.yaw;
+                    controls.roll = solved.roll;
+                    air_controls_applied = true;
+                }
+            }
+
+            if !air_controls_applied
                 && options.compensate_transition_air_damping
                 && airborne
                 && !dodge_jump_control
@@ -1295,7 +1426,11 @@ pub fn convert_observations_with(
                 }
             }
             if !air_controls_applied && options.infer_air_steer_controls && airborne {
-                controls.yaw = controls.steer;
+                if options.infer_air_roll_from_handbrake && controls.handbrake {
+                    controls.roll = controls.steer;
+                } else {
+                    controls.yaw = controls.steer;
+                }
             }
             if dodge_jump_control {
                 controls.jump = true;
@@ -1685,6 +1820,22 @@ mod tests {
         assert_eq!(yaw, 0.75);
         assert_eq!(roll, 0.0);
 
+        // Handbrake held in the air turns steer into roll.
+        let mut rolling = car.clone();
+        rolling.inputs.handbrake = Some(Value {
+            value: true,
+            frame: 0,
+            source: Source::Replay,
+        });
+        let out_roll = convert_observations(make_replay(rolling.clone()), &options).unwrap();
+        let roll_controls = out_roll.frames[0].state.cars[0].1.controls;
+        assert_eq!((roll_controls.yaw, roll_controls.roll), (0.0, 0.75));
+        let mut no_roll = options.clone();
+        no_roll.infer_air_roll_from_handbrake = false;
+        let out_no_roll = convert_observations(make_replay(rolling), &no_roll).unwrap();
+        let no_roll_controls = out_no_roll.frames[0].state.cars[0].1.controls;
+        assert_eq!((no_roll_controls.yaw, no_roll_controls.roll), (0.75, 0.0));
+
         // When option disabled, yaw remains zero
         options.infer_air_steer_controls = false;
         let out_disabled = convert_observations(make_replay(car), &options).unwrap();
@@ -1961,6 +2112,51 @@ mod tests {
         let mut legacy = ConvertOptions::default();
         legacy.air_lookahead_refine_iterations = 0;
         assert!(pitch(&replay, &legacy, 0) > 0.3);
+    }
+
+    #[test]
+    fn persisted_air_controls_use_only_packets_at_or_before_the_interval() {
+        let dt = 1.0 / 30.0;
+        // Fresh packets at frames 0 and 2 imply a strong pitch that persists over stale frames.
+        let past_only = span_test_replay(&[0, 2], 5, dt);
+        // A later packet at frame 4 must not change controls chosen for frames 2 and 3.
+        let with_future = span_test_replay(&[0, 2, 4], 5, dt);
+        let mut options = ConvertOptions::default();
+        options.infer_air_controls_from_lookahead = false;
+        let pitches = |replay: &ObservedReplay, options: &ConvertOptions| {
+            convert_observations(replay.clone(), options)
+                .unwrap()
+                .frames
+                .iter()
+                .map(|frame| frame.state.cars[0].1.controls.pitch)
+                .collect::<Vec<_>>()
+        };
+        let base = pitches(&past_only, &options);
+        let future = pitches(&with_future, &options);
+        assert!(base[2] > 0.5 && base[3] > 0.5, "persisted pitch {base:?}");
+        assert_eq!(
+            base[..4],
+            future[..4],
+            "later packets must not alter earlier controls"
+        );
+        assert_eq!(base[0], 0.0, "the first span has no earlier packet pair");
+
+        let mut off = options.clone();
+        off.persist_past_air_controls = false;
+        assert_eq!(pitches(&past_only, &off)[3], 0.0);
+
+        let mut expiring = options.clone();
+        expiring.air_persist_max_seconds = 0.05;
+        let expired = pitches(&past_only, &expiring);
+        assert!(expired[3] > 0.5 && expired[4] == 0.0, "expiry {expired:?}");
+        assert!(
+            base[4] > 0.5,
+            "default keeps the control through 0.067 s: {base:?}"
+        );
+
+        let mut strict = options.clone();
+        strict.air_persist_min_control = 1.1;
+        assert_eq!(pitches(&past_only, &strict)[2], 0.0);
     }
 
     #[test]
