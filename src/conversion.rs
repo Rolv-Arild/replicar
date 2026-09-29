@@ -63,6 +63,10 @@ pub struct ConvertOptions {
     pub sync_boost_pad_pickups: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
+    /// Offline: fit the physical start tick of each dodge (and its pitch cancel) by simulating
+    /// candidates against the next fresh car packet, and trigger the dodge at that tick instead of
+    /// at the frame time of its counter.
+    pub infer_dodge_start: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -142,6 +146,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
+            infer_dodge_start: false,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: true,
             limit_reported_velocities: true,
@@ -210,6 +215,10 @@ pub struct Diagnostics {
     pub ball_lag_frames: usize,
     /// Simulated frames with an inferred car packet lag (`infer_packet_lag`).
     pub car_lag_frames: usize,
+    /// Dodge activations (dodge counter turning odd with a fresh torque) seen while simulating.
+    pub dodge_activations: usize,
+    /// Dodge start ticks fitted against a later packet (`infer_dodge_start`).
+    pub dodge_starts_fitted: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1561,9 +1570,45 @@ pub fn step_tick_with_hit_impulse(arena: &mut Arena, apply_hit_impulse: bool) ->
     events
 }
 
-fn step_ticks(arena: &mut Arena, ticks: u64, apply_hit_impulse: bool, events: &mut Vec<SimEvent>) {
+/// A dodge scheduled at tick granularity: `jump` is pressed with the dodge direction on the tick
+/// numbered `start_tick`, and from the next tick to `end_tick` the pitch cancel is held (opposite
+/// pitch input, with the sign of the flip's relative pitch torque). `base` carries the other
+/// controls.
+#[derive(Debug, Clone, Copy)]
+struct PendingDodge {
+    slot: usize,
+    start_tick: u64,
+    end_tick: u64,
+    pitch: f32,
+    yaw: f32,
+    cancel: f32,
+    base: CarControls,
+}
+
+fn step_ticks(
+    arena: &mut Arena,
+    ticks: u64,
+    apply_hit_impulse: bool,
+    pending: &mut Vec<PendingDodge>,
+    events: &mut Vec<SimEvent>,
+) {
     for _ in 0..ticks {
         let arena_tick = arena.tick_count() + 1;
+        pending.retain(|dodge| dodge.end_tick >= arena_tick);
+        for dodge in pending.iter() {
+            let mut controls = dodge.base;
+            controls.jump = false;
+            if arena_tick == dodge.start_tick {
+                controls.jump = true;
+                controls.pitch = dodge.pitch;
+                controls.yaw = dodge.yaw;
+                arena.set_car_controls(dodge.slot, controls);
+            } else if arena_tick > dodge.start_tick {
+                let sign = arena.get_car_state(dodge.slot).flip_rel_torque.y.signum();
+                controls.pitch = dodge.cancel * sign;
+                arena.set_car_controls(dodge.slot, controls);
+            }
+        }
         let tick_events = step_tick_with_hit_impulse(arena, apply_hit_impulse);
         events.extend(
             tick_events
@@ -1681,6 +1726,207 @@ fn fit_flip_cancel(
     None
 }
 
+/// A dodge start plan: press `jump` with the dodge direction `start_offset` ticks after the current
+/// packet, holding `cancel` of the flip's pitch torque cancelled until `duration` ticks after it.
+struct DodgePlan {
+    activation_frame: usize,
+    start_offset: u64,
+    duration: u64,
+    pitch: f32,
+    yaw: f32,
+    cancel: f32,
+}
+
+/// Fits when a dodge physically started. Given a fresh airborne car packet at `index` and a dodge
+/// counter that turns odd (with a fresh `DodgeTorque`) before the next fresh car packet, every start
+/// tick between the two packets is simulated in a scratch arena and the one whose position and
+/// velocity best match the later packet wins; the pitch cancel is then chosen from its angular
+/// velocity. Uses a later packet (offline reconstruction); spans with a withheld or inactive frame
+/// are refused.
+#[allow(clippy::too_many_arguments)]
+fn fit_dodge_start(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    base_controls: &CarControls,
+    lag_a: u64,
+    scratch: &mut Arena,
+) -> Option<DodgePlan> {
+    let frames = &observations.frames;
+    let ang0 = car.body.angular_velocity_replay_units.as_ref()?;
+    if ang0.frame != index || state.is_on_ground {
+        return None;
+    }
+    let counter = car.inputs.dodge_active_raw.as_ref()?.value;
+    if counter % 2 == 1 {
+        return None;
+    }
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    let same_car = |candidate: &&observations::Car| {
+        candidate.actor_id == car.actor_id
+            && candidate.actor_created_frame == car.actor_created_frame
+            && candidate.player_key == car.player_key
+    };
+    let last = (index + 14).min(frames.len() - 1);
+    // Activation: the first frame whose fresh dodge counter is odd with a fresh torque.
+    let mut activation = None;
+    for g in index + 1..=last {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        if let (Some(dodge), Some(torque)) = (
+            other
+                .inputs
+                .dodge_active_raw
+                .as_ref()
+                .filter(|d| d.frame == g),
+            other
+                .inputs
+                .dodge_torque_replay_units
+                .as_ref()
+                .filter(|t| t.frame == g),
+        ) {
+            if dodge.value % 2 == 1 {
+                activation = Some((g, torque.value));
+                break;
+            }
+        }
+    }
+    let (activation_frame, torque) = activation?;
+    // Plan only from the last fresh packet before the activation: a nearer packet would reset the
+    // state under a plan that ignores it.
+    for g in index + 1..activation_frame {
+        let other = frames[g].cars.iter().find(same_car)?;
+        if other.body.position.as_ref().is_some_and(|p| p.frame == g) {
+            return None;
+        }
+    }
+    // The later packet: first fresh position, velocity and angular velocity at or after activation.
+    let mut later = None;
+    for g in activation_frame..=(activation_frame + 6).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            return None;
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        let b = &other.body;
+        if let (Some(p), Some(v), Some(w)) = (
+            b.position.as_ref().filter(|x| x.frame == g),
+            b.linear_velocity.as_ref().filter(|x| x.frame == g),
+            b.angular_velocity_replay_units
+                .as_ref()
+                .filter(|x| x.frame == g),
+        ) {
+            later = Some((g, vec3(p.value), vec3(v.value), vec3(w.value) * 0.01));
+            break;
+        }
+    }
+    let (b_frame, target_pos, target_vel, target_omega) = later?;
+    let lag_b = match packet_lags {
+        Some(lags) => lags
+            .car_actor
+            .get(&(car.actor_id, car.actor_created_frame, b_frame))
+            .copied()
+            .or(lags.cars[b_frame])
+            .map_or(
+                (timeline(b_frame) - timeline(b_frame - 1)).max(0) / 2,
+                |lag| lag.round().max(0.0) as i64,
+            ),
+        None => 0,
+    };
+    let ticks = (timeline(b_frame) - lag_b) - (timeline(index) - lag_a as i64);
+    if !(2..=30).contains(&ticks) {
+        return None;
+    }
+    let ticks = ticks as u64;
+    let [tx, ty, _] = torque;
+    let (pitch, yaw) = ((-ty / 2.24).clamp(-1.0, 1.0), (-tx / 2.60).clamp(-1.0, 1.0));
+    if (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
+        return None;
+    }
+    let mut start = *state;
+    start.has_jumped = true;
+    start.is_jumping = false;
+    start.air_time_since_jump = start.air_time_since_jump.max(0.05);
+    let mut base = *base_controls;
+    base.jump = false;
+    // The path with no dodge, saved tick by tick, so each candidate resumes from its start tick.
+    let mut path = vec![start];
+    scratch.set_car_state(0, start);
+    scratch.set_car_controls(0, base);
+    for _ in 0..ticks {
+        scratch.step_tick();
+        path.push(*scratch.get_car_state(0));
+    }
+    let run = |scratch: &mut Arena, dodge_tick: u64, cancel: f32| -> CarState {
+        scratch.set_car_state(0, path[dodge_tick as usize - 1]);
+        for tick in dodge_tick..=ticks {
+            let mut controls = base;
+            if tick == dodge_tick {
+                controls.jump = true;
+                controls.pitch = pitch;
+                controls.yaw = yaw;
+            } else {
+                let sign = scratch.get_car_state(0).flip_rel_torque.y.signum();
+                controls.pitch = cancel * sign;
+            }
+            scratch.set_car_controls(0, controls);
+            scratch.step_tick();
+        }
+        let mut end = *scratch.get_car_state(0);
+        let speed = end.phys.ang_vel.length();
+        if speed > 5.5 {
+            end.phys.ang_vel *= 5.5 / speed;
+        }
+        end
+    };
+    let mut best: Option<(u64, f32)> = None;
+    for dodge_tick in 1..=ticks {
+        let end = run(scratch, dodge_tick, 0.0);
+        let error =
+            (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
+        if best.is_none_or(|(_, e)| error < e - 1e-4) {
+            best = Some((dodge_tick, error));
+        }
+    }
+    let (dodge_tick, _) = best?;
+    let mut best_cancel: Option<(f32, f32)> = None;
+    for step in 0..=4 {
+        let cancel = step as f32 * 0.25;
+        let end = run(scratch, dodge_tick, cancel);
+        let error = (end.phys.ang_vel - target_omega).length();
+        if best_cancel.is_none_or(|(_, e)| error < e - 1e-4) {
+            best_cancel = Some((cancel, error));
+        }
+    }
+    Some(DodgePlan {
+        activation_frame,
+        start_offset: dodge_tick,
+        duration: ticks,
+        pitch,
+        yaw,
+        cancel: best_cancel?.0,
+    })
+}
+
 /// Parse and convert a soccar replay. The returned frame and observation vectors align by index.
 pub fn convert_bytes(
     bytes: &[u8],
@@ -1751,7 +1997,9 @@ pub fn convert_observations_with(
     let mut previous_tick = 0;
     let mut previous_active = false;
     let mut ball_initialized = false;
-    let mut flip_scratch = options.infer_flip_cancel.then(|| {
+    let mut pending_dodges: Vec<PendingDodge> = Vec::new();
+    let mut handled_dodges: HashSet<(i32, usize, usize)> = HashSet::new();
+    let mut flip_scratch = (options.infer_flip_cancel || options.infer_dodge_start).then(|| {
         let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
         scratch_config.rng_seed = Some(options.seed);
         let mut scratch = Arena::new_with_config(scratch_config);
@@ -1882,6 +2130,7 @@ pub fn convert_observations_with(
                 &mut arena,
                 stepped,
                 options.apply_hit_extra_impulse,
+                &mut pending_dodges,
                 &mut events,
             );
             if stepped > 0 && options.limit_reported_velocities {
@@ -2038,7 +2287,22 @@ pub fn convert_observations_with(
                             Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
                             None => raw % 2 == 1,
                         };
-                        if activated {
+                        if activated
+                            && car
+                                .inputs
+                                .dodge_torque_replay_units
+                                .as_ref()
+                                .is_some_and(|torque| torque.frame == frame.index)
+                        {
+                            diagnostics.dodge_activations += 1;
+                        }
+                        if activated
+                            && !handled_dodges.contains(&(
+                                car.actor_id,
+                                car.actor_created_frame,
+                                frame.index,
+                            ))
+                        {
                             if let Some(torque) = car
                                 .inputs
                                 .dodge_torque_replay_units
@@ -2258,6 +2522,47 @@ pub fn convert_observations_with(
                     controls.pitch = dodge_pitch_control;
                     controls.yaw = dodge_yaw_control;
                 }
+                if options.infer_dodge_start
+                    && airborne
+                    && !dodge_jump_control
+                    && !state.is_flipping
+                    && active
+                    && !new_lifetime
+                    && !pending_dodges.iter().any(|dodge| dodge.slot == slot)
+                {
+                    if let Some(scratch) = flip_scratch.as_mut() {
+                        if let Some(plan) = fit_dodge_start(
+                            observations,
+                            options,
+                            &packet_lags,
+                            first_time,
+                            frame_idx,
+                            car,
+                            &state,
+                            &controls,
+                            car_lag(car),
+                            scratch,
+                        ) {
+                            let now = arena.tick_count();
+                            pending_dodges.push(PendingDodge {
+                                slot,
+                                start_tick: now + plan.start_offset,
+                                end_tick: now + plan.duration,
+                                pitch: plan.pitch,
+                                yaw: plan.yaw,
+                                cancel: plan.cancel,
+                                base: controls,
+                            });
+                            handled_dodges.insert((
+                                car.actor_id,
+                                car.actor_created_frame,
+                                plan.activation_frame,
+                            ));
+                            diagnostics.dodge_starts_fitted += 1;
+                            flip_last.insert((car.actor_id, car.actor_created_frame), plan.cancel);
+                        }
+                    }
+                }
                 arena.set_car_controls(slot, controls);
             }
         }
@@ -2265,6 +2570,7 @@ pub fn convert_observations_with(
             &mut arena,
             remaining,
             options.apply_hit_extra_impulse,
+            &mut pending_dodges,
             &mut events,
         );
         if remaining > 0 && options.limit_reported_velocities {

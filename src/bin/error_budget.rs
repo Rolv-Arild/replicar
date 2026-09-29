@@ -71,15 +71,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
+    options.infer_dodge_start = env::args_os().any(|arg| arg == "--infer-dodge-start");
     options.apply_hit_extra_impulse = !env::args_os().any(|arg| arg == "--no-apply-hit-impulse");
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    // Parity of each car's dodge counter at its previous residual, to spot the first packet after
+    // an activation.
+    let mut previous_dodge_parity: std::collections::HashMap<i32, bool> = Default::default();
+    let mut previous_altitude: std::collections::HashMap<i32, f32> = Default::default();
     let mut skipped = 0usize;
+    let (mut activations, mut fitted) = (0usize, 0usize);
     let mut used = 0usize;
 
     for replay_path in replay_paths(&path)? {
         let output = convert_bytes(&fs::read(&replay_path)?, &options)?;
+        activations += output.diagnostics.dodge_activations;
+        fitted += output.diagnostics.dodge_starts_fitted;
         let frames = &output.observations.frames;
         for residual in &output.position_residuals {
             let converted = &output.frames[residual.frame];
@@ -114,8 +122,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                         || odd(&c.inputs.dodge_active_raw)
                         || odd(&c.inputs.flip_car_active_raw)
                 };
+                let dodge_odd_now = odd(&car.inputs.dodge_active_raw);
+                let first_after_activation =
+                    dodge_odd_now && previous_dodge_parity.get(&actor).copied() == Some(false);
+                previous_dodge_parity.insert(actor, dodge_odd_now);
+                let previous_z =
+                    previous_altitude.insert(actor, residual.altitude_z.unwrap_or(f32::NAN));
                 let flipping = active_counter(car) || previous.is_some_and(active_counter);
-                let subtype = if odd(&car.inputs.dodge_active_raw) {
+                let subtype = if first_after_activation {
+                    match previous_z {
+                        Some(z) if z < 50.0 => "CAR first packet after dodge, previous z < 50",
+                        Some(z) if z < 120.0 => "CAR first packet after dodge, previous z 50-120",
+                        Some(z) if z < 300.0 => "CAR first packet after dodge, previous z 120-300",
+                        Some(z) if z >= 300.0 => "CAR first packet after dodge, previous z >= 300",
+                        _ => "CAR first packet after dodge, previous z unknown",
+                    }
+                } else if odd(&car.inputs.dodge_active_raw) {
                     "CAR dodge counter odd"
                 } else if odd(&car.inputs.double_jump_active_raw) {
                     "CAR double-jump counter odd"
@@ -199,6 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("residuals used {used}, skipped without a chain lag {skipped}");
+    println!("dodge activations {activations}, start ticks fitted {fitted}");
     let sum_sq = |values: &[f32]| values.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
     let totals: BTreeMap<&str, [f64; 4]> = ["CAR all", "BALL all"]
         .iter()
