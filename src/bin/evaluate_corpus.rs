@@ -1079,6 +1079,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_air_controls_from_lookahead = true;
         } else if arg == "--infer-transition-air-lookahead" {
             options.infer_transition_air_lookahead = true;
+        } else if arg == "--no-infer-transition-air-lookahead" {
+            options.infer_transition_air_lookahead = false;
         } else if arg == "--compensate-transition-air-damping" {
             options.compensate_transition_air_damping = true;
         } else if arg == "--hold-low-air-angular" {
@@ -1088,6 +1090,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.gate_low_air_angular_by_speed = true;
         } else if arg == "--feedback-low-air-angular" {
             options.feedback_low_air_angular = true;
+        } else if arg == "--air-lookahead-frames" {
+            options.air_lookahead_max_frames = args
+                .next()
+                .ok_or("--air-lookahead-frames requires a frame count")?
+                .to_string_lossy()
+                .parse()?;
+        } else if arg == "--air-lookahead-refine" {
+            options.air_lookahead_refine_iterations = args
+                .next()
+                .ok_or("--air-lookahead-refine requires an iteration count")?
+                .to_string_lossy()
+                .parse()?;
+        } else if arg == "--air-lookahead-seconds" {
+            options.air_lookahead_max_seconds = args
+                .next()
+                .ok_or("--air-lookahead-seconds requires a duration")?
+                .to_string_lossy()
+                .parse()?;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--mask-seed" {
@@ -1105,7 +1125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1241,7 +1261,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     replay_hash,
                 };
                 let masked = masked_observations(&conversion.observations, schedule);
-                match convert_observations(masked, &options) {
+                let mut masked_options = options.clone();
+                masked_options.withheld_frames = Some(std::sync::Arc::new(
+                    (0..masked.frames.len())
+                        .map(|index| schedule.horizon(index).is_some())
+                        .collect(),
+                ));
+                match convert_observations(masked, &masked_options) {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
                         let mut own_masked_kinematics = BTreeMap::new();

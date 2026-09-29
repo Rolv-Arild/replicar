@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use glam::Quat;
 use rocketsim::{
@@ -65,6 +65,17 @@ pub struct ConvertOptions {
     pub infer_air_steer_controls: bool,
     /// Infer aerial pitch, yaw, and roll controls from subsequent observed angular velocity.
     pub infer_air_controls_from_lookahead: bool,
+    /// Longest span, in replay frames, between fresh car angular packets that the offline aerial
+    /// inverse may bridge with one constant control (1 = adjacent frames only).
+    pub air_lookahead_max_frames: usize,
+    /// Longest replay-time span, in seconds, that the aerial inverse may bridge.
+    pub air_lookahead_max_seconds: f32,
+    /// Extra forward-model correction passes for a multi-tick aerial inverse (0 = analytic only).
+    pub air_lookahead_refine_iterations: usize,
+    /// Frames whose car/ball packets were withheld by an evaluator. A lookahead span that contains
+    /// one would use a packet from after a withheld target, so it is refused.
+    #[serde(skip)]
+    pub withheld_frames: Option<Arc<Vec<bool>>>,
     /// Include 50–100 UU airborne packets in the offline aerial inverse diagnostic.
     pub infer_transition_air_lookahead: bool,
     /// Compensate RocketSim air damping in the low-air transition band without future packets.
@@ -94,7 +105,11 @@ impl Default for ConvertOptions {
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
             infer_air_controls_from_lookahead: true,
-            infer_transition_air_lookahead: false,
+            air_lookahead_max_frames: 4,
+            air_lookahead_max_seconds: 0.15,
+            air_lookahead_refine_iterations: 1,
+            withheld_frames: None,
+            infer_transition_air_lookahead: true,
             compensate_transition_air_damping: false,
             hold_low_air_angular: false,
             gate_low_air_angular_by_speed: false,
@@ -274,6 +289,69 @@ pub fn solve_inverse_air_controls(
     AirControls { pitch, yaw, roll }
 }
 
+const AIR_MAX_ANGULAR_SPEED: f32 = 5.5;
+
+/// Integrates RocketSim's air torque and damping for `ticks` 120 Hz ticks under constant controls.
+/// Returns the final world angular velocity. Flips, contact, and boost/throttle effects are absent.
+pub fn air_angular_velocity_forward(
+    rot_mat_start: Mat3A,
+    ang_vel_start: Vec3A,
+    controls: AirControls,
+    ticks: u32,
+) -> Vec3A {
+    const TICK: f32 = 1.0 / 120.0;
+    let mut rot = rot_mat_start;
+    let mut omega = ang_vel_start;
+    for _ in 0..ticks {
+        let dir_pitch = -rot.y_axis;
+        let dir_yaw = rot.z_axis;
+        let dir_roll = -rot.x_axis;
+        let any = controls.pitch != 0.0 || controls.yaw != 0.0 || controls.roll != 0.0;
+        let torque = if any {
+            dir_pitch * (controls.pitch * TORQUE_PITCH)
+                + dir_yaw * (controls.yaw * TORQUE_YAW)
+                + dir_roll * (controls.roll * TORQUE_ROLL)
+        } else {
+            Vec3A::ZERO
+        };
+        let damping = dir_pitch
+            * (dir_pitch.dot(omega) * DAMPING_PITCH * (1.0 - controls.pitch.abs()))
+            + dir_yaw * (dir_yaw.dot(omega) * DAMPING_YAW * (1.0 - controls.yaw.abs()))
+            + dir_roll * (dir_roll.dot(omega) * DAMPING_ROLL);
+        omega += (torque - damping) * TICK;
+        let speed = omega.length();
+        if speed > AIR_MAX_ANGULAR_SPEED {
+            omega *= AIR_MAX_ANGULAR_SPEED / speed;
+        }
+        let step = omega * TICK;
+        if step.length_squared() > 0.0 {
+            rot = Mat3A::from_quat(Quat::from_scaled_axis(step.into())) * rot;
+        }
+    }
+    omega
+}
+
+/// Constant controls over `ticks` that carry `ang_vel_start` to `ang_vel_end`. Starts from the
+/// analytic inverse and applies forward-model corrections (`iterations` = 0 gives the analytic
+/// result over `ticks / 120` seconds).
+pub fn solve_span_air_controls(
+    rot_mat_start: Mat3A,
+    ang_vel_start: Vec3A,
+    ang_vel_end: Vec3A,
+    ticks: u32,
+    iterations: usize,
+) -> AirControls {
+    let dt = ticks as f32 / 120.0;
+    let mut virtual_target = ang_vel_end;
+    let mut controls = solve_inverse_air_controls(rot_mat_start, ang_vel_start, virtual_target, dt);
+    for _ in 0..iterations {
+        let reached = air_angular_velocity_forward(rot_mat_start, ang_vel_start, controls, ticks);
+        virtual_target += ang_vel_end - reached;
+        controls = solve_inverse_air_controls(rot_mat_start, ang_vel_start, virtual_target, dt);
+    }
+    controls
+}
+
 fn vec3(value: [f32; 3]) -> Vec3A {
     Vec3A::new(value[0], value[1], value[2])
 }
@@ -316,6 +394,135 @@ pub fn estimate_car_packet_interval(
         effective_ticks: k,
         scale,
     })
+}
+
+/// Offline aerial controls for the interval starting at `index`. The interval lies inside a span
+/// between two fresh angular packets of the same car actor lifetime; one constant control solved
+/// over the whole span is applied to every interval inside it. Adjacent-frame spans reproduce the
+/// original one-frame lookahead. Uses a packet from after `index`, so it is offline reconstruction.
+fn span_lookahead_air_controls(
+    observations: &ObservedReplay,
+    index: usize,
+    car: &observations::Car,
+    min_z: f32,
+    options: &ConvertOptions,
+) -> Option<AirControls> {
+    let ang0 = car.body.angular_velocity_replay_units.as_ref()?;
+    let rot0 = car.body.rotation_xyzw.as_ref()?;
+    let start = ang0.frame;
+    if start > index
+        || rot0.frame != start
+        || index - start >= options.air_lookahead_max_frames
+        || !car
+            .body
+            .position
+            .as_ref()
+            .is_some_and(|p| p.frame == start && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let same_car = |candidate: &&observations::Car| {
+        candidate.actor_id == car.actor_id
+            && candidate.actor_created_frame == car.actor_created_frame
+            && candidate.player_key == car.player_key
+            && candidate.player_link_active == car.player_link_active
+    };
+    let active = |frame: &observations::Frame| {
+        frame
+            .game_state
+            .as_ref()
+            .is_some_and(|state| state.value == "Active")
+    };
+    let start_frame = observations.frames.get(start)?;
+    if !active(start_frame)
+        || !observations
+            .frames
+            .get(start)?
+            .cars
+            .iter()
+            .any(|c| same_car(&c))
+    {
+        return None;
+    }
+    for earlier in start + 1..=index {
+        let candidate = observations
+            .frames
+            .get(earlier)?
+            .cars
+            .iter()
+            .find(same_car)?;
+        if candidate
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .is_some_and(|d| d.frame == earlier && d.value % 2 == 1)
+        {
+            return None;
+        }
+    }
+    let last = (start + options.air_lookahead_max_frames).min(observations.frames.len() - 1);
+    let mut end = None;
+    for candidate_index in index + 1..=last {
+        let candidate_frame = &observations.frames[candidate_index];
+        if !active(candidate_frame) {
+            return None;
+        }
+        let Some(candidate) = candidate_frame.cars.iter().find(same_car) else {
+            return None;
+        };
+        if candidate
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .is_some_and(|d| d.frame == candidate_index && d.value % 2 == 1)
+        {
+            return None;
+        }
+        if candidate
+            .body
+            .angular_velocity_replay_units
+            .as_ref()
+            .is_some_and(|a| a.frame == candidate_index)
+        {
+            end = Some((candidate_index, candidate));
+            break;
+        }
+    }
+    let (end_index, end_car) = end?;
+    if let Some(withheld) = options.withheld_frames.as_ref() {
+        if (start + 1..end_index).any(|i| withheld.get(i).copied().unwrap_or(false)) {
+            return None;
+        }
+    }
+    let ang1 = end_car.body.angular_velocity_replay_units.as_ref()?;
+    if !end_car
+        .body
+        .position
+        .as_ref()
+        .is_some_and(|p| p.frame == end_index && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let dt = observations.frames[end_index].time - start_frame.time;
+    if !(dt > 0.0 && dt <= options.air_lookahead_max_seconds) {
+        return None;
+    }
+    let q0 = quaternion(rot0.value)?;
+    if options.air_lookahead_refine_iterations == 0 {
+        return Some(solve_inverse_air_controls(
+            Mat3A::from_quat(q0),
+            vec3(ang0.value) * 0.01,
+            vec3(ang1.value) * 0.01,
+            dt,
+        ));
+    }
+    Some(solve_span_air_controls(
+        Mat3A::from_quat(q0),
+        vec3(ang0.value) * 0.01,
+        vec3(ang1.value) * 0.01,
+        (dt * 120.0).round().max(1.0) as u32,
+        options.air_lookahead_refine_iterations,
+    ))
 }
 
 /// An intentionally narrow causal ablation. The current replay angular packet is not read.
@@ -1044,61 +1251,17 @@ pub fn convert_observations_with(
                 && !dodge_jump_control
                 && active
             {
-                if let Some(next_frame) = observations.frames.get(frame_idx + 1) {
-                    let dt = next_frame.time - frame.time;
-                    if dt > 0.0
-                        && dt <= 0.05
-                        && next_frame
-                            .game_state
-                            .as_ref()
-                            .is_some_and(|s| s.value == "Active")
-                    {
-                        if let Some(next_car) = next_frame.cars.iter().find(|c| {
-                            c.actor_id == car.actor_id
-                                && c.actor_created_frame == car.actor_created_frame
-                                && c.player_key == car.player_key
-                                && c.player_link_active == car.player_link_active
-                        }) {
-                            if let (Some(ang1), Some(ang0), Some(rot0)) = (
-                                &next_car.body.angular_velocity_replay_units,
-                                &car.body.angular_velocity_replay_units,
-                                &car.body.rotation_xyzw,
-                            ) {
-                                if ang1.frame == next_frame.index
-                                    && ang0.frame == frame.index
-                                    && rot0.frame == frame.index
-                                    && car.body.position.as_ref().is_some_and(|p| {
-                                        p.frame == frame.index && p.value[2] > min_lookahead_z
-                                    })
-                                    && next_car.body.position.as_ref().is_some_and(|p| {
-                                        p.frame == next_frame.index && p.value[2] > min_lookahead_z
-                                    })
-                                    && !next_car.inputs.dodge_active_raw.as_ref().is_some_and(|d| {
-                                        d.frame == next_frame.index && d.value % 2 == 1
-                                    })
-                                {
-                                    let q0 = Quat::from_xyzw(
-                                        rot0.value[0],
-                                        rot0.value[1],
-                                        rot0.value[2],
-                                        rot0.value[3],
-                                    );
-                                    if q0.is_finite() && q0.length_squared() > 0.5 {
-                                        let solved = solve_inverse_air_controls(
-                                            Mat3A::from_quat(q0.normalize()),
-                                            Vec3A::from_array(ang0.value) * 0.01,
-                                            Vec3A::from_array(ang1.value) * 0.01,
-                                            dt,
-                                        );
-                                        controls.pitch = solved.pitch;
-                                        controls.yaw = solved.yaw;
-                                        controls.roll = solved.roll;
-                                        air_controls_applied = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(solved) = span_lookahead_air_controls(
+                    observations,
+                    frame_idx,
+                    car,
+                    min_lookahead_z,
+                    options,
+                ) {
+                    controls.pitch = solved.pitch;
+                    controls.yaw = solved.yaw;
+                    controls.roll = solved.roll;
+                    air_controls_applied = true;
                 }
             }
 
@@ -1668,6 +1831,136 @@ mod tests {
         let controls0_dis = out_dis.frames[0].state.cars[0].1.controls;
         let pitch0_dis = controls0_dis.pitch;
         assert_eq!(pitch0_dis, 0.0);
+    }
+
+    #[test]
+    fn span_solver_matches_forward_model_and_refinement_helps() {
+        let rot = Mat3A::from_quat(Quat::from_rotation_x(0.2));
+        let omega0 = Vec3A::new(0.3, -0.4, 0.2);
+        let truth = AirControls {
+            pitch: 0.6,
+            yaw: -0.3,
+            roll: 0.4,
+        };
+        let ticks = 12;
+        let omega1 = air_angular_velocity_forward(rot, omega0, truth, ticks);
+        let error = |iterations| {
+            let solved = solve_span_air_controls(rot, omega0, omega1, ticks, iterations);
+            let reached = air_angular_velocity_forward(rot, omega0, solved, ticks);
+            (reached - omega1).length()
+        };
+        assert!(error(0) > 1e-3, "analytic span solve should be approximate");
+        assert!(error(3) < error(0) * 0.1);
+        assert!(error(3) < 5e-3);
+    }
+
+    fn span_test_replay(ang_frames: &[usize], frame_count: usize, dt: f32) -> ObservedReplay {
+        let car_at = |index: usize| {
+            let fresh = ang_frames
+                .iter()
+                .rev()
+                .find(|&&f| f <= index)
+                .copied()
+                .unwrap();
+            let mut car = observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("p1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body::default(),
+                boost: None,
+                boost_raw: None,
+                inputs: observations::Inputs::default(),
+            };
+            let value = |value: [f32; 3]| Value {
+                value,
+                frame: fresh,
+                source: Source::Replay,
+            };
+            car.body.position = Some(value([0.0, 0.0, 400.0]));
+            car.body.rotation_xyzw = Some(Value {
+                value: [0.0, 0.0, 0.0, 1.0],
+                frame: fresh,
+                source: Source::Replay,
+            });
+            let spin = fresh as f32 * -60.0;
+            car.body.angular_velocity_replay_units = Some(value([0.0, spin, 0.0]));
+            car
+        };
+        ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..frame_count)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * dt,
+                    delta: dt,
+                    ball: None,
+                    cars: vec![car_at(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        }
+    }
+
+    #[test]
+    fn lookahead_span_bridges_gap_and_refuses_withheld_or_long_spans() {
+        let dt = 1.0 / 30.0;
+        // Fresh car angular packets at frames 0 and 2; frame 1 carries the stale packet.
+        let replay = span_test_replay(&[0, 2], 3, dt);
+        let pitch = |replay: &ObservedReplay, options: &ConvertOptions, frame: usize| {
+            convert_observations(replay.clone(), options)
+                .unwrap()
+                .frames[frame]
+                .state
+                .cars[0]
+                .1
+                .controls
+                .pitch
+        };
+        let options = ConvertOptions::default();
+        let first = pitch(&replay, &options, 0);
+        assert!(first > 0.3, "span start pitch {first}");
+        assert_eq!(
+            first,
+            pitch(&replay, &options, 1),
+            "one constant control across the gap"
+        );
+
+        let mut adjacent_only = ConvertOptions::default();
+        adjacent_only.air_lookahead_max_frames = 1;
+        adjacent_only.air_lookahead_max_seconds = 0.05;
+        assert_eq!(pitch(&replay, &adjacent_only, 0), 0.0);
+        assert_eq!(pitch(&replay, &adjacent_only, 1), 0.0);
+
+        let mut withheld = ConvertOptions::default();
+        withheld.withheld_frames = Some(Arc::new(vec![false, true, false]));
+        assert_eq!(pitch(&replay, &withheld, 0), 0.0);
+        assert_eq!(pitch(&replay, &withheld, 1), 0.0);
+
+        let mut short = ConvertOptions::default();
+        short.air_lookahead_max_seconds = 0.05;
+        assert_eq!(pitch(&replay, &short, 0), 0.0);
+
+        let mut legacy = ConvertOptions::default();
+        legacy.air_lookahead_refine_iterations = 0;
+        assert!(pitch(&replay, &legacy, 0) > 0.3);
     }
 
     #[test]
