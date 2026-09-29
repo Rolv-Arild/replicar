@@ -20,6 +20,8 @@ These instructions apply throughout this repository. The user wants a reliable c
 
 ## Working practice
 
+- Never modify RocketSim itself; keep the dependency pin and work around differences in this repository's own code. When RocketSim disagrees with exact replay packets (and the cause is not an unobserved input), record it in `ROCKETSIM_NOTES.md` with a reproduction, the RocketSim source location at the pinned revision, the measured effect, the workaround, and a verified/suspected/open status, so it can be passed to the RocketSim developers.
+
 - Start a new branch from the latest reviewed tip for a distinct work stream. Do not return to `master` merely because it is behind. Make naturally segmented commits that include the corresponding plan and results updates. Report branch and commit IDs when handing off.
 - Keep replay files, collision meshes, generated datasets, and reports under ignored local paths such as `target/`; never commit them. Commit reproducible source and the commands needed to regenerate important reports.
 - Run focused Rust tests and the relevant train/validation replay checks for behavioral changes. Use `cargo test --all-targets` before committing a completed implementation step. Leave the working tree clean when practical.
