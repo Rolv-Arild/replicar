@@ -72,6 +72,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
     options.infer_dodge_start = env::args_os().any(|arg| arg == "--infer-dodge-start");
+    options.lookahead_ground_controls =
+        !env::args_os().any(|arg| arg == "--no-lookahead-ground-controls");
     options.apply_hit_extra_impulse = env::args_os().any(|arg| arg == "--apply-hit-impulse");
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");

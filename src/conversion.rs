@@ -67,6 +67,15 @@ pub struct ConvertOptions {
     /// candidates against the next fresh car packet, and trigger the dodge at that tick instead of
     /// at the frame time of its counter.
     pub infer_dodge_start: bool,
+    /// Offline: drive a grounded car with the controls of the frame that ends the interval instead
+    /// of the frame that starts it. A throttle, steer, handbrake or boost change is first seen in
+    /// the frame after it happened, and that frame's state is itself on average 2 ticks (half the
+    /// 0-4 tick lag) older than its time, so the change took effect about `2 + gap / 2` ticks
+    /// before the frame time; the new value is applied from there (`gap / 2 - 2` ticks into the
+    /// interval, at least at its start). Needs the inferred packet lags (the rule is about physical
+    /// ticks; without them every state sits at its frame time) and is not used for a frame withheld
+    /// by an evaluator.
+    pub lookahead_ground_controls: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -147,6 +156,7 @@ impl Default for ConvertOptions {
             sync_boost_pad_pickups: true,
             infer_air_steer_controls: true,
             infer_dodge_start: false,
+            lookahead_ground_controls: true,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
@@ -2172,6 +2182,47 @@ pub fn convert_observations_with(
         phase_lags.sort_unstable_by(|a, b| b.cmp(a));
         phase_lags.dedup();
         let mut remaining = if simulated { gap } else { 0 };
+        let frame_withheld = options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame_idx).copied().unwrap_or(false));
+        if options.lookahead_ground_controls
+            && packet_lags.is_some()
+            && remaining > 0
+            && !frame_withheld
+        {
+            // Controls first seen at this frame act from `gap / 2 - 2` ticks into the interval
+            // that ends at its state (from the start if shorter).
+            let switch = (gap / 2).saturating_sub(2).min(remaining);
+            if switch > 0 {
+                step_ticks(
+                    &mut arena,
+                    switch,
+                    options.apply_hit_extra_impulse,
+                    &mut pending_dodges,
+                    &mut events,
+                );
+                if options.limit_reported_velocities {
+                    limit_reported_velocities(&mut arena, slots.len());
+                }
+                remaining -= switch;
+            }
+            for car in frame_cars.iter().copied() {
+                let Some(&(slot, created)) = actor_slots.get(&car.actor_id) else {
+                    continue;
+                };
+                if created != car.actor_created_frame || !arena.get_car_state(slot).is_on_ground {
+                    continue;
+                }
+                let next = controls_from_observation(car, options);
+                let mut controls = *arena.get_car_controls(slot);
+                controls.throttle = next.throttle;
+                controls.steer = next.steer;
+                controls.handbrake = next.handbrake;
+                controls.boost = next.boost;
+                arena.set_car_controls(slot, controls);
+            }
+        }
         for lag in phase_lags {
             // Advance to this group's packet time (`lag` ticks before the frame time).
             let stepped = remaining - lag.min(remaining);
@@ -3030,6 +3081,113 @@ mod tests {
         let (yaw_dis, roll_dis) = (controls_disabled.yaw, controls_disabled.roll);
         assert_eq!(yaw_dis, 0.0);
         assert_eq!(roll_dis, 0.0);
+    }
+
+    #[test]
+    fn lookahead_ground_controls_drive_the_interval_before_a_frame_and_respect_withholding() {
+        let stamp = |value: f32, frame: usize| {
+            Some(Value {
+                value,
+                frame,
+                source: Source::Replay,
+            })
+        };
+        // A grounded car observed once (frame 0), coasting at 500 UU/s; the throttle is pressed
+        // in frame 2, so the throttle observed at frame 2 acts in the interval before it.
+        let make_car = |frame: usize| observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: Body {
+                position: Some(Value {
+                    value: [0.0, 0.0, 17.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                linear_velocity: Some(Value {
+                    value: [500.0, 0.0, 0.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                rotation_xyzw: Some(Value {
+                    value: [0.0, 0.0, 0.0, 1.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                angular_velocity_replay_units: Some(Value {
+                    value: [0.0, 0.0, 0.0],
+                    frame: 0,
+                    source: Source::Replay,
+                }),
+                ..Body::default()
+            },
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs {
+                throttle: stamp(if frame == 2 { 1.0 } else { 0.0 }, frame),
+                steer: stamp(0.0, frame),
+                handbrake: Some(Value {
+                    value: false,
+                    frame,
+                    source: Source::Replay,
+                }),
+                ..observations::Inputs::default()
+            },
+        };
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..3)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * 4.0 / 120.0,
+                    delta: 4.0 / 120.0,
+                    ball: None,
+                    cars: vec![make_car(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        };
+        let speed_at_last_frame = |options: &ConvertOptions| {
+            let out = convert_observations(replay.clone(), options).unwrap();
+            out.frames[2].state.cars[0].1.phys.vel.x
+        };
+        let mut options = ConvertOptions::default();
+        options.infer_packet_lag = true;
+        options.lookahead_ground_controls = false;
+        let coasting = speed_at_last_frame(&options);
+        options.lookahead_ground_controls = true;
+        let with_lookahead = speed_at_last_frame(&options);
+        assert!(
+            with_lookahead > coasting + 5.0,
+            "the throttle first seen at frame 2 should act before it: {coasting} vs {with_lookahead}"
+        );
+        // A frame withheld by an evaluator is never used to drive the interval before it.
+        options.withheld_frames = Some(Arc::new(vec![false, false, true]));
+        assert_eq!(speed_at_last_frame(&options), coasting);
+        // Without inferred packet lags every state sits at its frame time and the rule is off.
+        options.withheld_frames = None;
+        options.infer_packet_lag = false;
+        let unlagged = speed_at_last_frame(&options);
+        options.lookahead_ground_controls = false;
+        assert_eq!(unlagged, speed_at_last_frame(&options));
     }
 
     #[test]
