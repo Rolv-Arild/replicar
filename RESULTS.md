@@ -55,6 +55,29 @@ With the true state and inputs, RocketSim's ground and air physics reproduce a 4
 
 **Use.** The dump gives true inputs and a 4-tick truth grid, which the corpus lacks: it can score the fits that bridge packets (thin the replay's packets, reconstruct, compare the frames without a packet with the dump), and check the jump, dodge and cancel inputs against the truth. One offline replay of one player, so it validates mechanisms, not absolute numbers for online play.
 
+## One ranked match from two clients (2026-09-30)
+
+**The data.** `replays/2026-04-05_ranked_dual_perspective/`: two replays of the same online ranked 2v2 (score 2-4, same date and map, `Id`s differ per replay; teammates 'Evhon' and 'madih'), saved by the two clients (game build 260316, network version 11; 9,840 and 9,729 frames, 357 s, 30 fps recording; the corpus has no duplicate matches: the header `Id` is unique across all 120 train and validation replays). No inputs, no server truth. Diagnostic set, not a split. `dual_perspective` compares them.
+
+**Cadence.** Each client's replay has a fresh car packet every 2 frames typically (gap p10 / p50 / p90 1 / 2 / 3 frames, 33 / 67 / 100 ms; 16.4k car packets for 4 cars) and a fresh ball packet in 82% of frames.
+
+**The two clients receive mostly the same server ticks.** 89% of A's car packets (14,595 of 16,383) and 66-67% of the ball packets appear bit-identically in B (a state is the same physics tick if all three position components are equal; positions that repeat, a resting car, are excluded: 14,436 unique-position car pairs, 5,310 ball pairs). So the other client supplies exact states for only about 11% of the car packets and 33% of the ball packets that a replay lacks: little interior ground truth, but nonzero (about 1,800 car and 2,700 ball packets per replay).
+
+**Real online lags, from the same tick seen twice.** The replay-time difference of one physics tick between the two replays is the difference of the two clients' packet lags plus a slowly varying clock offset. For the first 265 s it stays within +-6 ticks in every 10 s bucket (96-100% of pairs), with a triangular shape of width 9 ticks (-5 to +4 around the median, 0 at the mode): the difference of two independent 0-4 tick lags, which is the range the corpus analysis found. A first independent confirmation of the packet-lag model on online data.
+
+**A check of the lag inference against the other client** (`dual_perspective`, ball packets with an inferred chain lag in both replays, 5,265 pairs). For the same tick, (time in A - time in B) x 120 = (lag A - lag B) + clock offset (slow). Subtracting the converter's inferred lag difference and detrending the slowly varying clock offset with a running median:
+
+| Ticks (detrended) | |raw| p50 / p90 | |after subtracting the inferred lag difference| p50 / p90 |
+| --- | --- | --- |
+| Running median of +-25 pairs | 0.2 / 3.1 | 0.1 / 0.7 |
+| Running median of +-100 pairs | 0.7 / 2.5 | 0.3 / 0.9 |
+
+The residual collapses from a spread of about 3 ticks to under 1: the inferred relative lags are right to about a tick against a second, independent copy of the same ticks. The absolute offset stays unidentified (the median absorbs it), as known. This is the first validation of the inference on real online replays; earlier checks were internal (held-out exact-tick residuals) or on offline replays.
+
+**One clock stretches.** After about 270 s the two replays' clocks diverge at -0.4 ticks per second (the time difference for the same tick moves from -4 to -36 ticks between t = 270 s and 350 s, detrended bands 0% inside +-6 ticks). Replay B's game-clock spacing is 1.003 s per game second there against 0.999 s in A (t = 300 s bucket), so replay B's frame times run about 0.3% slow against the game clock for the last 80 s. A frame time is not a fixed multiple of the physics tick over a match; the converter's use of frame time for the timeline and of chain lags for relative timing already tolerates it, but any use of one global offset would not (as with the RLBot recording).
+
+**Use.** (1) The lag model and its inference are supported on online data. (2) The unmatched packets of one replay are exact states the other lacks; for the ball, free-flight alignment gives their exact tick (as `align_dump` does), so masked prediction of the ball can be scored online with true states at a real cadence. (3) For cars the tick of an unmatched packet is uncertain by the other replay's lag (+-4 ticks), so a fair scoring needs the ball-anchored tick or a fit that does not use the target.
+
 ## An RLBot recording with every car's true state and inputs (2026-09-30)
 
 **The data.** `replays/2026-09-30T10-34-49Z_local_botvsbot_nexto_ripple/` (recorded by the user's `rlbot_dump` script, RLBot v5): a local 2v2 bot match (Nexto and Ripple bots, Octane hitboxes, CHN_Stadium_P) with `states.jsonl` (one RLBot `GamePacket` per physics frame: 4 cars with physics, boost, air state, jump/double-jump/dodge flags, `dodge_elapsed`, `dodge_dir`, `last_input`, and the ball; 61,465 lines covering frame numbers 23 to 60,197, 59,845 consecutive steps, 1,482 repeated lines, 137 gaps of 192 missing frames in all) and the game's saved `.replay` (11,665 network frames; game build 260918, network version 12). Treated as a diagnostic with ground truth, not a split. It is a local match, so it has no replication delay; it is not an online-timing recording (`meta.json` corrected by hand after the run says so).
