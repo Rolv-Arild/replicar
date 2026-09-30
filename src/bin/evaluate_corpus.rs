@@ -1116,6 +1116,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     // The residuals at packets measure prediction; the boundary-value solve (`--air-bvp`) fits them.
     options.air_bvp = false;
+    options.fit_on_next_packet = false;
     let mut meshes = None;
     let mut mask_seed = None;
     let mut aligned_targets = false;
@@ -1226,6 +1227,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_double_jump = false;
         } else if arg == "--air-bvp" {
             options.air_bvp = true;
+        } else if arg == "--fit-on-next-packet" {
+            options.fit_on_next_packet = true;
         } else if arg == "--sim-pad-pickups" {
             options.block_sim_pad_pickups = false;
         } else if arg == "--no-defer-dodge" {
@@ -1444,6 +1447,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // causal prediction keeps the simulated pad pickups.
                 masked_options.block_sim_pad_pickups = false;
                 masked_options.air_bvp = false;
+                masked_options.fit_on_next_packet = false;
                 masked_options.withheld_frames = Some(std::sync::Arc::new(
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())

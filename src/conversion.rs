@@ -146,6 +146,10 @@ pub struct ConvertOptions {
     /// every few ticks, and drive the interval with them (`plan_air_bvp`). Uses the next packet, so
     /// its residual is no longer a prediction.
     pub air_bvp: bool,
+    /// Fit the ground control and jump timings against the *next* fresh packet (the end of the interval
+    /// being driven) instead of the packet after it: the interior frames are then constrained by both
+    /// ends, but the residual at that packet is no longer a held-out check.
+    pub fit_on_next_packet: bool,
     /// Infer the tick of the first fresh car packet after a dodge activation (it has no chain lag) from
     /// the simulated path with the fitted start, within the lag range 0-4 ticks (offline; disabled
     /// without inferred packet lags).
@@ -252,6 +256,7 @@ impl Default for ConvertOptions {
             infer_double_jump: true,
             flags_from_counters: true,
             air_bvp: true,
+            fit_on_next_packet: true,
             infer_dodge_first_packet_tick: true,
             flip_cancel_holdout: false,
             flip_cancel_source: FlipCancelSource::NextPacketFit,
@@ -2387,11 +2392,17 @@ fn fit_ground_control_timing(
             break;
         }
     }
-    let [(_, t_b, _, _), (last_frame, t_c, target_vel, target_ang)] = found[..] else {
+    let [first, second] = found[..] else {
         return None;
     };
+    let (_, t_b, _, _) = first;
+    let (last_frame, t_c, target_vel, target_ang) = if options.fit_on_next_packet {
+        first
+    } else {
+        second
+    };
     let (ticks_ab, ticks_ac) = (t_b - t_a, t_c - t_a);
-    if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 24 {
+    if ticks_ab < 1 || (ticks_ac <= ticks_ab && !options.fit_on_next_packet) || ticks_ac > 24 {
         return None;
     }
     // Observed controls of the frames around the span, with midpoint-rule switch ticks.
@@ -2603,11 +2614,17 @@ fn fit_jump_timing(
             break;
         }
     }
-    let [(_, t_b, _, _), (last_frame, t_c, target_pos, target_vel)] = found[..] else {
+    let [first, second] = found[..] else {
         return None;
     };
+    let (_, t_b, _, _) = first;
+    let (last_frame, t_c, target_pos, target_vel) = if options.fit_on_next_packet {
+        first
+    } else {
+        second
+    };
     let (ticks_ab, ticks_ac) = (t_b - t_a, t_c - t_a);
-    if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 30 {
+    if ticks_ab < 1 || (ticks_ac <= ticks_ab && !options.fit_on_next_packet) || ticks_ac > 30 {
         return None;
     }
     // (nominal tick, midpoint-rule start tick, throttle, steer, handbrake, boost, jump) per frame.
@@ -5567,7 +5584,15 @@ mod tests {
         arena.set_car_state(0, start);
         let (mut pending, mut ground, mut events) = (Vec::new(), vec![schedule], Vec::new());
         let mut air: Vec<AirSchedule> = Vec::new();
-        step_ticks(&mut arena, 8, false, &mut pending, &mut ground, &mut air, &mut events);
+        step_ticks(
+            &mut arena,
+            8,
+            false,
+            &mut pending,
+            &mut ground,
+            &mut air,
+            &mut events,
+        );
         let end = arena.get_car_state(0);
         assert!(
             (end.phys.pos - packets[8].phys.pos).length() < 0.01
@@ -5752,7 +5777,15 @@ mod tests {
                         },
                     );
                 }
-                step_ticks(&mut arena, 1, false, &mut pending, &mut ground, &mut Vec::new(), &mut events);
+                step_ticks(
+                    &mut arena,
+                    1,
+                    false,
+                    &mut pending,
+                    &mut ground,
+                    &mut Vec::new(),
+                    &mut events,
+                );
             }
             *arena.get_car_state(0)
         };

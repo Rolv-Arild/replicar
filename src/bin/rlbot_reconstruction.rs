@@ -221,6 +221,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut options = options;
         options.block_sim_pad_pickups |= env::var_os("BLOCK_PADS").is_some();
         options.boost_pickup_lookahead |= env::var_os("BOOST_LOOKAHEAD").is_some();
+        if env::var_os("NO_FIT_NEXT").is_some() {
+            options.fit_on_next_packet = false;
+        }
         if env::var_os("NO_AIR_BVP").is_some() {
             options.air_bvp = false;
         }
@@ -592,6 +595,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "frames without a fresh packet".to_string()
                     },
                     format!("{behaviour}, no fresh packet"),
+                    if t.air_state == 0 && !fresh {
+                        let ball_d = truth
+                            .get(&(server_tick.max(0) as u64))
+                            .and_then(|m| m.get("BALL#"))
+                            .map_or(1e9, |b| (b.pos - t.pos).length());
+                        let car_d = truth.get(&(server_tick.max(0) as u64)).map_or(1e9, |m| {
+                            m.iter()
+                                .filter(|(n, _)| {
+                                    n.as_str() != "BALL#" && n.as_str() != name.as_str()
+                                })
+                                .map(|(_, o)| (o.pos - t.pos).length())
+                                .fold(1e9, f32::min)
+                        });
+                        let boosting = truth
+                            .get(&((server_tick + 1).max(0) as u64))
+                            .and_then(|m| m.get(name))
+                            .is_some_and(|n| n.boost < t.boost - 0.05);
+                        format!(
+                            "ground: {}{}{}",
+                            if ball_d < 300.0 { "near ball " } else { "" },
+                            if car_d < 300.0 { "near car " } else { "" },
+                            if t.pos.z > 25.0 {
+                                "wall/ramp "
+                            } else if boosting {
+                                "boosting "
+                            } else {
+                                "plain"
+                            }
+                        )
+                    } else {
+                        "other".to_string()
+                    },
                     format!(
                         "{behaviour}, no fresh packet, {}",
                         if covered.get(name).is_some_and(|v| v
@@ -612,10 +647,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .replace("99 frame(s)", "no packet seen"),
                 ];
                 for (i, group) in groups.into_iter().enumerate() {
-                    if (i == 2 || i == 3) && fresh {
+                    if i == 3 && t.air_state != 0 {
                         continue;
                     }
-                    if i == 5 && t.air_state != 2 {
+                    if (i == 2 || i == 3 || i == 4) && fresh {
+                        continue;
+                    }
+                    if i == 6 && t.air_state != 2 {
                         continue;
                     }
                     let r = rows.entry(group).or_default();

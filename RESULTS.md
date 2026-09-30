@@ -74,6 +74,17 @@ The intervals the solve covers (8,429 of 9,894 air frames, 2,548 of 4,239 flip f
 
 **A bug this exposed.** The interior flips had the wrong direction in 7.5% of flipping frames (angle between the simulated and the true flip torque p90 18 deg, p99 67 deg): the dodge press used the controls of its car as a base, including the roll of the air controls, and RocketSim's dodge direction is (-pitch, yaw + roll), so a leftover roll turned the flip (and a double jump into a flip, for which the flip lasted 20 frames). The press now zeroes roll in every place (planned, fitted, default, double jump); flip direction error p99 0.3 deg. This also improved the plain prediction on the corpus (one-step car residuals, train / validation, before the solve, against the previous commit): rotation p90 -4.7% / -4.4%, p99 -5.8% / -5.8%, angular velocity p90 -3.5% / -3.5%, p99 -6.4% / -6.3%, velocity p90 -2.2% / -2.2%; per replay better in 58-60 of 60 for rotation p90, angular velocity p90 and velocity p90 on both splits.
 
+**Fitting the ground and jump timings on the next packet** (`fit_on_next_packet`, default on). The ground control and jump timing fits chose their shift against the second-next packet so that the next one stayed a held-out check. The interior frames are between the first and the next packet, so the fit now targets the next packet itself (`--fit-on-next-packet` restores it in the tools; the tools keep the old behaviour by default because they score predictions at packets). Interior error against the server truth, all four replays (host thinned every third frame, client every second), base = both solves off, now = both on:
+
+| Replay | Frames without a packet: rotation p90 (deg) | Angular velocity p90 (rad/s) | Velocity p50 / p90 (UU/s), all frames |
+| --- | --- | --- | --- |
+| Game 1 host | 1.78 -> 0.85 | 0.71 -> 0.34 | 0.0 / 7 -> 0.0 / 5 |
+| Game 2 host | 1.97 -> 0.91 | 0.75 -> 0.37 | 0.0 / 7 -> 0.0 / 5 |
+| Game 1 client | 11.0 -> 9.7 | 1.83 -> 1.59 | 19.9 / 137 -> 17.3 / 129 |
+| Game 2 client | 11.2 -> 9.5 | 1.82 -> 1.56 | 17.6 / 132 -> 16.1 / 125 |
+
+On the client replays the ground interior improves as well (game 1, plain ground: velocity p50 42 -> 34 UU/s, rotation p50 1.74 -> 1.23 deg, angular velocity p50 0.17 -> 0.10 rad/s). The remaining client error is timing, not dynamics: the exported state at a frame time is offset by the lag level of its packets (position p50 12 UU).
+
 **How to read the two kinds of numbers.** `error_budget` and `evaluate_corpus` turn the solve off by default (`--air-bvp` turns it on): their residuals are predictions at packets and the solve fits exactly those packets. The interior error against server truth (`rlbot_reconstruction`, `scripts/run_interior_eval.sh`) is where the solve is scored. Cost: the offline conversion of a replay takes about 5 s with the solve against about 0.6 s without it (9 replays of the corpus: 20 s to 66 s in `evaluate_corpus`, whose masked runs do not use the solve); the flip intervals with their shift scans dominate. Not yet done: a solve for ground driving and jumps (interior ground rotation p90 0.23 deg and velocity p90 11 UU/s, jump window velocity p90 97 UU/s), for the translation (boost timing) and for ball contacts, and the uncovered flips above.
 
 ## The full car state, not only the physics (2026-09-30)
