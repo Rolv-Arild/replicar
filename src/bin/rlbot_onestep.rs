@@ -143,7 +143,7 @@ fn parse(line: &str) -> Option<Packet> {
 }
 
 /// Car state from a packet; `jump_ticks` counts the consecutive frames the player was `Jumping`.
-fn car_state(pl: &Player, jump_ticks: u32, handbrake_val: f32) -> CarState {
+fn car_state(pl: &Player, jump_ticks: u32, handbrake_val: f32, boosting_time: f32) -> CarState {
     let mut s = CarState::default();
     s.phys.pos = pl.pos;
     s.phys.vel = pl.vel;
@@ -168,7 +168,8 @@ fn car_state(pl: &Player, jump_ticks: u32, handbrake_val: f32) -> CarState {
         s.air_time_since_jump = 1.25 - pl.dodge_timeout;
         s.air_time = s.air_time_since_jump;
     }
-    s.is_boosting = pl.controls.boost && pl.boost > 0.0;
+    s.is_boosting = boosting_time > 0.0 || (pl.controls.boost && pl.boost > 0.0);
+    s.boosting_time = boosting_time;
     s.is_supersonic = pl.supersonic;
     s.handbrake_val = handbrake_val;
     s
@@ -247,6 +248,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             handbrake[i][k] = (handbrake[i - 1][k] + rate * ticks / 120.0).clamp(0.0, 1.0);
         }
     }
+    // RocketSim's boost latch (a tap boosts for at least 0.1 s): the ticks the car has been boosting are
+    // read from the recorded boost amount, which falls while boosting.
+    let track_boost = env::var_os("NO_BOOST_TRACK").is_none();
+    let mut boosting_time: Vec<Vec<f32>> = vec![vec![0.0; n_players]; packets.len()];
+    for i in 1..packets.len() {
+        for k in 0..n_players {
+            let fell = packets[i].players[k].boost < packets[i - 1].players[k].boost - 0.05;
+            if fell && packets[i].frame == packets[i - 1].frame + 1 {
+                boosting_time[i][k] = boosting_time[i - 1][k] + 1.0 / 120.0;
+            }
+        }
+    }
     let quantize = env::var_os("QUANTIZE").is_some();
     let horizons = [1usize, 4, 12];
     let variants = ["input of packet n+t (same)", "input of packet n+t+1 (next)"];
@@ -264,7 +277,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             for (vi, variant) in variants.iter().enumerate() {
                 let start = &packets[n];
                 for (k, pl) in start.players.iter().enumerate() {
-                    let mut state = car_state(pl, jumping_run[n][k] + 1, handbrake[n][k]);
+                    let mut state = car_state(pl, jumping_run[n][k] + 1, handbrake[n][k], if track_boost { boosting_time[n][k] } else { 0.0 });
                     state.is_demoed = pl.demolished;
                     arena.set_car_state(k, state);
                 }

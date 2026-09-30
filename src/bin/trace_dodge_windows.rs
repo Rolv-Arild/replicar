@@ -56,6 +56,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         options.fit_jump_timing = false;
     }
     options.infer_dodge_start = !env::args().any(|arg| arg == "--no-infer-dodge-start");
+    options.infer_dodge_first_packet_tick =
+        !env::args().any(|arg| arg == "--no-infer-dodge-first-packet");
+    options.defer_dodge_past_next_packet = !env::args().any(|arg| arg == "--no-defer-dodge");
     options.flip_cancel_holdout = env::args().any(|arg| arg == "--flip-cancel-holdout");
     if let Some(name) = env::args()
         .skip_while(|a| a != "--flip-cancel-source")
