@@ -124,7 +124,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .push(frame);
             entry.insert(name, state);
         }
-        let ball = vec3(&packet["balls"][0]["physics"]["location"]);
+        let bp = &packet["balls"][0]["physics"];
+        let ball = vec3(&bp["location"]);
+        entry.insert(
+            "BALL#".to_string(),
+            Truth {
+                pos: ball,
+                vel: vec3(&bp["velocity"]),
+                rot: matrix(&bp["rotation"]),
+                ang: vec3(&bp["angular_velocity"]),
+                air_state: 0,
+                demolished: false,
+                has_dodged: false,
+            },
+        );
         by_position
             .entry(("BALL#".to_string(), key(ball)))
             .or_default()
@@ -222,6 +235,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap_or(0)
         };
         let mut rows: BTreeMap<String, Rows> = BTreeMap::new();
+        let mut ball_rows: BTreeMap<String, Rows> = BTreeMap::new();
         let mut last_fresh: HashMap<usize, usize> = HashMap::new();
         let mut scored = 0usize;
         for (f, converted) in output.frames.iter().enumerate() {
@@ -230,6 +244,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .is_some_and(|g| g.value == "Active");
             let offset = offset_at(f);
+            if active {
+                let server_tick = converted.timeline_tick as i64 - offset;
+                if let Some(players) = truth.get(&(server_tick.max(0) as u64)) {
+                    if let Some(tb) = players.get("BALL#") {
+                        let near = players
+                            .iter()
+                            .any(|(n, t)| n != "BALL#" && (t.pos - tb.pos).length() < 300.0);
+                        let fresh_ball = frames[f]
+                            .ball
+                            .as_ref()
+                            .and_then(|b| b.position.as_ref())
+                            .is_some_and(|p| p.frame == f);
+                        let b = &converted.state.ball.phys;
+                        for group in [
+                            "all".to_string(),
+                            if near {
+                                "ball near a car (<300 UU)".to_string()
+                            } else {
+                                "ball away from cars".to_string()
+                            },
+                            if fresh_ball {
+                                "fresh ball packet".to_string()
+                            } else {
+                                "no fresh ball packet".to_string()
+                            },
+                        ] {
+                            let r = ball_rows.entry(group).or_default();
+                            r.pos.push((b.pos - tb.pos).length());
+                            r.vel.push((b.vel - tb.vel).length());
+                            r.rot.push(rotation_error(b.rot_mat, tb.rot));
+                            r.ang.push((b.ang_vel - tb.ang).length());
+                        }
+                    }
+                }
+            }
             for car in &frames[f].cars {
                 let Some(name) = car.player_key.as_ref().and_then(|k| names.get(k)) else {
                     continue;
@@ -333,6 +382,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quantile(values, 0.9),
                 quantile(&mut abs, 0.5),
                 quantile(&mut abs, 0.9),
+            );
+        }
+        for (group, r) in ball_rows.iter_mut() {
+            println!(
+                "  BALL {:<30} {:>6} | pos {:>5.2}/{:>5.1}/{:>5.0} UU | vel {:>6.1}/{:>6.0} UU/s",
+                group,
+                r.pos.len(),
+                quantile(&mut r.pos, 0.5),
+                quantile(&mut r.pos, 0.9),
+                quantile(&mut r.pos, 0.99),
+                quantile(&mut r.vel, 0.5),
+                quantile(&mut r.vel, 0.9),
             );
         }
         println!(

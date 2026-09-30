@@ -2250,7 +2250,7 @@ fn fit_ground_flip_timing(
     let a_others = others(car);
     if a_others.iter().flatten().any(|c| c % 2 == 1)
         || jump_odd(car)
-        || dodge_of(car).is_none_or(|d| d % 2 == 1)
+        || dodge_of(car).is_some_and(|d| d % 2 == 1)
     {
         return refused_ground(2);
     }
@@ -3001,7 +3001,8 @@ fn fit_dodge_start(
     if ang0.frame != index || state.is_on_ground {
         return None;
     }
-    let counter = car.inputs.dodge_active_raw.as_ref()?.value;
+    // A car that has not dodged yet has no dodge counter (it is created with one at its first dodge).
+    let counter = car.inputs.dodge_active_raw.as_ref().map_or(0, |d| d.value);
     if counter % 2 == 1 {
         return None;
     }
@@ -5241,9 +5242,10 @@ mod tests {
                 boost: None,
                 boost_raw: None,
                 inputs: observations::Inputs {
-                    dodge_active_raw: Some(Value {
-                        value: u8::from(frame >= 2),
-                        frame: if frame >= 2 { frame.max(2) } else { frame },
+                    // A car that has not dodged yet has no dodge counter.
+                    dodge_active_raw: (frame >= 2).then_some(Value {
+                        value: 1,
+                        frame: 2,
                         source: Source::Replay,
                     }),
                     dodge_torque_replay_units: (frame >= 2).then_some(Value {

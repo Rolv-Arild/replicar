@@ -138,6 +138,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .filter(|&g| fresh_at(g))
                     .count()
                     .min(3);
+                // Counters at the last fresh packet before the activation.
+                let (jump_odd_at_a, dodge_none_at_a) = match a {
+                    Some(a) => frames[a]
+                        .cars
+                        .iter()
+                        .find(|c| {
+                            c.actor_id == car.actor_id
+                                && c.actor_created_frame == car.actor_created_frame
+                        })
+                        .map_or((false, false), |c| {
+                            (
+                                c.inputs
+                                    .jump_active_raw
+                                    .as_ref()
+                                    .is_some_and(|v| v.value % 2 == 1),
+                                c.inputs.dodge_active_raw.is_none(),
+                            )
+                        }),
+                    None => (false, false),
+                };
                 let classes = [
                     "all activations".to_string(),
                     format!(
@@ -166,6 +186,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ),
                     format!("fresh packets (any lag) in the next 12 frames: {any_after}"),
                     format!("has not jumped at the last packet: {first}"),
+                    format!(
+                        "ground at the last packet; jump counter odd there: {jump_odd_at_a}; dodge counter absent there: {dodge_none_at_a}; exact chain packets after: {exact_after}"
+                    ),
                 ];
                 for class in classes {
                     let entry = table.entry(class).or_default();
