@@ -65,6 +65,11 @@ struct Truth {
     air_state: u64,
     demolished: bool,
     has_dodged: bool,
+    boost: f32,
+    has_jumped: bool,
+    has_double_jumped: bool,
+    dodge_timeout: f32,
+    supersonic: bool,
 }
 
 #[derive(Default)]
@@ -117,6 +122,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 air_state: pl["air_state"].as_u64().unwrap_or(0),
                 demolished: pl["demolished_timeout"].as_f64().unwrap_or(-1.0) >= 0.0,
                 has_dodged: pl["has_dodged"].as_bool().unwrap_or(false),
+                boost: pl["boost"].as_f64().unwrap_or(0.0) as f32,
+                has_jumped: pl["has_jumped"].as_bool().unwrap_or(false),
+                has_double_jumped: pl["has_double_jumped"].as_bool().unwrap_or(false),
+                dodge_timeout: pl["dodge_timeout"].as_f64().unwrap_or(-1.0) as f32,
+                supersonic: pl["is_supersonic"].as_bool().unwrap_or(false),
             };
             by_position
                 .entry((name.clone(), key(state.pos)))
@@ -136,6 +146,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 air_state: 0,
                 demolished: false,
                 has_dodged: false,
+                boost: 0.0,
+                has_jumped: false,
+                has_double_jumped: false,
+                dodge_timeout: -1.0,
+                supersonic: false,
             },
         );
         by_position
@@ -177,6 +192,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }),
     ];
     let score = |label: &str, options: ConvertOptions| -> Result<(), Box<dyn Error>> {
+        let mut options = options;
+        options.block_sim_pad_pickups |= env::var_os("BLOCK_PADS").is_some();
+        options.boost_pickup_lookahead |= env::var_os("BOOST_LOOKAHEAD").is_some();
+        if env::var_os("NO_FLAGS").is_some() {
+            options.flags_from_counters = false;
+        }
         let output = convert_observations(observed.clone(), &options)?;
         let slot_name: HashMap<usize, String> = output
             .car_slots
@@ -236,6 +257,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let mut rows: BTreeMap<String, Rows> = BTreeMap::new();
         let mut ball_rows: BTreeMap<String, Rows> = BTreeMap::new();
+        // Full car state (not only physics): counts of mismatches with the truth, by fresh packet or not.
+        let mut flags: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // name -> (n, mismatches)
+        let mut boost_err: Vec<f32> = Vec::new();
+        let mut boost_err_fresh: Vec<f32> = Vec::new();
+        let mut timeout_err: Vec<f32> = Vec::new();
+        let mut confusion: BTreeMap<String, usize> = BTreeMap::new();
+        let mut positives: BTreeMap<&str, usize> = BTreeMap::new();
         let mut last_fresh: HashMap<usize, usize> = HashMap::new();
         let mut scored = 0usize;
         for (f, converted) in output.frames.iter().enumerate() {
@@ -307,10 +335,153 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 scored += 1;
+                if std::env::var_os("BOOST_TRACE").is_some()
+                    && label.starts_with("all fits")
+                    && name.starts_with("Kiyo")
+                    && (sim.boost - t.boost).abs() > 8.0
+                {
+                    let next = truth
+                        .get(&((server_tick + 1).max(0) as u64))
+                        .and_then(|m| m.get(name))
+                        .map_or(t.boost, |n| n.boost);
+                    println!(
+                        "BOOST frame {f} tick {server_tick} truth {:.1} (boosting {}) sim {:.1} (is_boosting {}, ctl.boost {}) replay amount {:?} boost counter {:?}",
+                        t.boost,
+                        next < t.boost - 0.05,
+                        sim.boost,
+                        sim.is_boosting,
+                        sim.controls.boost,
+                        car.boost_raw.as_ref().map(|b| (b.value, b.frame)),
+                        car.inputs
+                            .boost_active_raw
+                            .as_ref()
+                            .map(|b| (b.value, b.frame)),
+                    );
+                }
+                if std::env::var_os("FLAG_TRACE").is_some()
+                    && label.starts_with("all fits")
+                    && sim.has_flipped != t.has_dodged
+                    && name.starts_with("Kiyo")
+                {
+                    println!(
+                        "FLAG frame {f} tick {server_tick} truth air {} has_dodged {} | sim has_flipped {} is_flipping {} flip_time {:.3} has_jumped {} ground {} dodge counter {:?} | fresh {fresh}",
+                        t.air_state,
+                        t.has_dodged,
+                        sim.has_flipped,
+                        sim.is_flipping,
+                        sim.flip_time,
+                        sim.has_jumped,
+                        sim.is_on_ground,
+                        car.inputs
+                            .dodge_active_raw
+                            .as_ref()
+                            .map(|d| (d.value, d.frame)),
+                    );
+                }
+                if std::env::var_os("DJ_TRACE").is_some() && label.starts_with("all fits") {
+                    let prev_air = truth
+                        .get(&((server_tick - 1).max(0) as u64))
+                        .and_then(|m| m.get(name))
+                        .map_or(0, |p| p.air_state);
+                    if t.air_state == 2 || prev_air == 2 {
+                        println!(
+                            "DJ frame {f} tick {server_tick} truth air {} z {:.1} vz {:.1} | sim vz {:.1} has_dbl {} ground {} jump_ctl {} prev_jump_ctl {} | fresh {fresh}",
+                            t.air_state,
+                            t.pos.z,
+                            t.vel.z,
+                            sim.phys.vel.z,
+                            sim.has_double_jumped,
+                            sim.is_on_ground,
+                            sim.controls.jump,
+                            sim.prev_controls.jump
+                        );
+                    }
+                }
+                {
+                    let mut tally = |name: &'static str, bad: bool| {
+                        let e = flags.entry(name).or_default();
+                        e.0 += 1;
+                        e.1 += usize::from(bad);
+                    };
+                    let truth_ground = t.air_state == 0;
+                    tally("is_on_ground", sim.is_on_ground != truth_ground);
+                    tally("has_jumped", sim.has_jumped != t.has_jumped);
+                    tally(
+                        "has_double_jumped",
+                        sim.has_double_jumped != t.has_double_jumped,
+                    );
+                    for (name, v) in [
+                        ("has_jumped", t.has_jumped),
+                        ("has_double_jumped", t.has_double_jumped),
+                        ("has_flipped (truth has_dodged)", t.has_dodged),
+                        ("is_flipping (truth Dodging)", t.air_state == 3),
+                    ] {
+                        *positives.entry(name).or_default() += usize::from(v);
+                    }
+                    tally(
+                        "has_flipped (truth has_dodged)",
+                        sim.has_flipped != t.has_dodged,
+                    );
+                    tally(
+                        "is_flipping (truth Dodging)",
+                        sim.is_flipping != (t.air_state == 3),
+                    );
+                    tally(
+                        "is_jumping (truth Jumping)",
+                        sim.is_jumping != (t.air_state == 1),
+                    );
+                    tally("is_supersonic", sim.is_supersonic != t.supersonic);
+                    if std::env::var_os("CONFUSION").is_some() {
+                        for (flag, a, b) in [
+                            ("has_jumped", sim.has_jumped, t.has_jumped),
+                            (
+                                "has_double_jumped",
+                                sim.has_double_jumped,
+                                t.has_double_jumped,
+                            ),
+                            ("has_flipped/has_dodged", sim.has_flipped, t.has_dodged),
+                        ] {
+                            if a != b {
+                                *confusion
+                                    .entry(format!("{flag}: sim {a} truth {b}, truth air_state {}, fresh {fresh}", t.air_state))
+                                    .or_default() += 1;
+                            }
+                        }
+                    }
+                    // Can the car still flip? RocketSim: jumped, no flip yet, within 1.25 s of the jump.
+                    let sim_can_flip = sim.has_jumped
+                        && !sim.has_double_jumped
+                        && !sim.has_flipped
+                        && sim.air_time_since_jump < 1.25
+                        && !sim.is_on_ground;
+                    let truth_can_flip = t.has_jumped
+                        && !t.has_double_jumped
+                        && !t.has_dodged
+                        && t.dodge_timeout > 0.0
+                        && t.air_state != 0;
+                    tally(
+                        "can flip now (jumped, no flip, within 1.25 s, airborne)",
+                        sim_can_flip != truth_can_flip,
+                    );
+                    let e = (sim.boost - t.boost).abs();
+                    boost_err.push(e);
+                    if fresh {
+                        boost_err_fresh.push(e);
+                    }
+                    if t.dodge_timeout >= 0.0
+                        && sim.has_jumped
+                        && !sim.has_flipped
+                        && !sim.is_on_ground
+                    {
+                        timeout_err
+                            .push(((1.25 - sim.air_time_since_jump) - t.dodge_timeout).abs());
+                    }
+                }
                 let since = last_fresh.get(&slot).map_or(99, |&l| f - l);
                 let behaviour = match t.air_state {
                     0 => "ground",
-                    1 | 2 => "jump",
+                    1 => "jump",
+                    2 => "double jump",
                     3 => "flip",
                     _ => "air",
                 };
@@ -322,11 +493,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "frames without a fresh packet".to_string()
                     },
                     format!("{behaviour}, no fresh packet"),
+                    if t.air_state == 2 {
+                        "truth DoubleJumping (any packet)".to_string()
+                    } else {
+                        "other".to_string()
+                    },
                     format!("{since} frame(s) since the last fresh packet")
                         .replace("99 frame(s)", "no packet seen"),
                 ];
                 for (i, group) in groups.into_iter().enumerate() {
                     if i == 2 && fresh {
+                        continue;
+                    }
+                    if i == 4 && t.air_state != 2 {
                         continue;
                     }
                     let r = rows.entry(group).or_default();
@@ -383,6 +562,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quantile(&mut abs, 0.5),
                 quantile(&mut abs, 0.9),
             );
+        }
+        if label.starts_with("all fits") {
+            println!("  full car state against the truth ({scored} scored frames):");
+            for (name, (n, bad)) in &flags {
+                let pos = positives.get(name).copied().unwrap_or(0);
+                println!(
+                    "    {name:<60} mismatches {bad:>6} of {n:>6} ({:.2}%); truth true in {pos} frames",
+                    100.0 * *bad as f64 / (*n).max(1) as f64
+                );
+            }
+            println!(
+                "    boost error (units of 0..100) p50/p90/p99 {:.2}/{:.2}/{:.2}; on frames with a fresh packet {:.2}/{:.2}/{:.2}",
+                quantile(&mut boost_err.clone(), 0.5),
+                quantile(&mut boost_err.clone(), 0.9),
+                quantile(&mut boost_err, 0.99),
+                quantile(&mut boost_err_fresh.clone(), 0.5),
+                quantile(&mut boost_err_fresh.clone(), 0.9),
+                quantile(&mut boost_err_fresh, 0.99),
+            );
+            println!(
+                "    flip-window time left (1.25 s - air time since jump) vs dodge_timeout, airborne jumped cars: n {} |error| p50/p90/p99 {:.3}/{:.3}/{:.3} s",
+                timeout_err.len(),
+                quantile(&mut timeout_err.clone(), 0.5),
+                quantile(&mut timeout_err.clone(), 0.9),
+                quantile(&mut timeout_err, 0.99),
+            );
+        }
+        let mut conf: Vec<_> = confusion.iter().collect();
+        conf.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (k, n) in conf.iter().take(14) {
+            println!("    mismatch {k}: {n}");
         }
         for (group, r) in ball_rows.iter_mut() {
             println!(

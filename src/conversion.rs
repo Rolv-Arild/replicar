@@ -90,6 +90,14 @@ pub struct ConvertOptions {
     pub gate_dodge_on_observed_impulse: bool,
     /// Reconcile boost pad pickups and cooldowns from replay pickup data.
     pub sync_boost_pad_pickups: bool,
+    /// Keep every boost pad on cooldown inside the simulation, so a simulated car never picks boost up
+    /// by driving over a pad (a car whose simulated position is off by a few UU picks up a pad the real
+    /// car missed, or the reverse): the boost amount then comes only from the replay's own updates
+    /// (offline reconstruction; masked prediction has no later update and keeps the simulated pickups).
+    pub block_sim_pad_pickups: bool,
+    /// Offline: a boost amount that jumps up (a pad pickup) is first seen about a frame after the car
+    /// picked it up, so apply an increase seen in the next frame one frame early.
+    pub boost_pickup_lookahead: bool,
     /// Route steer input to aerial yaw while airborne.
     pub infer_air_steer_controls: bool,
     /// Offline: fit the physical start tick of each dodge (and its pitch cancel) by simulating
@@ -125,6 +133,14 @@ pub struct ConvertOptions {
     /// dodge: its lag is longer than the counter's) for the interval after that packet, instead of
     /// applying it at the activation frame and losing it when the packet resets the state.
     pub defer_dodge_past_next_packet: bool,
+    /// Apply a double jump (a second jump press in the air without a dodge direction) when the double
+    /// jump counter turns odd; before this the converter never simulated one.
+    pub infer_double_jump: bool,
+    /// Set the jump, double jump and flip flags of an airborne car from the replay's counters: a counter
+    /// that differs from its value when the car was last on the ground means the action was used since.
+    /// The simulation otherwise only knows the actions it applied itself (a jump it never applied leaves
+    /// `has_jumped` false, which changes what the car can do next).
+    pub flags_from_counters: bool,
     /// Infer the tick of the first fresh car packet after a dodge activation (it has no chain lag) from
     /// the simulated path with the fitted start, within the lag range 0-4 ticks (offline; disabled
     /// without inferred packet lags).
@@ -218,6 +234,8 @@ impl Default for ConvertOptions {
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
             sync_boost_pad_pickups: true,
+            block_sim_pad_pickups: true,
+            boost_pickup_lookahead: false,
             infer_air_steer_controls: true,
             infer_dodge_start: true,
             lookahead_ground_controls: true,
@@ -226,6 +244,8 @@ impl Default for ConvertOptions {
             flip_cancel_packets: 1,
             zero_packet_lag: false,
             defer_dodge_past_next_packet: true,
+            infer_double_jump: true,
+            flags_from_counters: true,
             infer_dodge_first_packet_tick: true,
             flip_cancel_holdout: false,
             flip_cancel_source: FlipCancelSource::NextPacketFit,
@@ -1233,6 +1253,29 @@ fn jump_impulse_unobserved(car: &observations::Car, frame: usize) -> bool {
             .linear_velocity
             .as_ref()
             .is_some_and(|velocity| velocity.frame == frame && velocity.value[2] > 150.0)
+}
+
+/// The dodge torque of a car whose dodge counter turned odd at frame `g`. The replay sends the torque only
+/// when it changes, so a dodge in the same direction as the last one has an old stamp (22% of the
+/// activations of a host replay), and it can also arrive a frame after the counter: the value visible a
+/// frame later is the one in effect, unless there is no later frame of the car.
+pub fn activation_torque(
+    frames: &[observations::Frame],
+    g: usize,
+    car: &observations::Car,
+) -> Option<[f32; 3]> {
+    let later = frames.get(g + 1).and_then(|frame| {
+        frame.cars.iter().find(|c| {
+            c.actor_id == car.actor_id && c.actor_created_frame == car.actor_created_frame
+        })
+    });
+    later
+        .unwrap_or(car)
+        .inputs
+        .dodge_torque_replay_units
+        .as_ref()
+        .or(car.inputs.dodge_torque_replay_units.as_ref())
+        .map(|t| t.value)
 }
 
 fn dodge_impulse_unobserved(car: &observations::Car, frame: usize, state: &CarState) -> bool {
@@ -2266,21 +2309,17 @@ fn fit_ground_flip_timing(
         if others(other) != a_others {
             return refused_ground(4);
         }
-        if let (Some(dodge), Some(torque)) = (
-            other
-                .inputs
-                .dodge_active_raw
-                .as_ref()
-                .filter(|d| d.frame == g),
-            other
-                .inputs
-                .dodge_torque_replay_units
-                .as_ref()
-                .filter(|t| t.frame == g),
-        ) {
+        if let Some(dodge) = other
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .filter(|d| d.frame == g)
+        {
             if dodge.value % 2 == 1 {
-                activation = Some((g, torque.value));
-                break;
+                if let Some(torque) = activation_torque(frames, g, other) {
+                    activation = Some((g, torque));
+                    break;
+                }
             }
         }
     }
@@ -3037,21 +3076,17 @@ fn fit_dodge_start(
         let Some(other) = frames[g].cars.iter().find(same_car) else {
             return refused(1);
         };
-        if let (Some(dodge), Some(torque)) = (
-            other
-                .inputs
-                .dodge_active_raw
-                .as_ref()
-                .filter(|d| d.frame == g),
-            other
-                .inputs
-                .dodge_torque_replay_units
-                .as_ref()
-                .filter(|t| t.frame == g),
-        ) {
+        if let Some(dodge) = other
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .filter(|d| d.frame == g)
+        {
             if dodge.value % 2 == 1 {
-                activation = Some((g, torque.value));
-                break;
+                if let Some(torque) = activation_torque(frames, g, other) {
+                    activation = Some((g, torque));
+                    break;
+                }
             }
         }
     }
@@ -3348,6 +3383,11 @@ pub fn convert_observations_with(
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
+    let mut last_double_raw: HashMap<(i32, usize), u8> = HashMap::new();
+    // Action counters (jump, double jump, dodge) of each car at its last frame, and at its last frame on
+    // the ground.
+    let mut last_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
+    let mut ground_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
     let mut pad_actor_to_index: HashMap<i32, usize> = HashMap::new();
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut diagnostics = Diagnostics::default();
@@ -3698,6 +3738,26 @@ pub fn convert_observations_with(
                         dirty = true;
                     }
                 }
+                if options.boost_pickup_lookahead && !new_lifetime {
+                    let next_boost = observations
+                        .frames
+                        .get(frame_idx + 1)
+                        .and_then(|next| {
+                            next.cars.iter().find(|c| {
+                                c.actor_id == car.actor_id
+                                    && c.actor_created_frame == car.actor_created_frame
+                            })
+                        })
+                        .and_then(|c| c.boost.as_ref())
+                        .filter(|b| b.frame == frame_idx + 1);
+                    // A pickup adds at least 12; consumption only lowers the amount.
+                    if let Some(next) = next_boost {
+                        if next.value > state.boost + 6.0 {
+                            state.boost = next.value;
+                            dirty = true;
+                        }
+                    }
+                }
 
                 let mut dodge_jump_control = false;
                 let mut dodge_pitch_control = 0.0;
@@ -3717,13 +3777,8 @@ pub fn convert_observations_with(
                             Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
                             None => raw % 2 == 1,
                         };
-                        if activated
-                            && car
-                                .inputs
-                                .dodge_torque_replay_units
-                                .as_ref()
-                                .is_some_and(|torque| torque.frame == frame.index)
-                        {
+                        let torque_now = activation_torque(&observations.frames, frame.index, car);
+                        if activated && torque_now.is_some() {
                             diagnostics.dodge_activations += 1;
                         }
                         if activated
@@ -3733,13 +3788,8 @@ pub fn convert_observations_with(
                                 frame.index,
                             ))
                         {
-                            if let Some(torque) = car
-                                .inputs
-                                .dodge_torque_replay_units
-                                .as_ref()
-                                .filter(|torque| torque.frame == frame.index)
-                            {
-                                let [tx, ty, _] = torque.value;
+                            if let Some(torque) = torque_now {
+                                let [tx, ty, _] = torque;
                                 let pitch = -ty / 2.24;
                                 let yaw = -tx / 2.60;
                                 if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
@@ -3758,6 +3808,95 @@ pub fn convert_observations_with(
                                         dirty = true;
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if options.infer_double_jump {
+                    let key = (car.actor_id, car.actor_created_frame);
+                    let double_raw = car
+                        .inputs
+                        .double_jump_active_raw
+                        .as_ref()
+                        .filter(|raw| raw.frame == frame.index)
+                        .map(|raw| raw.value);
+                    if let Some(raw) = double_raw {
+                        let prev = last_double_raw.insert(key, raw);
+                        let activated = match prev {
+                            Some(prev_val) => prev_val % 2 == 0 && raw % 2 == 1,
+                            None => raw % 2 == 1,
+                        };
+                        if activated && !dodge_jump_control {
+                            if !options.gate_dodge_on_observed_impulse
+                                || dodge_impulse_unobserved(car, frame.index, &state)
+                            {
+                                // A jump press with no direction is RocketSim's double jump.
+                                dodge_jump_control = true;
+                                dodge_pitch_control = 0.0;
+                                dodge_yaw_control = 0.0;
+                            } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                                // A fresh velocity packet at the activation frame already holds the
+                                // impulse; only the state flags are missing.
+                                state.has_jumped = true;
+                                state.has_double_jumped = true;
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+
+                if options.flags_from_counters {
+                    let key = (car.actor_id, car.actor_created_frame);
+                    let counter =
+                        |v: &Option<observations::Value<u8>>| v.as_ref().map_or(0, |v| v.value);
+                    let current = [
+                        counter(&car.inputs.jump_active_raw),
+                        counter(&car.inputs.double_jump_active_raw),
+                        counter(&car.inputs.dodge_active_raw),
+                    ];
+                    if new_lifetime {
+                        ground_counters.remove(&key);
+                    } else if state.is_on_ground {
+                        if let Some(previous) = last_counters.get(&key) {
+                            ground_counters.insert(key, *previous);
+                        }
+                    }
+                    last_counters.insert(key, current);
+                    if !state.is_on_ground {
+                        if let Some(ground) = ground_counters.get(&key) {
+                            let jumped = current[0] != ground[0];
+                            let double_jumped = current[1] != ground[1];
+                            let flipped = current[2] != ground[2];
+                            // Seconds since the counter last changed (the stamp frame of its value).
+                            let since = |v: &Option<observations::Value<u8>>| -> f32 {
+                                v.as_ref().map_or(0.0, |v| {
+                                    (frame.time - observations.frames[v.frame].time).max(0.0)
+                                })
+                            };
+                            if !state.has_jumped && (jumped || double_jumped || flipped) {
+                                state.has_jumped = true;
+                                state.air_time_since_jump = state
+                                    .air_time_since_jump
+                                    .max(since(&car.inputs.jump_active_raw));
+                                dirty = true;
+                            }
+                            // An action whose counter changed this frame, or whose dodge is planned for
+                            // later, is applied by the simulation itself; setting its flag first would
+                            // block that.
+                            let acting = dodge_jump_control
+                                || pending_dodges.iter().any(|dodge| dodge.slot == slot);
+                            if double_jumped && !state.has_double_jumped && !acting {
+                                state.has_double_jumped = true;
+                                state.has_jumped = true;
+                                dirty = true;
+                            }
+                            if flipped && !state.has_flipped && !acting {
+                                state.has_flipped = true;
+                                state.has_jumped = true;
+                                // Time since the flip, so the pitch lock after a flip ends on time.
+                                state.flip_time = since(&car.inputs.dodge_active_raw).min(1.0);
+                                dirty = true;
                             }
                         }
                     }
@@ -4137,6 +4276,11 @@ pub fn convert_observations_with(
                         ground_schedules.push(schedule);
                     }
                 }
+            }
+        }
+        if options.block_sim_pad_pickups {
+            for idx in 0..arena.num_boost_pads() {
+                arena.set_boost_pad_state(idx, BoostPadState { cooldown: 20.0 });
             }
         }
         step_ticks(
@@ -5169,6 +5313,58 @@ mod tests {
         assert_eq!(plan.duration, 8);
         assert_eq!(plan.cancel, 0.0);
         assert!((plan.pitch - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn activation_torque_uses_the_value_in_effect_a_frame_after_the_counter() {
+        let car = |torque: Option<(f32, usize)>| observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: Body::default(),
+            boost: None,
+            boost_raw: None,
+            inputs: observations::Inputs {
+                dodge_torque_replay_units: torque.map(|(x, frame)| Value {
+                    value: [x, 0.0, 0.0],
+                    frame,
+                    source: Source::Replay,
+                }),
+                ..observations::Inputs::default()
+            },
+        };
+        let frame = |index: usize, torque: Option<(f32, usize)>| observations::Frame {
+            index,
+            time: index as f32 / 30.0,
+            delta: 1.0 / 30.0,
+            ball: None,
+            cars: vec![car(torque)],
+            players: Vec::new(),
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: None,
+            events: Vec::new(),
+            pad_pickups: Vec::new(),
+        };
+        // Same direction as the previous dodge: the stamp is old and the value still holds.
+        let repeated = [frame(0, Some((1.5, 1))), frame(1, Some((1.5, 1)))];
+        assert_eq!(
+            activation_torque(&repeated, 0, &repeated[0].cars[0]),
+            Some([1.5, 0.0, 0.0])
+        );
+        // The new torque arrives a frame after the counter: the stale value at the counter's frame is not it.
+        let late = [frame(0, Some((1.5, 1))), frame(1, Some((-2.0, 1)))];
+        assert_eq!(
+            activation_torque(&late, 0, &late[0].cars[0]),
+            Some([-2.0, 0.0, 0.0])
+        );
+        // No torque has ever been sent: there is no direction.
+        let none = [frame(0, None), frame(1, None)];
+        assert_eq!(activation_torque(&none, 0, &none[0].cars[0]), None);
     }
 
     #[test]

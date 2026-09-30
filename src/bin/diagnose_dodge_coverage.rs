@@ -93,11 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     None => raw.value % 2 == 1,
                 };
                 if !activated
-                    || !car
-                        .inputs
-                        .dodge_torque_replay_units
-                        .as_ref()
-                        .is_some_and(|t| t.frame == f)
+                    || replay_to_rocketsim::conversion::activation_torque(frames, f, car).is_none()
                 {
                     continue;
                 }
