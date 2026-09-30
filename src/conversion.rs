@@ -117,6 +117,10 @@ pub struct ConvertOptions {
     /// Fresh packets, from the next one on, that the flip's pitch cancel is fitted on together (one
     /// cancel for all the intervals, the state reset to each packet); 1 fits the next packet alone.
     pub flip_cancel_packets: usize,
+    /// Treat every fresh packet as lag-free (physical tick = frame time) instead of inferring lags:
+    /// for replays recorded without replication lag (offline play), where a chain of lag-free
+    /// packets fixes the lags only up to a constant and inference advances the states wrongly.
+    pub zero_packet_lag: bool,
     /// Leave the first interval (the one the cancel is used for) out of the flip-cancel fit when later
     /// packets exist, so the residual at the next packet is a check. The default fits it too: the
     /// exported states are then constrained by that packet, but its residual is in sample and
@@ -208,6 +212,7 @@ impl Default for ConvertOptions {
             fit_ground_control_timing: true,
             fit_jump_timing: true,
             flip_cancel_packets: 1,
+            zero_packet_lag: false,
             flip_cancel_holdout: false,
             flip_cancel_source: FlipCancelSource::NextPacketFit,
             infer_flip_cancel: true,
@@ -1244,6 +1249,39 @@ fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
         "psyclops" => ("psyclops", CarBodyConfig::PSYCLOPS),
         unknown => panic!("unsupported body hitbox in catalog: {unknown}"),
     })
+}
+
+/// Lags of zero for every fresh packet (`zero_packet_lag`).
+pub fn zero_packet_lags(observations: &ObservedReplay) -> PacketLags {
+    let frames = &observations.frames;
+    let mut lags = PacketLags {
+        ball: vec![None; frames.len()],
+        cars: vec![None; frames.len()],
+        car_actor: HashMap::new(),
+    };
+    for (f, frame) in frames.iter().enumerate() {
+        if frame
+            .ball
+            .as_ref()
+            .and_then(|b| b.position.as_ref())
+            .is_some_and(|p| p.frame == f)
+        {
+            lags.ball[f] = Some(0.0);
+        }
+        for car in &frame.cars {
+            if car
+                .body
+                .position
+                .as_ref()
+                .is_some_and(|p| p.frame == f)
+            {
+                lags.cars[f] = Some(0.0);
+                lags.car_actor
+                    .insert((car.actor_id, car.actor_created_frame, f), 0.0);
+            }
+        }
+    }
+    lags
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3126,9 +3164,13 @@ pub fn convert_observations_with(
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut diagnostics = Diagnostics::default();
     let first_time = observations.frames.first().map_or(0.0, |frame| frame.time);
-    let packet_lags = options
-        .infer_packet_lag
-        .then(|| infer_packet_lags(observations, options));
+    let packet_lags = if options.zero_packet_lag {
+        Some(zero_packet_lags(observations))
+    } else {
+        options
+            .infer_packet_lag
+            .then(|| infer_packet_lags(observations, options))
+    };
     let mut previous_tick = 0;
     let mut previous_active = false;
     let mut ball_initialized = false;

@@ -55,6 +55,33 @@ With the true state and inputs, RocketSim's ground and air physics reproduce a 4
 
 **Use.** The dump gives true inputs and a 4-tick truth grid, which the corpus lacks: it can score the fits that bridge packets (thin the replay's packets, reconstruct, compare the frames without a packet with the dump), and check the jump, dodge and cancel inputs against the truth. One offline replay of one player, so it validates mechanisms, not absolute numbers for online play.
 
+### Thinned reconstruction against the dump (2026-09-30)
+
+**Protocol** (`dump_reconstruction replays/2024.1.13-17.14.8.replay replays/2024.1.13-17.14.8.json 1 2 3 4`). The dump replay has a fresh car packet in every frame and no lag. Only every K-th frame keeps its car body fields (the others repeat the last kept body with its old stamps, so they are not fresh), the thinned replay is converted with the new `zero_packet_lag` option (every fresh packet is at its frame time; the chain lags of this replay are spurious), and the exported car state of each frame is compared with the dump's true state. 210 frames outside active play (goal replay and countdown, which the converter does not simulate) are left out; 1,004 scored frames. `K = 1` is the unthinned replay and shows the floor.
+
+| K | Frames | Position p50 / p90 / p99 UU | Velocity p50 / p90 UU/s | Rotation p50 / p90 deg | Angular velocity p50 / p90 rad/s |
+| --- | --- | --- | --- | --- | --- |
+| 1 (floor: packet vs dump) | 1,004 | 0.83 / 4.89 / 6.5 | 0.6 / 4.1 | 0.08 / 0.39 | 0.006 / 0.034 |
+| 2, dropped frames, all fits | 502 | 0.85 / 5.00 / 6.6 | 1.1 / 15.5 | 0.18 / 0.89 | 0.059 / 0.397 |
+| 3, dropped frames, all fits | 670 | 0.89 / 5.05 / 7.3 | 1.7 / 19.0 | 0.32 / 1.59 | 0.115 / 0.615 |
+| 4, dropped frames, all fits | 753 | 1.03 / 5.56 / 12.1 | 2.6 / 35.0 | 0.50 / 2.98 | 0.155 / 0.878 |
+| 4, 12 ticks after the packet | 251 | 1.21 / 6.14 / 15.1 | 5.4 / 46.1 | 0.88 / 4.48 | 0.178 / 0.882 |
+
+**Position is at the floor.** The replay's own packets differ from the dump by 0.8 UU p50 / 4.9 UU p90 (packet quantization and the dump's precision), and bridging 1-3 dropped frames (4-12 ticks) adds almost nothing to that (p90 5.6 UU at K = 4, worst frame 20 UU). Rotation and angular velocity are within 1-3 degrees p90 at K = 2-4; velocity is the largest remaining error, as in the corpus (ground p90 22-42 UU/s, jump window 48-112 UU/s at K = 2 / 4).
+
+**Effect of the timing fits on this replay** (K = 4, dropped frames; `all fits` / `no timing fits` (ground, jump, dodge and cancel fits off, lookahead controls kept) / `no fits and no lookahead controls`):
+
+| Group | Velocity p90 UU/s | Rotation p90 deg | Angular velocity p90 rad/s |
+| --- | --- | --- | --- |
+| Flip | 15.0 / 16.5 / 16.5 | 7.78 / 13.49 / 13.49 | 1.68 / 3.44 / 3.44 |
+| Ground | 42.1 / 40.1 / 30.2 | 1.04 / 1.04 / 0.98 | 0.336 / 0.336 / 0.330 |
+| Jump window | 112 / 104 / 104 | 2.02 / 2.02 / 1.97 | 0.88 / 0.88 / 0.88 |
+| Air | 9.3 / 8.9 / 8.9 | 2.74 / 3.84 / 3.84 | 0.78 / 1.15 / 1.15 |
+
+The flip (dodge start and cancel) and airborne rotation fits help on the true-input replay (flip rotation p90 13.5 to 7.8 deg, flip angular velocity 3.44 to 1.68 rad/s, all K = 2-4), independent of the online delay assumption. The ground control timing fit and the lookahead controls **hurt** here (ground velocity p90 30 without them, 40 with lookahead, 42 with the fit), and the jump fit gains nothing. This is expected, not a contradiction of the online result: both encode the online finding that a control change is first seen a frame late (the midpoint rule), and this replay's observed controls are the true controls at the frame time (see above), so the assumption is false for it. It shows that the ground and jump timing assumptions are properties of online replays and would be wrong for offline files; a lag-free replay should be recognised (the `zero_packet_lag` option is the packet part, not automatic yet) and given no lookahead and no ground or jump timing fit. The online timing of controls cannot be tested against this file.
+
+**What the dump cannot test.** Online replication delay (lag 0-4 ticks per actor, controls seen a frame late). Only the physics of the bridging and the flip and cancel fits are validated by it.
+
 ## The flip-cancel rule of `external/RLCarInputSolver` on sparse packets (2026-09-30)
 
 **Question.** Does the flip-cancel compensation in the supplied solver (`AirSolver.cpp`, and `inverse_aerial_controls.py`) work as a way to choose the cancel? The earlier comparison ('RLCarInputSolver comparison') covered only its aerial orientation formula and excluded pairs with a dodge, so it had not been tested. Its rule, per state pair: a full cancel (`pitch = sign(local pitch angular velocity)`) when the local pitch angular speed fell by more than 0.05 rad/s per tick, else none; partial cancels are a TODO there, and stalls (yaw and roll rates of opposite sign) are handled separately.
