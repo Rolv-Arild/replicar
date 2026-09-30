@@ -45,6 +45,35 @@ impl fmt::Display for ConvertError {
 
 impl Error for ConvertError {}
 
+/// How the flip's pitch cancel is chosen for the interval from a fresh packet to the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FlipCancelSource {
+    /// Simulate the candidate cancels from this packet and keep the one whose angular velocity
+    /// matches the next packet (in sample there; the default).
+    NextPacketFit,
+    /// The same fit on the *previous* interval (previous fresh packet to this one), used for the
+    /// next interval: causal, so the residual at the next packet is a check.
+    PreviousIntervalFit,
+    /// The rule of `external/RLCarInputSolver` (AirSolver.cpp) on the previous interval, used for
+    /// the next one: a full cancel when the local pitch angular speed fell by more than 0.05 rad/s
+    /// per tick, else none. Causal.
+    ExternalRulePrevious,
+    /// The same rule on the interval to the next packet (in sample there).
+    ExternalRuleNext,
+}
+
+impl FlipCancelSource {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "next-fit" => Self::NextPacketFit,
+            "previous-fit" => Self::PreviousIntervalFit,
+            "external-previous" => Self::ExternalRulePrevious,
+            "external-next" => Self::ExternalRuleNext,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConvertOptions {
     pub collision_meshes: PathBuf,
@@ -93,6 +122,8 @@ pub struct ConvertOptions {
     /// exported states are then constrained by that packet, but its residual is in sample and
     /// flatters rotation and angular velocity in flip windows.
     pub flip_cancel_holdout: bool,
+    /// How the flip's pitch cancel is chosen (`FlipCancelSource`); the default fits the next packet.
+    pub flip_cancel_source: FlipCancelSource,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -178,6 +209,7 @@ impl Default for ConvertOptions {
             fit_jump_timing: true,
             flip_cancel_packets: 1,
             flip_cancel_holdout: false,
+            flip_cancel_source: FlipCancelSource::NextPacketFit,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
@@ -2535,6 +2567,106 @@ fn fit_flip_cancel(
     if !active(index) {
         return None;
     }
+    // Causal choices use the previous interval only (previous fresh packet of the same flip to this one).
+    if matches!(
+        options.flip_cancel_source,
+        FlipCancelSource::PreviousIntervalFit | FlipCancelSource::ExternalRulePrevious
+    ) {
+        let mut previous = None;
+        for candidate in (index.saturating_sub(24)..index).rev() {
+            if !active(candidate) || withheld(candidate) {
+                return None;
+            }
+            let Some(other) = frames[candidate].cars.iter().find(|c| {
+                c.actor_id == car.actor_id
+                    && c.actor_created_frame == car.actor_created_frame
+                    && c.player_key == car.player_key
+            }) else {
+                return None;
+            };
+            let b = &other.body;
+            let (Some(pos), Some(vel), Some(rot), Some(ang)) = (
+                b.position.as_ref().filter(|x| x.frame == candidate),
+                b.linear_velocity.as_ref().filter(|x| x.frame == candidate),
+                b.rotation_xyzw.as_ref().filter(|x| x.frame == candidate),
+                b.angular_velocity_replay_units
+                    .as_ref()
+                    .filter(|x| x.frame == candidate),
+            ) else {
+                continue;
+            };
+            if other.inputs.dodge_active_raw.as_ref().map(|d| d.value) != Some(counter) {
+                return None;
+            }
+            let lag = match packet_lags {
+                Some(lags) => lags
+                    .car_actor
+                    .get(&(car.actor_id, car.actor_created_frame, candidate))
+                    .copied()
+                    .or(lags.cars[candidate])
+                    .map_or(
+                        (timeline(candidate) - timeline(candidate - 1)).max(0) / 2,
+                        |lag| lag.round().max(0.0) as i64,
+                    ),
+                None => 0,
+            };
+            let ticks = (timeline(index) - lag_a as i64) - (timeline(candidate) - lag);
+            if !(1..=40).contains(&ticks) {
+                return None;
+            }
+            let quat = quaternion(rot.value)?;
+            previous = Some((
+                ticks,
+                vec3(pos.value),
+                vec3(vel.value),
+                Mat3A::from_quat(quat),
+                vec3(ang.value) * 0.01,
+            ));
+            break;
+        }
+        let (ticks, pos, vel, rot, ang) = previous?;
+        let now_ang = vec3(ang0.value) * 0.01;
+        if options.flip_cancel_source == FlipCancelSource::ExternalRulePrevious {
+            // external/RLCarInputSolver AirSolver.cpp: local pitch angular speed fell by more than
+            // 0.05 rad/s per tick (local y is the right axis).
+            let from = ang.dot(rot.y_axis).abs();
+            let to = now_ang.dot(state.phys.rot_mat.y_axis).abs();
+            return Some(if from > to + 0.05 * ticks as f32 {
+                1.0
+            } else {
+                0.0
+            });
+        }
+        let sign = state.flip_rel_torque.y.signum();
+        let mut start = *state;
+        start.phys.pos = pos;
+        start.phys.vel = vel;
+        start.phys.rot_mat = rot;
+        start.phys.ang_vel = ang;
+        start.flip_time = (state.flip_time - ticks as f32 / 120.0).max(0.0);
+        let mut best: Option<(f32, f32)> = None;
+        for step in 0..=4 {
+            let cancel = step as f32 * 0.25;
+            scratch.set_car_state(0, start);
+            let mut controls = *base_controls;
+            controls.jump = false;
+            controls.pitch = cancel * sign;
+            scratch.set_car_controls(0, controls);
+            for _ in 0..ticks {
+                scratch.step_tick();
+            }
+            let mut end = *scratch.get_car_state(0);
+            let speed = end.phys.ang_vel.length();
+            if speed > 5.5 {
+                end.phys.ang_vel *= 5.5 / speed;
+            }
+            let error = (end.phys.ang_vel - now_ang).length();
+            if best.is_none_or(|(_, e)| error < e - 1e-4) {
+                best = Some((cancel, error));
+            }
+        }
+        return best.map(|(cancel, _)| cancel);
+    }
     // The next fresh packets of the flip (up to `flip_cancel_packets`, within 80 ticks, while the dodge
     // counter is unchanged): angular velocity to score and the full physical state to reset to, as
     // the converter does at each packet.
@@ -2611,6 +2743,18 @@ fn fit_flip_cancel(
     }
     if targets.is_empty() {
         return None;
+    }
+    if options.flip_cancel_source == FlipCancelSource::ExternalRuleNext {
+        let (ticks, _, _, rot, ang) = targets[0];
+        let from = (vec3(ang0.value) * 0.01)
+            .dot(state.phys.rot_mat.y_axis)
+            .abs();
+        let to = ang.dot(rot.y_axis).abs();
+        return Some(if from > to + 0.05 * ticks as f32 {
+            1.0
+        } else {
+            0.0
+        });
     }
     let sign = state.flip_rel_torque.y.signum();
     // One cancel for all the intervals: each candidate is simulated interval by interval from the

@@ -78,6 +78,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         !env::args_os().any(|arg| arg == "--no-fit-ground-control-timing");
     options.fit_jump_timing = !env::args_os().any(|arg| arg == "--no-fit-jump-timing");
     options.flip_cancel_holdout = env::args_os().any(|arg| arg == "--flip-cancel-holdout");
+    if let Some(name) = env::args()
+        .skip_while(|a| a != "--flip-cancel-source")
+        .nth(1)
+    {
+        if let Some(source) = replay_to_rocketsim::conversion::FlipCancelSource::from_name(&name) {
+            options.flip_cancel_source = source;
+        }
+    }
     if let Some(n) = env::args()
         .skip_while(|a| a != "--flip-cancel-packets")
         .nth(1)

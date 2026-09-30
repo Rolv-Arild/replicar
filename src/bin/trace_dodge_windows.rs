@@ -57,6 +57,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     options.infer_dodge_start = !env::args().any(|arg| arg == "--no-infer-dodge-start");
     options.flip_cancel_holdout = env::args().any(|arg| arg == "--flip-cancel-holdout");
+    if let Some(name) = env::args()
+        .skip_while(|a| a != "--flip-cancel-source")
+        .nth(1)
+    {
+        if let Some(source) = replay_to_rocketsim::conversion::FlipCancelSource::from_name(&name) {
+            options.flip_cancel_source = source;
+        }
+    }
     if let Some(n) = env::args()
         .skip_while(|a| a != "--flip-cancel-packets")
         .nth(1)

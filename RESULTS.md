@@ -29,6 +29,27 @@ Per replay (60 each), p90 improved for velocity in 60 and 60, rotation in 58 and
 
 **What is left.** The first packet after a jump start keeps a velocity p90 of about 285-295 UU/s (about 15% of the events: refused when a dodge follows within the span without an exact lag on the second-next packet, or no second-next packet within 45 ticks). The wall/ramp p90 is still 49-50 UU/s against 36-38 for the floor, and the ground fit keeps its ball rule (near-ball driving is refused; the scratch ball is parked).
 
+## The flip-cancel rule of `external/RLCarInputSolver` on sparse packets (2026-09-30)
+
+**Question.** Does the flip-cancel compensation in the supplied solver (`AirSolver.cpp`, and `inverse_aerial_controls.py`) work as a way to choose the cancel? The earlier comparison ('RLCarInputSolver comparison') covered only its aerial orientation formula and excluded pairs with a dodge, so it had not been tested. Its rule, per state pair: a full cancel (`pitch = sign(local pitch angular velocity)`) when the local pitch angular speed fell by more than 0.05 rad/s per tick, else none; partial cancels are a TODO there, and stalls (yaw and roll rates of opposite sign) are handled separately.
+
+**Protocol.** `flip_cancel_source` (`--flip-cancel-source`): `next-fit` (the default: simulate the candidate cancels and match the next packet, in sample), `external-next` (the rule on the interval to the next packet, in sample), `previous-fit` (the same simulation fit on the previous interval, used for the next; causal) and `external-previous` (the rule on the previous interval, used for the next; causal). Matched dodge events (`trace_dodge_windows --event-lines`; train 14,078 / validation 14,709), squared error of rotation and angular velocity at packets 2-4 after the activation, relative to no cancel fit (`--no-infer-flip-cancel`):
+
+| Cancel choice | Rotation | Angular velocity | Uses |
+| --- | --- | --- | --- |
+| `next-fit` (default) | 0.678 / 0.672 | 0.626 / 0.618 | next packet (in sample) |
+| `external-next` | 1.054 / 1.058 | 1.032 / 1.031 | next packet (in sample) |
+| `previous-fit` | 0.872 / 0.869 | 0.945 / 0.937 | past only |
+| `external-previous` | 0.970 / 0.979 | 1.047 / 1.051 | past only |
+| Two-packet held-out fit | 0.846 / 0.831 | 0.825 / 0.805 | future, first interval left out |
+| No cancel fit | 1.000 | 1.000 | |
+
+(Packets 3-4 only, train: `next-fit` 0.484 and 0.428, `external-next` 1.119 and 1.085, `previous-fit` 0.700 and 0.787, `external-previous` 0.884 and 0.978.)
+
+**Findings.** (1) The external rule as translated is not usable on our packets: in sample it is worse than fitting no cancel (1.05 rotation, 1.03 angular velocity), and causally it gains nothing (0.97 and 1.05). (2) A simulation fit on the previous interval, using only past packets, does help: 13% of the rotation error and 6% of the angular velocity error, 30% and 21% at packets 3-4, on both splits. (3) Likely cause of (1), not isolated: the rule is a single-tick heuristic (its threshold scales with `tickDelta`); our packets are 4-12 ticks apart and a flipping car turns through a large angle in that time, so the local pitch axis of the two states differs, and it is binary. That it needs adjacent states is a property of the method, not of its code.
+
+**Use.** `previous-fit` is a causal cancel estimate (past packets only), so it is the natural estimate for a flip interval with no later packet (masked prediction, the last interval of a flip); the converter already holds the last fitted cancel there (`flip_last`), which is the same idea. Not wired into the masked path as a separate step. The default is unchanged.
+
 ## The replay's dodge torque is RocketSim's `flip_rel_torque` times (2.60, 2.24) (2026-09-30)
 
 `check_dodge_torque replays/train`: on 5,643 dodge activations with a fresh torque, `(tx / 2.60)^2 + (ty / 2.24)^2` has radius 0.998 to 1.002 for every one (p1/p50/p99 0.998/1.000/1.002; none near the origin, none inside or outside). RocketSim builds a unit dodge direction `normalize(-pitch, yaw + roll)` (x forward, y right) and sets `flip_rel_torque = (-dir.y, dir.x, 0)`, applied times `flip::TORQUE = (260, 224, 0)` (X left/right, Y forward/backward) in the car frame, so the replicated torque is that vector in units of 1/100. The converter's `pitch = -ty / 2.24` and `yaw = -tx / 2.60` follow from it (the x component goes on yaw; RocketSim sums yaw and roll for the side direction, so the dodge is the same either way, and the air-control torque is off on the press tick because the press pitch has the opposite sign to `flip_rel_torque.y` and a side dodge has none). Forward dodges are 5,176 of 5,642 (forward-left 2,690, forward-right 2,486, backward 466); pure-axis dodges forward 382, backward 85, right 54, left 64. The left/right sign is not checked by this distribution.
