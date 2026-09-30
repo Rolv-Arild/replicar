@@ -5566,7 +5566,8 @@ mod tests {
         arena.set_ball_state(parked);
         arena.set_car_state(0, start);
         let (mut pending, mut ground, mut events) = (Vec::new(), vec![schedule], Vec::new());
-        step_ticks(&mut arena, 8, false, &mut pending, &mut ground, &mut events);
+        let mut air: Vec<AirSchedule> = Vec::new();
+        step_ticks(&mut arena, 8, false, &mut pending, &mut ground, &mut air, &mut events);
         let end = arena.get_car_state(0);
         assert!(
             (end.phys.pos - packets[8].phys.pos).length() < 0.01
@@ -5751,7 +5752,7 @@ mod tests {
                         },
                     );
                 }
-                step_ticks(&mut arena, 1, false, &mut pending, &mut ground, &mut events);
+                step_ticks(&mut arena, 1, false, &mut pending, &mut ground, &mut Vec::new(), &mut events);
             }
             *arena.get_car_state(0)
         };
