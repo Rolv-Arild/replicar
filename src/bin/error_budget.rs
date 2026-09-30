@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.fit_ground_control_timing =
         !env::args_os().any(|arg| arg == "--no-fit-ground-control-timing");
     options.fit_jump_timing = !env::args_os().any(|arg| arg == "--no-fit-jump-timing");
+    options.flip_cancel_holdout = env::args_os().any(|arg| arg == "--flip-cancel-holdout");
     options.apply_hit_extra_impulse = env::args_os().any(|arg| arg == "--apply-hit-impulse");
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");

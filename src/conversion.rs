@@ -85,6 +85,12 @@ pub struct ConvertOptions {
     /// second-next fresh car packet and drive the interval to the next fresh packet with it
     /// (`fit_jump_timing`). Needs the inferred packet lags and `infer_jump_from_active`.
     pub fit_jump_timing: bool,
+    /// Fit the flip's pitch cancel on the second-next fresh packet and hold it for the interval to
+    /// the next one, so the residual at the next packet is a check. The default fits the next packet
+    /// itself: the exported states are then constrained by it (better reconstruction), but the
+    /// residual there is in sample and flatters rotation and angular velocity in flip windows
+    /// (held out: car rotation p90 2.77 to 2.99 deg, angular velocity p90 0.62 to 0.69 rad/s).
+    pub flip_cancel_holdout: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
     /// next fresh car packet, and hold the last inferred cancel where no later packet exists.
@@ -168,6 +174,7 @@ impl Default for ConvertOptions {
             lookahead_ground_controls: true,
             fit_ground_control_timing: true,
             fit_jump_timing: true,
+            flip_cancel_holdout: false,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
@@ -2479,11 +2486,14 @@ fn step_ticks(
     }
 }
 
-/// Fits the flip's pitch-cancel amount over the span from this fresh car packet to the next one.
-/// Candidate cancels (opposite pitch input of 0, 0.25, ..., 1) are simulated in a scratch arena
-/// from the current corrected state to the next packet's physical tick, and the one whose angular
-/// velocity is closest to that packet wins. Uses a later packet, so it is offline reconstruction;
-/// spans containing a withheld frame, an inactive frame, or a change of dodge counter are refused.
+/// Fits the flip's pitch-cancel amount from this fresh car packet. Candidate cancels (opposite pitch
+/// input of 0, 0.25, ..., 1) are simulated in a scratch arena from the current corrected state to the
+/// next fresh packet's physical tick (or, with `flip_cancel_holdout`, the second next, held for the
+/// interval to the next packet so that packet is not used by the fit), and the one whose angular
+/// velocity is closest wins. The default is in sample at the next packet; once the flip's speed
+/// saturates at 5.5 rad/s the candidates barely differ and the choice can alternate between
+/// packets. Uses later packets, so it is offline reconstruction; spans containing a withheld frame,
+/// an inactive frame, or a change of dodge counter are refused.
 #[allow(clippy::too_many_arguments)]
 fn fit_flip_cancel(
     observations: &ObservedReplay,
@@ -2521,8 +2531,15 @@ fn fit_flip_cancel(
     if !active(index) {
         return None;
     }
-    for candidate in index + 1..=(index + 8).min(frames.len() - 1) {
+    // The next two fresh angular-velocity packets: the cancel is fitted on the second (or on the
+    // first when no second exists in range) and held for the interval to the first.
+    let mut targets: Vec<(i64, Vec3A)> = Vec::new();
+    for candidate in index + 1..=(index + 12).min(frames.len() - 1) {
+        let searching_second = !targets.is_empty();
         if !active(candidate) || withheld(candidate) {
+            if searching_second {
+                break;
+            }
             return None;
         }
         let Some(other) = frames[candidate].cars.iter().find(|c| {
@@ -2530,6 +2547,9 @@ fn fit_flip_cancel(
                 && c.actor_created_frame == car.actor_created_frame
                 && c.player_key == car.player_key
         }) else {
+            if searching_second {
+                break;
+            }
             return None;
         };
         let Some(ang1) = other
@@ -2541,6 +2561,9 @@ fn fit_flip_cancel(
             continue;
         };
         if other.inputs.dodge_active_raw.as_ref().map(|d| d.value) != Some(counter) {
+            if searching_second {
+                break;
+            }
             return None;
         }
         let lag_b = match packet_lags {
@@ -2557,34 +2580,40 @@ fn fit_flip_cancel(
         };
         let ticks = (timeline(candidate) - lag_b) - (timeline(index) - lag_a as i64);
         if !(1..=40).contains(&ticks) {
+            if searching_second {
+                break;
+            }
             return None;
         }
-        let target = vec3(ang1.value) * 0.01;
-        let sign = state.flip_rel_torque.y.signum();
-        let mut best: Option<(f32, f32)> = None;
-        for step in 0..=4 {
-            let cancel = step as f32 * 0.25;
-            scratch.set_car_state(0, *state);
-            let mut controls = *base_controls;
-            controls.jump = false;
-            controls.pitch = cancel * sign;
-            scratch.set_car_controls(0, controls);
-            for _ in 0..ticks {
-                scratch.step_tick();
-            }
-            let mut end = *scratch.get_car_state(0);
-            let speed = end.phys.ang_vel.length();
-            if speed > 5.5 {
-                end.phys.ang_vel *= 5.5 / speed;
-            }
-            let error = (end.phys.ang_vel - target).length();
-            if best.is_none_or(|(_, e)| error < e - 1e-4) {
-                best = Some((cancel, error));
-            }
+        targets.push((ticks, vec3(ang1.value) * 0.01));
+        if targets.len() == 2 || !options.flip_cancel_holdout {
+            break;
         }
-        return best.map(|(cancel, _)| cancel);
     }
-    None
+    let &(ticks, target) = targets.last()?;
+    let sign = state.flip_rel_torque.y.signum();
+    let mut best: Option<(f32, f32)> = None;
+    for step in 0..=4 {
+        let cancel = step as f32 * 0.25;
+        scratch.set_car_state(0, *state);
+        let mut controls = *base_controls;
+        controls.jump = false;
+        controls.pitch = cancel * sign;
+        scratch.set_car_controls(0, controls);
+        for _ in 0..ticks {
+            scratch.step_tick();
+        }
+        let mut end = *scratch.get_car_state(0);
+        let speed = end.phys.ang_vel.length();
+        if speed > 5.5 {
+            end.phys.ang_vel *= 5.5 / speed;
+        }
+        let error = (end.phys.ang_vel - target).length();
+        if best.is_none_or(|(_, e)| error < e - 1e-4) {
+            best = Some((cancel, error));
+        }
+    }
+    best.map(|(cancel, _)| cancel)
 }
 
 /// A dodge start plan: press `jump` with the dodge direction `start_offset` ticks after the current
