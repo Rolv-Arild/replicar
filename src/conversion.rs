@@ -260,6 +260,22 @@ pub struct AppliedPacketLag {
     pub source: &'static str,
 }
 
+/// An input the converter inferred by fitting a later packet (not observed): a jump press, or a dodge
+/// press with its direction and pitch cancel. `tick` is on the replay timeline (120 Hz, like
+/// `ConvertedFrame::timeline_tick`) and is the first tick the input takes effect.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FittedInput {
+    pub slot: usize,
+    /// `"jump"` or `"dodge"`.
+    pub kind: &'static str,
+    pub tick: u64,
+    /// Dodge only: RocketSim pitch and yaw controls of the press and the fitted cancel (0..1 of the
+    /// flip's pitch torque removed).
+    pub pitch: f32,
+    pub yaw: f32,
+    pub cancel: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConvertedFrame {
     pub replay_frame: usize,
@@ -270,6 +286,8 @@ pub struct ConvertedFrame {
     pub simulated_events: Vec<SimEvent>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
+    /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
+    pub fitted_inputs: Vec<FittedInput>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -1269,12 +1287,7 @@ pub fn zero_packet_lags(observations: &ObservedReplay) -> PacketLags {
             lags.ball[f] = Some(0.0);
         }
         for car in &frame.cars {
-            if car
-                .body
-                .position
-                .as_ref()
-                .is_some_and(|p| p.frame == f)
-            {
+            if car.body.position.as_ref().is_some_and(|p| p.frame == f) {
                 lags.cars[f] = Some(0.0);
                 lags.car_actor
                     .insert((car.actor_id, car.actor_created_frame, f), 0.0);
@@ -3206,6 +3219,7 @@ pub fn convert_observations_with(
             .as_ref()
             .is_some_and(|state| state.value == "Active");
         let mut events = Vec::new();
+        let mut fitted_arena: Vec<(usize, &'static str, u64, f32, f32, f32)> = Vec::new();
         let simulated = active && previous_active && gap > 0 && gap <= options.max_gap_ticks;
         previous_tick = timeline_tick;
         previous_active = active;
@@ -3770,6 +3784,14 @@ pub fn convert_observations_with(
                             scratch,
                         ) {
                             let now = arena.tick_count();
+                            fitted_arena.push((
+                                slot,
+                                "dodge",
+                                now + plan.start_offset,
+                                plan.pitch,
+                                plan.yaw,
+                                plan.cancel,
+                            ));
                             pending_dodges.push(PendingDodge {
                                 slot,
                                 start_tick: now + plan.start_offset,
@@ -3869,6 +3891,14 @@ pub fn convert_observations_with(
                         ) {
                             if let Some(plan) = flip.dodge {
                                 let now = arena.tick_count();
+                                fitted_arena.push((
+                                    slot,
+                                    "dodge",
+                                    now + plan.start_offset,
+                                    plan.pitch,
+                                    plan.yaw,
+                                    plan.cancel,
+                                ));
                                 pending_dodges.push(PendingDodge {
                                     slot,
                                     start_tick: now + plan.start_offset,
@@ -3891,6 +3921,15 @@ pub fn convert_observations_with(
                         }
                     }
                     if let Some(schedule) = schedule {
+                        let mut jumping = false;
+                        for entry in &schedule.entries {
+                            if let Some(jump) = entry.5 {
+                                if jump && !jumping {
+                                    fitted_arena.push((slot, "jump", entry.0, 0.0, 0.0, 0.0));
+                                }
+                                jumping = jump;
+                            }
+                        }
                         ground_schedules.push(schedule);
                     }
                 }
@@ -3983,6 +4022,7 @@ pub fn convert_observations_with(
                 }
             }
         }
+        let timeline_offset = timeline_tick as i64 - arena.tick_count() as i64;
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -3990,6 +4030,17 @@ pub fn convert_observations_with(
             state: arena.get_arena_state(),
             simulated_events: events,
             packet_lags: applied_lags,
+            fitted_inputs: fitted_arena
+                .into_iter()
+                .map(|(slot, kind, tick, pitch, yaw, cancel)| FittedInput {
+                    slot,
+                    kind,
+                    tick: (tick as i64 + timeline_offset).max(0) as u64,
+                    pitch,
+                    yaw,
+                    cancel,
+                })
+                .collect(),
         };
         on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }

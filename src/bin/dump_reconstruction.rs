@@ -92,7 +92,9 @@ fn print_rows(title: &str, rows: &mut BTreeMap<String, Rows>) {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.len() < 2 {
-        return Err("usage: dump_reconstruction <replay> <dump.json> [--player name] [K...]".into());
+        return Err(
+            "usage: dump_reconstruction <replay> <dump.json> [--player name] [K...]".into(),
+        );
     }
     let replay_path = PathBuf::from(args.remove(0));
     let dump_path = PathBuf::from(args.remove(0));
@@ -213,7 +215,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "air"
                 };
                 let since = f % k;
-                let ball_distance = (vec3(&dump_frame["ball"]["location"], ["X", "Y", "Z"]) - tp).length();
+                let ball_distance =
+                    (vec3(&dump_frame["ball"]["location"], ["X", "Y", "Z"]) - tp).length();
                 worst.push((
                     (car.phys.pos - tp).length(),
                     f,
