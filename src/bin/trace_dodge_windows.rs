@@ -57,6 +57,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     options.infer_dodge_start = !env::args().any(|arg| arg == "--no-infer-dodge-start");
     options.flip_cancel_holdout = env::args().any(|arg| arg == "--flip-cancel-holdout");
+    if let Some(n) = env::args()
+        .skip_while(|a| a != "--flip-cancel-packets")
+        .nth(1)
+    {
+        options.flip_cancel_packets = n.parse().unwrap_or(1);
+    }
+    options.infer_flip_cancel = !env::args().any(|arg| arg == "--no-infer-flip-cancel");
     let event_lines = env::args().any(|arg| arg == "--event-lines");
     rocketsim::init(Path::new("collision_meshes"), true)?;
     let mut events: Vec<Event> = Vec::new();

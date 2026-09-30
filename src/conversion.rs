@@ -85,11 +85,13 @@ pub struct ConvertOptions {
     /// second-next fresh car packet and drive the interval to the next fresh packet with it
     /// (`fit_jump_timing`). Needs the inferred packet lags and `infer_jump_from_active`.
     pub fit_jump_timing: bool,
-    /// Fit the flip's pitch cancel on the second-next fresh packet and hold it for the interval to
-    /// the next one, so the residual at the next packet is a check. The default fits the next packet
-    /// itself: the exported states are then constrained by it (better reconstruction), but the
-    /// residual there is in sample and flatters rotation and angular velocity in flip windows
-    /// (held out: car rotation p90 2.77 to 2.99 deg, angular velocity p90 0.62 to 0.69 rad/s).
+    /// Fresh packets, from the next one on, that the flip's pitch cancel is fitted on together (one
+    /// cancel for all the intervals, the state reset to each packet); 1 fits the next packet alone.
+    pub flip_cancel_packets: usize,
+    /// Leave the first interval (the one the cancel is used for) out of the flip-cancel fit when later
+    /// packets exist, so the residual at the next packet is a check. The default fits it too: the
+    /// exported states are then constrained by that packet, but its residual is in sample and
+    /// flatters rotation and angular velocity in flip windows.
     pub flip_cancel_holdout: bool,
     /// Offline: while a car is flipping, infer how much of the flip's pitch torque a player cancelled
     /// (opposite pitch input, which replays do not carry) by simulating candidates against the
@@ -174,6 +176,7 @@ impl Default for ConvertOptions {
             lookahead_ground_controls: true,
             fit_ground_control_timing: true,
             fit_jump_timing: true,
+            flip_cancel_packets: 1,
             flip_cancel_holdout: false,
             infer_flip_cancel: true,
             apply_hit_extra_impulse: false,
@@ -2487,13 +2490,14 @@ fn step_ticks(
 }
 
 /// Fits the flip's pitch-cancel amount from this fresh car packet. Candidate cancels (opposite pitch
-/// input of 0, 0.25, ..., 1) are simulated in a scratch arena from the current corrected state to the
-/// next fresh packet's physical tick (or, with `flip_cancel_holdout`, the second next, held for the
-/// interval to the next packet so that packet is not used by the fit), and the one whose angular
-/// velocity is closest wins. The default is in sample at the next packet; once the flip's speed
-/// saturates at 5.5 rad/s the candidates barely differ and the choice can alternate between
-/// packets. Uses later packets, so it is offline reconstruction; spans containing a withheld frame,
-/// an inactive frame, or a change of dodge counter are refused.
+/// input of 0, 0.25, ..., 1) are simulated in a scratch arena from the current corrected state
+/// through the next `flip_cancel_packets` fresh packets (the state reset to each, as the converter
+/// does), and the one whose summed angular-velocity error is smallest wins; it is used for the
+/// interval to the next packet. With `flip_cancel_holdout` that first interval is left out of the
+/// sum. Fitting the next packet alone (the default, one packet) is in sample there, and once the
+/// flip's speed saturates at 5.5 rad/s the candidates barely differ and the choice can alternate
+/// between packets. Uses later packets, so it is offline reconstruction; spans containing a withheld
+/// frame, an inactive frame, or a change of dodge counter are refused.
 #[allow(clippy::too_many_arguments)]
 fn fit_flip_cancel(
     observations: &ObservedReplay,
@@ -2531,13 +2535,15 @@ fn fit_flip_cancel(
     if !active(index) {
         return None;
     }
-    // The next two fresh angular-velocity packets: the cancel is fitted on the second (or on the
-    // first when no second exists in range) and held for the interval to the first.
-    let mut targets: Vec<(i64, Vec3A)> = Vec::new();
-    for candidate in index + 1..=(index + 12).min(frames.len() - 1) {
-        let searching_second = !targets.is_empty();
+    // The next fresh packets of the flip (up to `flip_cancel_packets`, within 80 ticks, while the dodge
+    // counter is unchanged): angular velocity to score and the full physical state to reset to, as
+    // the converter does at each packet.
+    let max_packets = options.flip_cancel_packets.max(1);
+    let mut targets: Vec<(i64, Vec3A, Vec3A, Mat3A, Vec3A)> = Vec::new();
+    for candidate in index + 1..=(index + 24).min(frames.len() - 1) {
+        let searching_more = !targets.is_empty();
         if !active(candidate) || withheld(candidate) {
-            if searching_second {
+            if searching_more {
                 break;
             }
             return None;
@@ -2547,21 +2553,24 @@ fn fit_flip_cancel(
                 && c.actor_created_frame == car.actor_created_frame
                 && c.player_key == car.player_key
         }) else {
-            if searching_second {
+            if searching_more {
                 break;
             }
             return None;
         };
-        let Some(ang1) = other
-            .body
-            .angular_velocity_replay_units
-            .as_ref()
-            .filter(|a| a.frame == candidate)
-        else {
+        let b = &other.body;
+        let (Some(pos), Some(vel), Some(rot), Some(ang)) = (
+            b.position.as_ref().filter(|x| x.frame == candidate),
+            b.linear_velocity.as_ref().filter(|x| x.frame == candidate),
+            b.rotation_xyzw.as_ref().filter(|x| x.frame == candidate),
+            b.angular_velocity_replay_units
+                .as_ref()
+                .filter(|x| x.frame == candidate),
+        ) else {
             continue;
         };
         if other.inputs.dodge_active_raw.as_ref().map(|d| d.value) != Some(counter) {
-            if searching_second {
+            if searching_more {
                 break;
             }
             return None;
@@ -2579,38 +2588,69 @@ fn fit_flip_cancel(
             None => 0,
         };
         let ticks = (timeline(candidate) - lag_b) - (timeline(index) - lag_a as i64);
-        if !(1..=40).contains(&ticks) {
-            if searching_second {
+        let previous_ticks = targets.last().map_or(0, |t| t.0);
+        if !(previous_ticks + 1..=80).contains(&ticks) {
+            if searching_more {
                 break;
             }
             return None;
         }
-        targets.push((ticks, vec3(ang1.value) * 0.01));
-        if targets.len() == 2 || !options.flip_cancel_holdout {
+        let Some(quat) = quaternion(rot.value) else {
+            continue;
+        };
+        targets.push((
+            ticks,
+            vec3(pos.value),
+            vec3(vel.value),
+            Mat3A::from_quat(quat),
+            vec3(ang.value) * 0.01,
+        ));
+        if targets.len() == max_packets {
             break;
         }
     }
-    let &(ticks, target) = targets.last()?;
+    if targets.is_empty() {
+        return None;
+    }
     let sign = state.flip_rel_torque.y.signum();
+    // One cancel for all the intervals: each candidate is simulated interval by interval from the
+    // packet, the state reset to each later packet as the converter does, and the angular-velocity
+    // errors are summed. With `flip_cancel_holdout` the first interval (the one the cancel is used
+    // for) is left out of the sum when there are later ones, so its residual stays a check.
+    let first_scored = usize::from(options.flip_cancel_holdout && targets.len() > 1);
     let mut best: Option<(f32, f32)> = None;
     for step in 0..=4 {
         let cancel = step as f32 * 0.25;
-        scratch.set_car_state(0, *state);
-        let mut controls = *base_controls;
-        controls.jump = false;
-        controls.pitch = cancel * sign;
-        scratch.set_car_controls(0, controls);
-        for _ in 0..ticks {
-            scratch.step_tick();
+        let mut start = *state;
+        let mut previous_ticks = 0;
+        let mut total = 0.0f32;
+        for (j, target) in targets.iter().enumerate() {
+            scratch.set_car_state(0, start);
+            let mut controls = *base_controls;
+            controls.jump = false;
+            controls.pitch = cancel * sign;
+            scratch.set_car_controls(0, controls);
+            for _ in 0..(target.0 - previous_ticks) {
+                scratch.step_tick();
+            }
+            let mut end = *scratch.get_car_state(0);
+            let speed = end.phys.ang_vel.length();
+            let mut clamped = end.phys.ang_vel;
+            if speed > 5.5 {
+                clamped *= 5.5 / speed;
+            }
+            if j >= first_scored {
+                total += (clamped - target.4).length();
+            }
+            end.phys.pos = target.1;
+            end.phys.vel = target.2;
+            end.phys.rot_mat = target.3;
+            end.phys.ang_vel = target.4;
+            start = end;
+            previous_ticks = target.0;
         }
-        let mut end = *scratch.get_car_state(0);
-        let speed = end.phys.ang_vel.length();
-        if speed > 5.5 {
-            end.phys.ang_vel *= 5.5 / speed;
-        }
-        let error = (end.phys.ang_vel - target).length();
-        if best.is_none_or(|(_, e)| error < e - 1e-4) {
-            best = Some((cancel, error));
+        if best.is_none_or(|(_, e)| total < e - 1e-4) {
+            best = Some((cancel, total));
         }
     }
     best.map(|(cancel, _)| cancel)

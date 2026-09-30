@@ -43,6 +43,19 @@ Per replay (60 each), p90 improved for velocity in 60 and 60, rotation in 58 and
 
 **Dodge start fit under the held-out cancel.** The comparison that matters for the dodge start (fit on versus off, both with the held-out cancel): train position 0.958, velocity 0.753, rotation 0.969, angular velocity 0.836 of the fit off pooled over the first four packets (packets 3-4: rotation 1.03-1.05, angular 1.04-1.06); validation 0.963, 0.738, 0.986, 0.843 (packets 3-4: rotation 1.03-1.07, angular 1.03-1.10). Under the in-sample cancel it is 0.961, 0.765, 0.958, 0.832 (validation 0.968, 0.752, 0.981, 0.842). So the dodge start conclusion does not depend on which cancel is used, and the small later-packet regression is not removed by holding the cancel out; it stays at 3-10% of rotation and angular error at packets 3-4.
 
+**A constant cancel over the flip is not better (2026-09-30, later the same day).** `flip_cancel_packets` (default 1) fits one cancel jointly over the next N fresh packets of a flip, the state reset to each packet as the converter does, and `flip_cancel_holdout` now leaves the first interval (the one the cancel is used for) out of the sum when later packets exist (it replaces the second-next-packet variant described above, whose numbers stand as measured). Squared error of rotation and angular velocity at packets 2-4 after the activation, relative to no cancel fit at all (matched events, chain-lag packets; train, 14,078 events / validation, 14,709):
+
+| Cancel fit | Rotation | Angular velocity |
+| --- | --- | --- |
+| Per packet, next packet only, in sample (the default) | 0.678 / 0.672 | 0.626 / 0.618 |
+| Joint over 4 packets, in sample | 0.828 | 0.828 |
+| Joint over 4 packets, first interval held out | 0.894 / 0.889 | 0.920 / 0.896 |
+| Joint over 3 packets, first interval held out | 0.875 | 0.878 |
+| Joint over 2 packets, first interval held out | 0.846 / 0.831 | 0.825 / 0.805 |
+| No cancel fit | 1.000 | 1.000 |
+
+(Packets 3-4 only: 0.484 / 0.462 and 0.428 / 0.410 for the default, 0.691 / 0.648 and 0.630 / 0.596 for the two-packet held-out fit.) So (1) the honest, predictable part of the cancel is 15-20% of the flip-window rotation and angular-velocity error, against 32-38% for the in-sample fit; (2) the shorter the horizon the better the held-out prediction (0.92, 0.88, 0.83 for 4, 3, 2 packets), so the player's cancel changes during the flip and a single constant over the flip is a worse description than a value per interval; (3) the joint fit is not a better reconstruction either (in sample it is worse than per packet at every packet, 0.83 against 0.68). The default stays the per-packet in-sample fit; `--flip-cancel-packets 2 --flip-cancel-holdout` is the honest predictor to report next to it (and what a cancel guess for a flip with no later packet can be worth: about 17%). A time-varying model of the cancel (for example a value that depends on the time since the start) is the next thing to try, scored the same way.
+
 **Decision.** The default stays the in-sample cancel (the converter is an offline reconstruction and the exported states match the packet they are fitted to), and `--flip-cancel-holdout` (`ConvertOptions::flip_cancel_holdout`) is the honest check to report next to it. Numbers in the flip window of any earlier section (rotation and angular velocity residuals in dodge windows) are in sample for the cancel. Not done: choosing the cancel with hysteresis or jointly over the flip (the player's cancel is roughly constant over a flip), which would remove the 0.00/1.00 alternation; that needs a measurement against the held-out check, not the in-sample residual.
 
 ## Ground-start dodge, and dropping the other-car rule from the timing fits (2026-09-30)
