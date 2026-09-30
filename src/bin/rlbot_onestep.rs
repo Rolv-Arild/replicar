@@ -247,6 +247,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             handbrake[i][k] = (handbrake[i - 1][k] + rate * ticks / 120.0).clamp(0.0, 1.0);
         }
     }
+    let quantize = env::var_os("QUANTIZE").is_some();
     let horizons = [1usize, 4, 12];
     let variants = ["input of packet n+t (same)", "input of packet n+t+1 (next)"];
     let mut rows: BTreeMap<String, Rows> = BTreeMap::new();
@@ -278,6 +279,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                         arena.set_car_controls(k, packets[n + t + vi].players[k].controls);
                     }
                     arena.step_tick();
+                    if quantize {
+                        // The game keeps its state on a grid (position 0.01 UU, velocity 0.001 UU/s,
+                        // angular velocity 1e-5 rad/s, measured on the recording).
+                        for k in 0..n_players {
+                            let mut car = *arena.get_car_state(k);
+                            let q = |v: Vec3A, step: f32| (v / step).round() * step;
+                            car.phys.pos = q(car.phys.pos, 0.01);
+                            car.phys.vel = q(car.phys.vel, 0.001);
+                            car.phys.ang_vel = q(car.phys.ang_vel, 0.00001);
+                            arena.set_car_state(k, car);
+                        }
+                    }
                 }
                 let end = &packets[n + h];
                 for k in 0..n_players {

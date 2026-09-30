@@ -235,6 +235,75 @@ fn lag_check(a: &ObservedReplay, b: &ObservedReplay, a_balls: &[Event], b_balls:
     Ok(())
 }
 
+/// Whether one replay frame holds one tick: the objects of a frame of A that also occur in B, and the
+/// B frames they occur in (if a frame were a single tick, every object of it would be in one B frame,
+/// given that the other client received that whole tick).
+fn frame_coherence(label: &str, a: &[Event], b: &[Event]) {
+    let mut index: HashMap<(&str, [u32; 3]), Vec<&Event>> = HashMap::new();
+    for e in b {
+        index.entry((&e.key, e.bits)).or_default().push(e);
+    }
+    let mut own: HashMap<(&str, [u32; 3]), usize> = HashMap::new();
+    for e in a {
+        *own.entry((&e.key, e.bits)).or_default() += 1;
+    }
+    let mut by_frame: HashMap<usize, Vec<(&str, usize)>> = HashMap::new();
+    for e in a {
+        if let Some(list) = index.get(&(e.key.as_str(), e.bits)) {
+            if list.len() == 1 && own[&(e.key.as_str(), e.bits)] == 1 {
+                by_frame.entry(e.frame).or_default().push((&e.key, list[0].frame));
+            }
+        }
+    }
+    let mut multi = 0usize;
+    let mut same = 0usize;
+    let mut spans: std::collections::BTreeMap<usize, usize> = Default::default();
+    for objects in by_frame.values().filter(|o| o.len() >= 2) {
+        multi += 1;
+        let lo = objects.iter().map(|o| o.1).min().unwrap();
+        let hi = objects.iter().map(|o| o.1).max().unwrap();
+        if lo == hi {
+            same += 1;
+        }
+        *spans.entry(hi - lo).or_default() += 1;
+    }
+    println!(
+        "{label}: of {multi} frames of A with >= 2 objects (ball or cars) found in B, {same} ({:.0}%) have all of them in one frame of B; spread of B frames (frames: count) {spans:?}",
+        100.0 * same as f64 / multi.max(1) as f64
+    );
+}
+
+/// Within one frame, the inferred lag of each fresh packet (ball and cars, chain lags only): if a frame
+/// were one tick, they would all be equal.
+fn lag_coherence(label: &str, observed: &ObservedReplay) -> Result<(), Box<dyn Error>> {
+    let output = convert_observations(observed.clone(), &ConvertOptions::default())?;
+    let mut frames = 0usize;
+    let mut equal = 0usize;
+    let mut spread: std::collections::BTreeMap<i64, usize> = Default::default();
+    for f in &output.frames {
+        let lags: Vec<i64> = f
+            .packet_lags
+            .iter()
+            .filter(|l| l.source == "chain")
+            .map(|l| l.ticks as i64)
+            .collect();
+        if lags.len() < 2 {
+            continue;
+        }
+        frames += 1;
+        let range = lags.iter().max().unwrap() - lags.iter().min().unwrap();
+        if range == 0 {
+            equal += 1;
+        }
+        *spread.entry(range).or_default() += 1;
+    }
+    println!(
+        "{label}: of {frames} frames with >= 2 chain-lag packets (ball and cars), {equal} ({:.0}%) have equal lags; max-min lag within a frame (ticks: frames) {spread:?}",
+        100.0 * equal as f64 / frames.max(1) as f64
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let a_path = PathBuf::from(args.next().ok_or("usage: dual_perspective <a> <b>")?);
@@ -261,6 +330,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     compare("cars B in A", &b_cars, &a_cars);
     compare("ball A in B", &a_balls, &b_balls);
     compare("ball B in A", &b_balls, &a_balls);
+    let all_a: Vec<Event> = a_cars.iter().chain(&a_balls).map(|e| Event { key: e.key.clone(), frame: e.frame, time: e.time, bits: e.bits }).collect();
+    let all_b: Vec<Event> = b_cars.iter().chain(&b_balls).map(|e| Event { key: e.key.clone(), frame: e.frame, time: e.time, bits: e.bits }).collect();
+    frame_coherence("frame coherence A to B", &all_a, &all_b);
+    frame_coherence("frame coherence B to A", &all_b, &all_a);
+    lag_coherence("lag coherence A", &a)?;
+    lag_coherence("lag coherence B", &b)?;
     lag_check(&a, &b, &a_balls, &b_balls)?;
     Ok(())
 }
