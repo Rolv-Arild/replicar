@@ -75,6 +75,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.infer_dodge_first_packet_tick =
         !env::args_os().any(|arg| arg == "--no-infer-dodge-first-packet");
     options.infer_double_jump = !env::args_os().any(|arg| arg == "--no-infer-double-jump");
+    // The residuals at packets measure prediction; the boundary-value solve fits them, so it is off here.
+    options.air_bvp = env::args_os().any(|arg| arg == "--air-bvp");
     options.block_sim_pad_pickups = !env::args_os().any(|arg| arg == "--sim-pad-pickups");
     options.defer_dodge_past_next_packet =
         !env::args_os().any(|arg| arg == "--no-defer-dodge");

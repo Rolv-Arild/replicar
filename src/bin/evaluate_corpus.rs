@@ -1114,6 +1114,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("usage: evaluate_corpus <split_dir> <report.json> [collision_meshes]")?,
     );
     let mut options = ConvertOptions::default();
+    // The residuals at packets measure prediction; the boundary-value solve (`--air-bvp`) fits them.
+    options.air_bvp = false;
     let mut meshes = None;
     let mut mask_seed = None;
     let mut aligned_targets = false;
@@ -1222,6 +1224,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.infer_dodge_first_packet_tick = false;
         } else if arg == "--no-infer-double-jump" {
             options.infer_double_jump = false;
+        } else if arg == "--air-bvp" {
+            options.air_bvp = true;
         } else if arg == "--sim-pad-pickups" {
             options.block_sim_pad_pickups = false;
         } else if arg == "--no-defer-dodge" {
@@ -1439,6 +1443,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // A withheld span has no later boost update to correct a simulated pickup with, so the
                 // causal prediction keeps the simulated pad pickups.
                 masked_options.block_sim_pad_pickups = false;
+                masked_options.air_bvp = false;
                 masked_options.withheld_frames = Some(std::sync::Arc::new(
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())

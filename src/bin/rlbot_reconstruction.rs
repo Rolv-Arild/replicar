@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use glam::{Mat3A, Vec3A};
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_observations};
-use replay_to_rocketsim::observations::extract;
+use replay_to_rocketsim::observations::{Body, extract};
 use serde_json::Value;
 
 fn vec3(v: &Value) -> Vec3A {
@@ -70,6 +70,7 @@ struct Truth {
     has_double_jumped: bool,
     dodge_timeout: f32,
     supersonic: bool,
+    dodge_dir: (f32, f32),
 }
 
 #[derive(Default)]
@@ -127,6 +128,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 has_double_jumped: pl["has_double_jumped"].as_bool().unwrap_or(false),
                 dodge_timeout: pl["dodge_timeout"].as_f64().unwrap_or(-1.0) as f32,
                 supersonic: pl["is_supersonic"].as_bool().unwrap_or(false),
+                dodge_dir: (
+                    pl["dodge_dir"]["x"].as_f64().unwrap_or(0.0) as f32,
+                    pl["dodge_dir"]["y"].as_f64().unwrap_or(0.0) as f32,
+                ),
             };
             by_position
                 .entry((name.clone(), key(state.pos)))
@@ -151,6 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 has_double_jumped: false,
                 dodge_timeout: -1.0,
                 supersonic: false,
+                dodge_dir: (0.0, 0.0),
             },
         );
         by_position
@@ -162,7 +168,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let replay = boxcars::ParserBuilder::new(&fs::read(&replay_path)?)
         .must_parse_network_data()
         .parse()?;
-    let observed = extract(&replay).ok_or("no network frames")?;
+    let mut observed = extract(&replay).ok_or("no network frames")?;
+    // `--thin K`: only every K-th frame keeps its car body packets (the others repeat the last kept body
+    // with its old stamps), to imitate a sparser cadence and to get frames between packets.
+    if let Some(at) = args.iter().position(|a| a == "--thin") {
+        let k: usize = args
+            .get(at + 1)
+            .and_then(|v| v.parse().ok())
+            .ok_or("--thin K")?;
+        let mut last: HashMap<(i32, usize), Body> = HashMap::new();
+        for (f, frame) in observed.frames.iter_mut().enumerate() {
+            for car in &mut frame.cars {
+                let key = (car.actor_id, car.actor_created_frame);
+                match last.get(&key) {
+                    Some(body) if f % k != 0 => car.body = body.clone(),
+                    _ => {
+                        last.insert(key, car.body.clone());
+                    }
+                }
+            }
+        }
+    }
     let names: HashMap<String, String> = observed
         .frames
         .iter()
@@ -195,6 +221,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut options = options;
         options.block_sim_pad_pickups |= env::var_os("BLOCK_PADS").is_some();
         options.boost_pickup_lookahead |= env::var_os("BOOST_LOOKAHEAD").is_some();
+        if env::var_os("NO_AIR_BVP").is_some() {
+            options.air_bvp = false;
+        }
         if env::var_os("NO_FLAGS").is_some() {
             options.flags_from_counters = false;
         }
@@ -205,6 +234,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter_map(|s| names.get(&s.player_key).map(|n| (s.slot, n.clone())))
             .collect();
         let frames = &output.observations.frames;
+        if std::env::var_os("AIR_BVP").is_some() && label.starts_with("all fits") {
+            println!(
+                "  air BVP: {} airborne packets planned, {} refused",
+                output.diagnostics.air_bvp_planned, output.diagnostics.air_bvp_refused
+            );
+            println!(
+                "  air BVP refusal reasons (0 flipping, 1 no rotation, 2 low a, 3 inactive, 4 inactive/withheld span, 5 dodge in span, 6 no next packet, 7 low b, 8 span length, 9 ground, 10 no solution): {:?}",
+                replay_to_rocketsim::conversion::AIR_BVP_REFUSALS
+                    .iter()
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .collect::<Vec<_>>()
+            );
+        }
         // Matched fresh packets: (frame index, offset between converter timeline and server ticks).
         let mut matched: Vec<(usize, i64)> = Vec::new();
         for (f, frame) in frames.iter().enumerate() {
@@ -256,6 +298,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap_or(0)
         };
         let mut rows: BTreeMap<String, Rows> = BTreeMap::new();
+        let mut covered: HashMap<String, Vec<(i64, i64)>> = HashMap::new();
+        for (f, converted) in output.frames.iter().enumerate() {
+            for e in converted.fitted_inputs.iter().filter(|e| e.kind == "air") {
+                if let Some(name) = slot_name.get(&e.slot) {
+                    let start = e.tick as i64 - offset_at(f);
+                    covered
+                        .entry(name.clone())
+                        .or_default()
+                        .push((start, start + e.cancel as i64));
+                }
+            }
+        }
         let mut ball_rows: BTreeMap<String, Rows> = BTreeMap::new();
         // Full car state (not only physics): counts of mismatches with the truth, by fresh packet or not.
         let mut flags: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // name -> (n, mismatches)
@@ -335,6 +389,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 scored += 1;
+                if std::env::var_os("DIR_CHECK").is_some()
+                    && label.starts_with("all fits")
+                    && t.air_state == 3
+                    && sim.is_flipping
+                {
+                    // RocketSim's flip_rel_torque is (-dir.y, dir.x); the truth's dodge_dir is (x forward, y right).
+                    let expect = glam::Vec2::new(-t.dodge_dir.1, t.dodge_dir.0);
+                    let got = glam::Vec2::new(sim.flip_rel_torque.x, sim.flip_rel_torque.y);
+                    let angle = expect.angle_to(got).to_degrees().abs();
+                    println!(
+                        "DIR frame {f} {name} angle between sim and true flip torque {angle:.1} deg (true dodge_dir {:?} sim torque {:?})",
+                        t.dodge_dir,
+                        (got.x, got.y)
+                    );
+                }
                 if std::env::var_os("BOOST_TRACE").is_some()
                     && label.starts_with("all fits")
                     && name.starts_with("Kiyo")
@@ -478,6 +547,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 let since = last_fresh.get(&slot).map_or(99, |&l| f - l);
+                if std::env::var_os("AIR_WORST").is_some()
+                    && label.starts_with("all fits")
+                    && !fresh
+                    && (t.air_state == 4
+                        || (t.air_state == 3 && std::env::var_os("WORST_FLIP").is_some()))
+                    && !covered.get(name).is_some_and(|v| {
+                        v.iter().any(|&(a, b)| server_tick > a && server_tick <= b)
+                    })
+                {
+                    let err = rotation_error(sim.phys.rot_mat, t.rot);
+                    if err > 6.0 {
+                        let ball_distance = truth
+                            .get(&(server_tick.max(0) as u64))
+                            .and_then(|m| m.get("BALL#"))
+                            .map_or(0.0, |b| (b.pos - t.pos).length());
+                        println!(
+                            "WORST frame {f} {name} rot err {err:.1} deg z {:.0} speed {:.0} ang {:.2} ball {:.0} has_jumped {} dbl {} dodged {} since {} | sim flipping {} has_flipped {}",
+                            t.pos.z,
+                            t.vel.length(),
+                            t.ang.length(),
+                            ball_distance,
+                            t.has_jumped,
+                            t.has_double_jumped,
+                            t.has_dodged,
+                            last_fresh.get(&slot).map_or(99, |&l| f - l),
+                            sim.is_flipping,
+                            sim.has_flipped
+                        );
+                    }
+                }
                 let behaviour = match t.air_state {
                     0 => "ground",
                     1 => "jump",
@@ -493,19 +592,30 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "frames without a fresh packet".to_string()
                     },
                     format!("{behaviour}, no fresh packet"),
+                    format!(
+                        "{behaviour}, no fresh packet, {}",
+                        if covered.get(name).is_some_and(|v| v
+                            .iter()
+                            .any(|&(a, b)| server_tick > a && server_tick <= b))
+                        {
+                            "air BVP interval"
+                        } else {
+                            "no air BVP interval"
+                        }
+                    ),
                     if t.air_state == 2 {
                         "truth DoubleJumping (any packet)".to_string()
                     } else {
                         "other".to_string()
                     },
-                    format!("{since} frame(s) since the last fresh packet")
+                    format!("{behaviour}: {since} frame(s) since the last fresh packet")
                         .replace("99 frame(s)", "no packet seen"),
                 ];
                 for (i, group) in groups.into_iter().enumerate() {
-                    if i == 2 && fresh {
+                    if (i == 2 || i == 3) && fresh {
                         continue;
                     }
-                    if i == 4 && t.air_state != 2 {
+                    if i == 5 && t.air_state != 2 {
                         continue;
                     }
                     let r = rows.entry(group).or_default();

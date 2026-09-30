@@ -141,6 +141,11 @@ pub struct ConvertOptions {
     /// The simulation otherwise only knows the actions it applied itself (a jump it never applied leaves
     /// `has_jumped` false, which changes what the car can do next).
     pub flags_from_counters: bool,
+    /// Offline: solve an airborne car's air controls between two fresh packets as a boundary-value
+    /// problem on both the rotation and the angular velocity at the end, with controls that may change
+    /// every few ticks, and drive the interval with them (`plan_air_bvp`). Uses the next packet, so
+    /// its residual is no longer a prediction.
+    pub air_bvp: bool,
     /// Infer the tick of the first fresh car packet after a dodge activation (it has no chain lag) from
     /// the simulated path with the fitted start, within the lag range 0-4 ticks (offline; disabled
     /// without inferred packet lags).
@@ -246,6 +251,7 @@ impl Default for ConvertOptions {
             defer_dodge_past_next_packet: true,
             infer_double_jump: true,
             flags_from_counters: true,
+            air_bvp: true,
             infer_dodge_first_packet_tick: true,
             flip_cancel_holdout: false,
             flip_cancel_source: FlipCancelSource::NextPacketFit,
@@ -342,6 +348,10 @@ pub struct Diagnostics {
     pub dodge_activations: usize,
     /// Dodge start ticks fitted against a later packet (`infer_dodge_start`).
     pub dodge_starts_fitted: usize,
+    /// Airborne packets whose interval to the next packet got a boundary-value solution (`air_bvp`),
+    /// and those that were refused (not free flight, a flip in the span, or no solution).
+    pub air_bvp_planned: usize,
+    pub air_bvp_refused: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +563,201 @@ pub fn solve_span_air_controls(
         controls = solve_inverse_air_controls(rot_mat_start, ang_vel_start, virtual_target, dt);
     }
     controls
+}
+
+/// Integrates the free-flight rotation of a car (RocketSim's air torque and damping, see
+/// `air_angular_velocity_forward`) through consecutive segments of constant controls, given as
+/// (controls, ticks). Returns the final rotation and world angular velocity.
+pub fn air_state_forward(
+    rot_mat_start: Mat3A,
+    ang_vel_start: Vec3A,
+    segments: &[(AirControls, u32)],
+) -> (Mat3A, Vec3A) {
+    const TICK: f32 = 1.0 / 120.0;
+    let mut rot = rot_mat_start;
+    let mut omega = ang_vel_start;
+    for &(controls, ticks) in segments {
+        for _ in 0..ticks {
+            let dir_pitch = -rot.y_axis;
+            let dir_yaw = rot.z_axis;
+            let dir_roll = -rot.x_axis;
+            let any = controls.pitch != 0.0 || controls.yaw != 0.0 || controls.roll != 0.0;
+            let torque = if any {
+                dir_pitch * (controls.pitch * TORQUE_PITCH)
+                    + dir_yaw * (controls.yaw * TORQUE_YAW)
+                    + dir_roll * (controls.roll * TORQUE_ROLL)
+            } else {
+                Vec3A::ZERO
+            };
+            let damping = dir_pitch
+                * (dir_pitch.dot(omega) * DAMPING_PITCH * (1.0 - controls.pitch.abs()))
+                + dir_yaw * (dir_yaw.dot(omega) * DAMPING_YAW * (1.0 - controls.yaw.abs()))
+                + dir_roll * (dir_roll.dot(omega) * DAMPING_ROLL);
+            omega += (torque - damping) * TICK;
+            let speed = omega.length();
+            if speed > AIR_MAX_ANGULAR_SPEED {
+                omega *= AIR_MAX_ANGULAR_SPEED / speed;
+            }
+            let step = omega * TICK;
+            if step.length_squared() > 0.0 {
+                rot = Mat3A::from_quat(Quat::from_scaled_axis(step.into())) * rot;
+            }
+        }
+    }
+    (rot, omega)
+}
+
+/// The rotation vector (radians) that takes `from` to `to`, in the world frame.
+fn rotation_vector(from: Mat3A, to: Mat3A) -> Vec3A {
+    let delta = Quat::from_mat3a(&(to * from.transpose())).normalize();
+    let (axis, angle) = delta.to_axis_angle();
+    let angle = if angle > PI { angle - 2.0 * PI } else { angle };
+    Vec3A::from(axis) * angle
+}
+
+/// Solves the boundary-value problem of free flight: per-segment air controls (segments of `ticks`
+/// ticks each) that carry the car from its start rotation and angular velocity to its end rotation
+/// and angular velocity, as a Levenberg-Marquardt fit of the forward model that stays as close as
+/// possible to `prior` (one control per segment). Six end conditions against three unknowns per
+/// segment: two or three segments of a span pin the end state down; with more segments the prior
+/// chooses among the solutions. Returns the controls and the remaining end error (radians of
+/// rotation, radians per second of angular velocity).
+pub fn solve_air_bvp(
+    rot_start: Mat3A,
+    omega_start: Vec3A,
+    rot_end: Mat3A,
+    omega_end: Vec3A,
+    ticks: &[u32],
+    prior: &[AirControls],
+) -> (Vec<AirControls>, f32, f32) {
+    let mut analytic =
+        |segments: &[(AirControls, u32)]| air_state_forward(rot_start, omega_start, segments);
+    solve_bvp_with(&mut analytic, rot_end, omega_end, ticks, prior)
+}
+
+/// `solve_air_bvp` with the forward model as a function of the per-segment controls and their tick
+/// counts (RocketSim itself for a flipping car).
+pub fn solve_bvp_with(
+    forward: &mut dyn FnMut(&[(AirControls, u32)]) -> (Mat3A, Vec3A),
+    rot_end: Mat3A,
+    omega_end: Vec3A,
+    ticks: &[u32],
+    prior: &[AirControls],
+) -> (Vec<AirControls>, f32, f32) {
+    let n = ticks.len();
+    let dim = 3 * n;
+    let to_vec = |c: &[AirControls]| -> Vec<f32> {
+        c.iter().flat_map(|c| [c.pitch, c.yaw, c.roll]).collect()
+    };
+    let from_vec = |v: &[f32]| -> Vec<AirControls> {
+        v.chunks(3)
+            .map(|c| AirControls {
+                pitch: c[0],
+                yaw: c[1],
+                roll: c[2],
+            })
+            .collect()
+    };
+    // Residual scales: half a degree of rotation and 0.05 rad/s of angular velocity are one unit.
+    const ROT_SCALE: f32 = 0.5 * PI / 180.0;
+    const OMEGA_SCALE: f32 = 0.05;
+    // Weight of staying at the prior, per unit of control.
+    const PRIOR_WEIGHT: f32 = 0.05;
+    let forward = std::cell::RefCell::new(forward);
+    let residual = |u: &[f32]| -> [f32; 6] {
+        let segments: Vec<(AirControls, u32)> =
+            from_vec(u).into_iter().zip(ticks.iter().copied()).collect();
+        let (rot, omega) = (forward.borrow_mut())(&segments);
+        let dr = rotation_vector(rot, rot_end) / ROT_SCALE;
+        let dw = (omega_end - omega) / OMEGA_SCALE;
+        [dr.x, dr.y, dr.z, dw.x, dw.y, dw.z]
+    };
+    let u0 = to_vec(prior);
+    let mut u = u0.clone();
+    let mut lambda = 1.0f32;
+    let cost = |u: &[f32]| -> f32 {
+        let r = residual(u);
+        let prior_cost: f32 = u.iter().zip(&u0).map(|(a, b)| (a - b) * (a - b)).sum();
+        r.iter().map(|x| x * x).sum::<f32>() + PRIOR_WEIGHT * PRIOR_WEIGHT * prior_cost
+    };
+    let mut current = cost(&u);
+    for _ in 0..12 {
+        let r = residual(&u);
+        // Finite-difference Jacobian (6 x dim).
+        let mut jac = vec![[0.0f32; 6]; dim];
+        for k in 0..dim {
+            let mut up = u.clone();
+            up[k] += 0.02;
+            let rp = residual(&up);
+            for i in 0..6 {
+                jac[k][i] = (rp[i] - r[i]) / 0.02;
+            }
+        }
+        // (J^T J + w^2 I + lambda I) delta = -(J^T r + w^2 (u - u0)).
+        let mut a = vec![vec![0.0f32; dim]; dim];
+        let mut g = vec![0.0f32; dim];
+        for p in 0..dim {
+            for q in 0..dim {
+                a[p][q] = (0..6).map(|i| jac[p][i] * jac[q][i]).sum();
+            }
+            a[p][p] += PRIOR_WEIGHT * PRIOR_WEIGHT + lambda;
+            g[p] = -((0..6).map(|i| jac[p][i] * r[i]).sum::<f32>()
+                + PRIOR_WEIGHT * PRIOR_WEIGHT * (u[p] - u0[p]));
+        }
+        // Gaussian elimination with partial pivoting.
+        let mut delta = g.clone();
+        let mut m = a.clone();
+        let mut ok = true;
+        for col in 0..dim {
+            let pivot = (col..dim)
+                .max_by(|&x, &y| m[x][col].abs().total_cmp(&m[y][col].abs()))
+                .unwrap_or(col);
+            if m[pivot][col].abs() < 1e-9 {
+                ok = false;
+                break;
+            }
+            m.swap(col, pivot);
+            delta.swap(col, pivot);
+            for row in col + 1..dim {
+                let factor = m[row][col] / m[col][col];
+                for k in col..dim {
+                    m[row][k] -= factor * m[col][k];
+                }
+                delta[row] -= factor * delta[col];
+            }
+        }
+        if !ok {
+            break;
+        }
+        for col in (0..dim).rev() {
+            let tail: f32 = (col + 1..dim).map(|k| m[col][k] * delta[k]).sum();
+            delta[col] = (delta[col] - tail) / m[col][col];
+        }
+        let candidate: Vec<f32> = u
+            .iter()
+            .zip(&delta)
+            .map(|(a, d)| (a + d).clamp(-1.0, 1.0))
+            .collect();
+        let candidate_cost = cost(&candidate);
+        if candidate_cost < current {
+            let improvement = current - candidate_cost;
+            u = candidate;
+            current = candidate_cost;
+            lambda = (lambda * 0.3).max(1e-4);
+            if improvement < 1e-4 {
+                break;
+            }
+        } else {
+            lambda *= 4.0;
+            if lambda > 1e4 {
+                break;
+            }
+        }
+    }
+    let r = residual(&u);
+    let rot_error = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt() * ROT_SCALE;
+    let omega_error = (r[3] * r[3] + r[4] * r[4] + r[5] * r[5]).sqrt() * OMEGA_SCALE;
+    (from_vec(&u), rot_error, omega_error)
 }
 
 fn vec3(value: [f32; 3]) -> Vec3A {
@@ -1776,6 +1981,291 @@ struct GroundSchedule {
     entries: Vec<(u64, f32, f32, bool, bool, Option<bool>)>,
 }
 
+/// Per-tick air controls for one car over the interval to its next fresh packet (`plan_air_bvp`):
+/// (first arena tick, controls), in order.
+struct AirSchedule {
+    slot: usize,
+    end_tick: u64,
+    entries: Vec<(u64, AirControls)>,
+}
+
+/// Plans the air controls of an airborne car for the interval from its fresh packet at `index` to its
+/// next fresh packet as a boundary-value problem (`solve_air_bvp`): controls that may change every
+/// few ticks carry the car to the next packet's rotation and angular velocity (not just the angular
+/// velocity with one constant control, as the span solve does), starting from the constant span
+/// solution. The packets' ticks are their frame times minus their lags. Refused for a car that is
+/// not in free flight at both packets, a dodge in the span, a withheld or inactive frame, or a
+/// solution that does not reach the end state. Uses the next packet: offline reconstruction.
+#[allow(clippy::too_many_arguments)]
+fn plan_air_bvp(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    packet_lags: &Option<PacketLags>,
+    first_time: f32,
+    index: usize,
+    car: &observations::Car,
+    state: &CarState,
+    lag_a: u64,
+    slot: usize,
+    now_tick: u64,
+    scratch: Option<&mut Arena>,
+    pending: &[PendingDodge],
+) -> Option<(AirSchedule, i32)> {
+    static TUNING: OnceLock<(f32, f32, f32)> = OnceLock::new();
+    let (min_z_value, rot_tol_deg, omega_tol) = *TUNING.get_or_init(|| {
+        let get = |k: &str, d: f32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        (
+            get("AIR_BVP_MIN_Z", 30.0),
+            get("AIR_BVP_ROT_TOL", 3.0),
+            get("AIR_BVP_OMEGA_TOL", 0.5),
+        )
+    });
+    let press = pending
+        .iter()
+        .find(|d| d.slot == slot && d.start_tick > now_tick)
+        .copied();
+    if state.is_on_ground || ((state.is_flipping || press.is_some()) && scratch.is_none()) {
+        return air_refused(if state.is_flipping { 0 } else { 9 });
+    }
+    let frames = &observations.frames;
+    let lags = packet_lags.as_ref()?;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let fresh_rotation = |c: &observations::Car, frame: usize| -> Option<(Mat3A, Vec3A, f32)> {
+        let p = c.body.position.as_ref().filter(|v| v.frame == frame)?;
+        let r = c.body.rotation_xyzw.as_ref().filter(|v| v.frame == frame)?;
+        let w = c
+            .body
+            .angular_velocity_replay_units
+            .as_ref()
+            .filter(|v| v.frame == frame)?;
+        Some((
+            Mat3A::from_quat(quaternion(r.value)?),
+            vec3(w.value) * 0.01,
+            p.value[2],
+        ))
+    };
+    let Some((rot_a, omega_a, z_a)) = fresh_rotation(car, index) else {
+        return air_refused(1);
+    };
+    if z_a < min_z_value {
+        return air_refused(2);
+    }
+    let active = |frame: usize| {
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|g| g.value == "Active")
+    };
+    let withheld = |frame: usize| {
+        options
+            .withheld_frames
+            .as_ref()
+            .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
+    };
+    if !active(index) {
+        return air_refused(3);
+    }
+    let same_car = |c: &&observations::Car| {
+        c.actor_id == car.actor_id
+            && c.actor_created_frame == car.actor_created_frame
+            && c.player_key == car.player_key
+    };
+    let t_a = timeline(index) - lag_a as i64;
+    let mut end = None;
+    for g in index + 1..=(index + 24).min(frames.len() - 1) {
+        if !active(g) || withheld(g) {
+            return air_refused(4);
+        }
+        let other = frames[g].cars.iter().find(same_car)?;
+        let dodge_in_span = other
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .is_some_and(|d| d.frame == g && d.value % 2 == 1);
+        if dodge_in_span
+            && !pending
+                .iter()
+                .any(|d| d.slot == slot && d.start_tick > now_tick)
+        {
+            return air_refused(5);
+        }
+        if let Some((rot_b, omega_b, z_b)) = fresh_rotation(other, g) {
+            let lag = lags
+                .car_actor
+                .get(&(car.actor_id, car.actor_created_frame, g))
+                .copied()
+                .or(lags.cars[g])
+                .map_or((timeline(g) - timeline(g - 1)).max(0) / 2, |lag| {
+                    lag.round().max(0.0) as i64
+                });
+            end = Some((g, rot_b, omega_b, z_b, timeline(g) - lag));
+            break;
+        }
+    }
+    let Some((_, rot_b, omega_b, z_b, t_b)) = end else {
+        return air_refused(6);
+    };
+    let total = t_b - t_a;
+    if z_b < min_z_value || !(2..=90).contains(&total) {
+        return air_refused(if z_b < min_z_value { 7 } else { 8 });
+    }
+    let total = total as u32;
+    // Segments of about four ticks (a frame at 30 fps).
+    let parts = total.div_ceil(4).max(1);
+    let ticks: Vec<u32> = (0..parts)
+        .map(|i| total * (i + 1) / parts - total * i / parts)
+        .collect();
+    let constant = solve_span_air_controls(
+        rot_a,
+        omega_a,
+        omega_b,
+        total,
+        options.air_lookahead_refine_iterations,
+    );
+    let prior = vec![constant; ticks.len()];
+    let mut shift = 0i32;
+    let (solved, rot_error, omega_error) = match scratch {
+        Some(scratch) if state.is_flipping || press.is_some() => {
+            // A flip is not free flight: its torque, pitch lock and cancel are RocketSim's, so the
+            // forward model is RocketSim itself (a single car in a scratch arena, from the packet).
+            // The tick of the flip's start is only known to a few ticks (a fitted dodge press, or the
+            // flip time a simulated flip has reached), so a shift of it is tried too: the first
+            // that reaches the end state, else the one that gets closest.
+            let mut best: Option<(Vec<AirControls>, f32, f32, i32)> = None;
+            for offset in [0i32, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6] {
+                let mut start = *state;
+                start.phys.rot_mat = rot_a;
+                start.phys.ang_vel = omega_a;
+                let mut press_tick = press.map(|d| d.start_tick);
+                if let Some(tick) = press_tick.as_mut() {
+                    let shifted = *tick as i64 + i64::from(offset);
+                    if shifted <= now_tick as i64 || shifted > now_tick as i64 + i64::from(total) {
+                        continue;
+                    }
+                    *tick = shifted as u64;
+                } else {
+                    let shifted = start.flip_time + offset as f32 / 120.0;
+                    if shifted < 0.0 {
+                        continue;
+                    }
+                    start.flip_time = shifted;
+                }
+                let mut forward = |segments: &[(AirControls, u32)]| -> (Mat3A, Vec3A) {
+                    // The ball is parked far from the car: a contact in the scratch would not be the
+                    // real one.
+                    let mut parked = rocketsim::BallState::default();
+                    parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+                    if (start.phys.pos - parked.phys.pos).length() < 600.0 {
+                        parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
+                    }
+                    scratch.set_ball_state(parked);
+                    scratch.set_car_state(0, start);
+                    let mut tick = now_tick;
+                    for &(controls, n) in segments {
+                        for _ in 0..n {
+                            tick += 1;
+                            let mut c = CarControls {
+                                pitch: controls.pitch,
+                                yaw: controls.yaw,
+                                roll: controls.roll,
+                                ..CarControls::default()
+                            };
+                            if let (Some(d), Some(at)) = (press, press_tick) {
+                                if tick == at {
+                                    c.jump = true;
+                                    c.pitch = d.pitch;
+                                    c.yaw = d.yaw;
+                                    c.roll = 0.0;
+                                }
+                            }
+                            scratch.set_car_controls(0, c);
+                            scratch.step_tick();
+                        }
+                    }
+                    let end = scratch.get_car_state(0);
+                    let mut omega = end.phys.ang_vel;
+                    let speed = omega.length();
+                    if speed > AIR_MAX_ANGULAR_SPEED {
+                        omega *= AIR_MAX_ANGULAR_SPEED / speed;
+                    }
+                    (end.phys.rot_mat, omega)
+                };
+                let (solved, rot_error, omega_error) =
+                    solve_bvp_with(&mut forward, rot_b, omega_b, &ticks, &prior);
+                let within = rot_error <= rot_tol_deg.to_radians() && omega_error <= omega_tol;
+                if let Some(range) = std::env::var("AIR_BVP_DEBUG").ok() {
+                    let mut parts = range.split('-').filter_map(|v| v.parse::<usize>().ok());
+                    let (lo, hi) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+                    if (lo..=hi).contains(&index) {
+                        eprintln!(
+                            "BVPDEBUG frame {index} slot {slot} ticks {total} flipping {} flip_time {:.3} press {:?} offset {offset}: rot error {:.2} deg, omega error {:.3} rad/s; omega a {:.2} b {:.2}",
+                            state.is_flipping,
+                            state.flip_time,
+                            press_tick.map(|t| t as i64 - now_tick as i64),
+                            rot_error.to_degrees(),
+                            omega_error,
+                            omega_a.length(),
+                            omega_b.length()
+                        );
+                    }
+                }
+                let better = best.as_ref().is_none_or(|b| {
+                    rot_error / rot_tol_deg.to_radians() + omega_error / omega_tol
+                        < b.1 / rot_tol_deg.to_radians() + b.2 / omega_tol
+                });
+                if better {
+                    best = Some((solved, rot_error, omega_error, offset));
+                }
+                if within {
+                    break;
+                }
+            }
+            let (solved, rot_error, omega_error, offset) = best?;
+            shift = offset;
+            (solved, rot_error, omega_error)
+        }
+        _ => solve_air_bvp(rot_a, omega_a, rot_b, omega_b, &ticks, &prior),
+    };
+    // A solution that cannot reach the end state means the free-flight model does not hold (a
+    // contact, a wall, an unseen flip): leave the interval to the other control paths.
+    if rot_error > rot_tol_deg.to_radians() || omega_error > omega_tol {
+        return air_refused(10);
+    }
+    let mut entries = Vec::with_capacity(ticks.len());
+    let mut tick = now_tick + 1;
+    for (controls, n) in solved.iter().zip(&ticks) {
+        entries.push((tick, *controls));
+        tick += u64::from(*n);
+    }
+    Some((
+        AirSchedule {
+            slot,
+            end_tick: now_tick + u64::from(total),
+            entries,
+        },
+        shift,
+    ))
+}
+
+/// Refusal counters of `plan_air_bvp` (diagnostics): 0 flipping at the packet, 1 no fresh rotation,
+/// 2 low at the first packet, 3 inactive, 4 inactive or withheld frame in the span, 5 dodge in the
+/// span, 6 no next packet within 24 frames, 7 low at the next packet, 8 span of unsupported length,
+/// 9 on the ground, 10 no solution that reaches the end state.
+pub static AIR_BVP_REFUSALS: [std::sync::atomic::AtomicUsize; 11] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 11];
+
+fn air_refused<T>(reason: usize) -> Option<T> {
+    AIR_BVP_REFUSALS[reason].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    None
+}
+
 /// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
 const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=8;
 
@@ -2642,12 +3132,28 @@ fn step_ticks(
     apply_hit_impulse: bool,
     pending: &mut Vec<PendingDodge>,
     ground: &mut Vec<GroundSchedule>,
+    air: &mut Vec<AirSchedule>,
     events: &mut Vec<SimEvent>,
 ) {
     for _ in 0..ticks {
         let arena_tick = arena.tick_count() + 1;
         pending.retain(|dodge| dodge.end_tick >= arena_tick);
         ground.retain(|schedule| schedule.end_tick >= arena_tick);
+        air.retain(|schedule| schedule.end_tick >= arena_tick);
+        for schedule in air.iter() {
+            if let Some(entry) = schedule.entries.iter().rev().find(|e| e.0 <= arena_tick) {
+                let mut controls = *arena.get_car_controls(schedule.slot);
+                // A jump press in the air is a double jump or a flip, whose kind RocketSim takes from
+                // the direction of the same controls: leave those ticks to the press itself.
+                if controls.jump && !arena.get_car_state(schedule.slot).is_on_ground {
+                    continue;
+                }
+                controls.pitch = entry.1.pitch;
+                controls.yaw = entry.1.yaw;
+                controls.roll = entry.1.roll;
+                arena.set_car_controls(schedule.slot, controls);
+            }
+        }
         for schedule in ground.iter() {
             // From its press tick a pending dodge drives the car.
             if pending
@@ -2669,6 +3175,15 @@ fn step_ticks(
             }
         }
         for dodge in pending.iter() {
+            // An air schedule solved around this dodge owns the controls except on the press tick.
+            if arena_tick != dodge.start_tick && air.iter().any(|s| s.slot == dodge.slot) {
+                if arena_tick < dodge.start_tick {
+                    let mut current = *arena.get_car_controls(dodge.slot);
+                    current.jump = false;
+                    arena.set_car_controls(dodge.slot, current);
+                }
+                continue;
+            }
             let mut controls = dodge.base;
             controls.jump = false;
             if arena_tick < dodge.start_tick {
@@ -2681,6 +3196,8 @@ fn step_ticks(
                 controls.jump = true;
                 controls.pitch = dodge.pitch;
                 controls.yaw = dodge.yaw;
+                // The dodge direction is (-pitch, yaw + roll): a roll left in `base` would turn it.
+                controls.roll = 0.0;
                 arena.set_car_controls(dodge.slot, controls);
             } else if arena_tick > dodge.start_tick {
                 let sign = arena.get_car_state(dodge.slot).flip_rel_torque.y.signum();
@@ -3197,6 +3714,7 @@ fn fit_dodge_start(
                 controls.jump = true;
                 controls.pitch = pitch;
                 controls.yaw = yaw;
+                controls.roll = 0.0;
             } else {
                 let sign = scratch.get_car_state(0).flip_rel_torque.y.signum();
                 controls.pitch = cancel * sign;
@@ -3406,6 +3924,7 @@ pub fn convert_observations_with(
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
     let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    let mut air_schedules: Vec<AirSchedule> = Vec::new();
     let mut ground_scratch: HashMap<&'static str, Arena> = HashMap::new();
     let mut slot_bodies: HashMap<usize, (&'static str, CarBodyConfig)> = HashMap::new();
     let mut handled_dodges: HashSet<(i32, usize, usize)> = HashSet::new();
@@ -3568,6 +4087,7 @@ pub fn convert_observations_with(
                     options.apply_hit_extra_impulse,
                     &mut pending_dodges,
                     &mut ground_schedules,
+                    &mut air_schedules,
                     &mut events,
                 );
                 if options.limit_reported_velocities {
@@ -3600,6 +4120,7 @@ pub fn convert_observations_with(
                 options.apply_hit_extra_impulse,
                 &mut pending_dodges,
                 &mut ground_schedules,
+                &mut air_schedules,
                 &mut events,
             );
             if stepped > 0 && options.limit_reported_velocities {
@@ -4090,6 +4611,9 @@ pub fn convert_observations_with(
                     controls.jump = true;
                     controls.pitch = dodge_pitch_control;
                     controls.yaw = dodge_yaw_control;
+                    // The dodge direction is (-pitch, yaw + roll): a roll left over from the air
+                    // controls would turn a double jump into a flip or rotate a dodge.
+                    controls.roll = 0.0;
                 }
                 if options.infer_dodge_start
                     && airborne
@@ -4149,6 +4673,76 @@ pub fn convert_observations_with(
                     }
                 }
                 arena.set_car_controls(slot, controls);
+                if options.air_bvp
+                    && simulated
+                    && active
+                    && !new_lifetime
+                    && !dodge_jump_control
+                    && car
+                        .body
+                        .position
+                        .as_ref()
+                        .is_some_and(|p| p.frame == frame.index)
+                {
+                    air_schedules.retain(|schedule| schedule.slot != slot);
+                    let current = *arena.get_car_state(slot);
+                    let planned = plan_air_bvp(
+                        observations,
+                        options,
+                        &packet_lags,
+                        first_time,
+                        frame_idx,
+                        car,
+                        &current,
+                        car_lag(car),
+                        slot,
+                        arena.tick_count(),
+                        if current.is_flipping
+                            || pending_dodges
+                                .iter()
+                                .any(|d| d.slot == slot && d.start_tick > arena.tick_count())
+                        {
+                            flip_scratch.as_mut()
+                        } else {
+                            None
+                        },
+                        &pending_dodges,
+                    );
+                    if planned.is_some() {
+                        diagnostics.air_bvp_planned += 1;
+                    } else if !current.is_on_ground {
+                        diagnostics.air_bvp_refused += 1;
+                    }
+                    if let Some((schedule, shift)) = planned {
+                        if shift != 0 {
+                            // The solution moved the flip's start: a dodge press by the shift, a flip
+                            // already running by its flip time.
+                            if let Some(d) = pending_dodges
+                                .iter_mut()
+                                .find(|d| d.slot == slot && d.start_tick > arena.tick_count())
+                            {
+                                d.start_tick = (d.start_tick as i64 + i64::from(shift)) as u64;
+                            } else if current.is_flipping {
+                                let mut adjusted = current;
+                                adjusted.flip_time =
+                                    (adjusted.flip_time + shift as f32 / 120.0).max(0.0);
+                                arena.set_car_state(slot, adjusted);
+                            }
+                        }
+                        // Provenance: the interval this car's air controls were solved for (the span in
+                        // ticks is in `cancel`).
+                        fitted_arena.push((
+                            slot,
+                            "air",
+                            arena.tick_count(),
+                            0.0,
+                            0.0,
+                            (schedule.end_tick - arena.tick_count()) as f32,
+                            0,
+                        ));
+                        air_schedules.push(schedule);
+                    }
+                }
                 if (options.fit_ground_control_timing || options.fit_jump_timing)
                     && simulated
                     && !new_lifetime
@@ -4289,6 +4883,7 @@ pub fn convert_observations_with(
             options.apply_hit_extra_impulse,
             &mut pending_dodges,
             &mut ground_schedules,
+            &mut air_schedules,
             &mut events,
         );
         if remaining > 0 && options.limit_reported_velocities {
@@ -5679,6 +6274,103 @@ mod tests {
             entries.iter().any(|e| e.0 == 7 && e.5 == Some(false)),
             "{entries:?}"
         );
+    }
+
+    /// Free flight in RocketSim with piecewise-constant controls against the analytic forward model.
+    fn rocketsim_air_rotation(
+        rot: Mat3A,
+        omega: Vec3A,
+        segments: &[(AirControls, u32)],
+    ) -> (Mat3A, Vec3A) {
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(1);
+        let mut arena = Arena::new_with_config(config);
+        arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let mut parked = rocketsim::BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        arena.set_ball_state(parked);
+        let mut state = CarState::default();
+        state.phys.pos = Vec3A::new(0.0, 0.0, 1000.0);
+        state.phys.vel = Vec3A::new(300.0, 100.0, 50.0);
+        state.phys.rot_mat = rot;
+        state.phys.ang_vel = omega;
+        state.is_on_ground = false;
+        state.has_jumped = true;
+        state.has_double_jumped = true;
+        arena.set_car_state(0, state);
+        for &(controls, ticks) in segments {
+            arena.set_car_controls(
+                0,
+                CarControls {
+                    pitch: controls.pitch,
+                    yaw: controls.yaw,
+                    roll: controls.roll,
+                    ..CarControls::default()
+                },
+            );
+            for _ in 0..ticks {
+                arena.step_tick();
+            }
+        }
+        let end = arena.get_car_state(0);
+        (end.phys.rot_mat, end.phys.ang_vel)
+    }
+
+    #[test]
+    fn the_air_forward_model_matches_rocketsim_and_the_bvp_recovers_piecewise_controls() {
+        let rot = Mat3A::from_quat(Quat::from_euler(glam::EulerRot::ZYX, 0.6, 0.2, -0.3));
+        let omega = Vec3A::new(0.8, -1.1, 0.4);
+        let truth = [
+            (
+                AirControls {
+                    pitch: 0.7,
+                    yaw: -0.4,
+                    roll: 0.1,
+                },
+                4,
+            ),
+            (
+                AirControls {
+                    pitch: -0.2,
+                    yaw: 0.6,
+                    roll: -0.9,
+                },
+                4,
+            ),
+            (
+                AirControls {
+                    pitch: 0.3,
+                    yaw: 0.0,
+                    roll: 0.5,
+                },
+                4,
+            ),
+        ];
+        let (sim_rot, sim_omega) = rocketsim_air_rotation(rot, omega, &truth);
+        let (model_rot, model_omega) = air_state_forward(rot, omega, &truth);
+        let rot_error = rotation_error_degrees(sim_rot, model_rot);
+        let omega_error = (sim_omega - model_omega).length();
+        eprintln!(
+            "model vs RocketSim over 12 ticks: rotation {rot_error:.4} deg, angular velocity {omega_error:.4} rad/s"
+        );
+        assert!(rot_error < 0.05 && omega_error < 0.02);
+        // The BVP reaches the end state of a run it has not seen, from a prior of zero controls.
+        let prior = [AirControls::default(); 3];
+        let (solved, rot_residual, omega_residual) =
+            solve_air_bvp(rot, omega, sim_rot, sim_omega, &[4, 4, 4], &prior);
+        let (reached_rot, reached_omega) = rocketsim_air_rotation(
+            rot,
+            omega,
+            &solved.iter().map(|c| (*c, 4)).collect::<Vec<_>>(),
+        );
+        eprintln!(
+            "bvp residual (model) {rot_residual:.5} rad, {omega_residual:.4} rad/s; in RocketSim {:.4} deg, {:.4} rad/s",
+            rotation_error_degrees(reached_rot, sim_rot),
+            (reached_omega - sim_omega).length()
+        );
+        assert!(rotation_error_degrees(reached_rot, sim_rot) < 0.3);
+        assert!((reached_omega - sim_omega).length() < 0.1);
     }
 
     #[test]
