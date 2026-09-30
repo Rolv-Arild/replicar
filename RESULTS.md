@@ -57,7 +57,7 @@ With the true state and inputs, RocketSim's ground and air physics reproduce a 4
 
 ## The 2018 GDC talk on Rocket League physics and networking (2026-09-30)
 
-**Source.** A transcript of "It Is Rocket Science: The Physics and Networking of Rocket League" (Psyonix, GDC 2018), supplied by the user as `psyonix_presentation_transcript.txt` (repository root, not committed; it is a text reconciliation of three transcripts, not audio-verified). Read in full. What follows is what bears on this project, with the checks I could make against our data.
+**Source.** A transcript of "It Is Rocket Science: The Physics and Networking of Rocket League" (Psyonix, GDC 2018), supplied by the user as `external/psyonix_presentation_transcript.txt` (git-ignored with the other user-supplied references, not committed; it is a text reconciliation of three transcripts, not audio-verified). Read in full. What follows is what bears on this project, with the checks I could make against our data.
 
 **What it explains or confirms.**
 
