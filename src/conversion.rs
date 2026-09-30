@@ -187,6 +187,10 @@ pub struct ConvertOptions {
     /// one would use a packet from after a withheld target, so it is refused.
     #[serde(skip)]
     pub withheld_frames: Option<Arc<Vec<bool>>>,
+    /// Packet lags supplied from outside (for example true lags recovered from a server recording),
+    /// used instead of inferring them. Experiments only.
+    #[serde(skip)]
+    pub external_packet_lags: Option<Arc<PacketLags>>,
     /// Include 50–100 UU airborne packets in the offline aerial inverse diagnostic.
     pub infer_transition_air_lookahead: bool,
     /// Compensate RocketSim air damping in the low-air transition band without future packets.
@@ -242,6 +246,7 @@ impl Default for ConvertOptions {
             air_persist_min_control: 0.5,
             air_persist_max_speed_drop: 1.0e6,
             withheld_frames: None,
+            external_packet_lags: None,
             infer_transition_air_lookahead: true,
             compensate_transition_air_damping: false,
             hold_low_air_angular: false,
@@ -2537,7 +2542,8 @@ fn fit_ground_flip_timing(
         }
         let (frame_b, _, pos_b, vel_b, _) = first_fresh;
         let frame_tick = timeline(frame_b) - t_a;
-        let (lo, hi) = ((frame_tick - 4).max(1), frame_tick.min(ticks_ac - 1));
+        let gap = (timeline(frame_b) - timeline(frame_b.saturating_sub(1))).max(4);
+        let (lo, hi) = ((frame_tick - gap).max(1), frame_tick.min(ticks_ac - 1));
         let mut best_tick: Option<(i64, f32)> = None;
         for tb in lo..=hi {
             let st = &states[tb as usize];
@@ -3226,14 +3232,19 @@ fn fit_dodge_start(
         }
     }
     // The first fresh packet after the activation has no chain lag (a dodge breaks the motion the chain
-    // inference relies on), so its tick is only known to lie within the lag range (0-4 ticks) before
-    // its frame time. With the start and cancel fitted on the exact second packet, the tick in that
+    // inference relies on), so its tick is only known to lie within the frame gap (0-4 ticks at 30 fps)
+    // before its frame time. With the start and cancel fitted on the exact second packet, the tick in that
     // range at which the simulated path reproduces this packet (position and velocity) is its tick.
     let mut first_packet = None;
     let final_cancel = best_cancel?.0;
     if options.infer_dodge_first_packet_tick {
         let frame_tick = timeline(first_frame) - origin_tick;
-        let (lo, hi) = ((frame_tick - 4).max(1), frame_tick.min(second.0 as i64 - 1));
+        // A packet was generated within its frame window: the lag is at most the frame gap.
+        let gap = (timeline(first_frame) - timeline(first_frame.saturating_sub(1))).max(4);
+        let (lo, hi) = (
+            (frame_tick - gap).max(1),
+            frame_tick.min(second.0 as i64 - 1),
+        );
         if lo <= hi {
             let after = run_all(scratch, dodge_tick, final_cancel);
             let target = &first_fresh_state;
@@ -3340,7 +3351,9 @@ pub fn convert_observations_with(
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut diagnostics = Diagnostics::default();
     let first_time = observations.frames.first().map_or(0.0, |frame| frame.time);
-    let packet_lags = if options.zero_packet_lag {
+    let packet_lags = if let Some(external) = options.external_packet_lags.as_ref() {
+        Some((**external).clone())
+    } else if options.zero_packet_lag {
         Some(zero_packet_lags(observations))
     } else {
         options
