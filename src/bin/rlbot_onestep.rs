@@ -38,6 +38,7 @@ struct Player {
     demolished: bool,
     supersonic: bool,
     team: u8,
+    is_bot: bool,
     controls: CarControls,
 }
 
@@ -116,6 +117,7 @@ fn parse(line: &str) -> Option<Packet> {
             demolished: pl["demolished_timeout"].as_f64().unwrap_or(-1.0) >= 0.0,
             supersonic: pl["is_supersonic"].as_bool().unwrap_or(false),
             team: pl["team"].as_u64().unwrap_or(0) as u8,
+            is_bot: pl["is_bot"].as_bool().unwrap_or(true),
             controls: CarControls {
                 throttle: f("throttle"),
                 steer: f("steer"),
@@ -357,6 +359,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     for group in [
                         "all".to_string(),
+                        if a.is_bot { "bot cars".to_string() } else { "human cars".to_string() },
                         category.to_string(),
                         if near_car {
                             "near another car".to_string()

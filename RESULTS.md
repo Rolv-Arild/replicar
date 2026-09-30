@@ -86,6 +86,22 @@ So the ground physics, jumps, flips, boosting and air control reproduce the game
 
 **Use.** This is the recording to reconstruct against: 4 cars, contacts, boosts, flips and jumps, exact per-tick truth and inputs. Next steps: thin the replay's car packets and reconstruct with the converter against the recording (as `dump_reconstruction` does), with the per-frame alignment; test the ground timing fits with true inputs; carry boost-latch state.
 
+### A human on keyboard and mouse against bots (2026-09-30)
+
+**The data.** `replays/2026-09-30T11-09-41Z_local_human_kbm_vs_bots/`: a local 2v2 with the user (keyboard and mouse, digital inputs) and three bots, 22,293 packets (frames 18 to 19,631, 32 gaps of 55 missing frames in all; about 163 s of physics), and the game's saved replay. Local, no network delay.
+
+**The human's `last_input` is the applied control, with the same alignment as the bots'** (`rlbot_onestep`, now grouped by `is_bot`): stepping with the input of packet n+t+1, human cars at H = 12: position p50 / p90 / p99 0.01 / 0.19 / 1.9 UU, velocity p90 2.7 UU/s, rotation p90 0.063 deg, angular velocity p90 0.012 rad/s (bot cars 0.01 / 0.24 / 3.9 UU, 4.6 UU/s, 0.040 deg); with the packet n+t input the human cars are 0.91 UU and 0.74 deg at p90. So an RLBot recording of a human host gives true inputs of the same quality as a bot's.
+
+**The flip cancel is player-dependent, not a common ramp** (`scripts/rlbot_flip_cancel.py`: signed pitch input against the flip's pitch torque, per 120 Hz tick after each forward or backward dodge; positive = pull against the flip = RocketSim's cancel):
+
+| Player | Flips | Cancel input | Timing |
+| --- | --- | --- | --- |
+| Human, keyboard (this recording) | 20 | never above 0.5 (holds the dodge direction, W, for 24-40 ticks, then releases to 0) | none |
+| Bots (Nexto, Ripple), both recordings | 71 + 183 | binary: 44-56% of flips cancel fully, the rest hold the dodge direction | first tick above 0.5: p10 / p50 4 / 4-8; a tick-4 step (RocketSim's gate is 5 ticks, 0.041 s) |
+| Human, controller (BakkesMod dump, 9 flips) | 9 | ramp from the dodge direction through neutral to full pull-back | 8-16 ticks |
+
+So the cancel is closer to a per-flip step (a value c from a start tick t0) than a universal ramp: the controller player ramps because an analogue stick returns through neutral, a keyboard player never cancels, a bot cancels at tick 4 or not at all. A prior for the cancel as a function of the flip time cannot be taken from one player, and the mixture is wide (0 for keyboard, 0.5 for bots, a ramp for the controller); the per-flip fit against packets (on the previous interval when causal) stays the right tool, and the fitted constant is a fair approximation whenever t0 is before the fit's span. The next-action item 'cancel as a function of the flip time' should be a per-flip step (value and start tick) fitted from the packets, judged held out, not a fixed curve.
+
 ### The fitted inputs against the dump's true inputs (2026-09-30)
 
 **Method.** `ConvertedFrame::fitted_inputs` (new) lists the jump presses and dodge presses (with the dodge's pitch and yaw controls and the pitch cancel) that the timing fits chose at each fresh packet, on the replay timeline; `dump_inputs` thins the dump replay's car packets to every K-th frame (as `dump_reconstruction`), converts with `zero_packet_lag`, and matches each fitted event to the dump's true event (the latest fit whose tick is within 16 ticks of the record where `b_jumped` or `b_isdodging` first shows; the true press lies in the 4-tick window before that record). `dump_flip` runs one-step RocketSim from each dump record of a flip with the true inputs.
