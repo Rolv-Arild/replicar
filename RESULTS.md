@@ -55,6 +55,37 @@ With the true state and inputs, RocketSim's ground and air physics reproduce a 4
 
 **Use.** The dump gives true inputs and a 4-tick truth grid, which the corpus lacks: it can score the fits that bridge packets (thin the replay's packets, reconstruct, compare the frames without a packet with the dump), and check the jump, dodge and cancel inputs against the truth. One offline replay of one player, so it validates mechanisms, not absolute numbers for online play.
 
+## An RLBot recording with every car's true state and inputs (2026-09-30)
+
+**The data.** `replays/2026-09-30T10-34-49Z_local_botvsbot_nexto_ripple/` (recorded by the user's `rlbot_dump` script, RLBot v5): a local 2v2 bot match (Nexto and Ripple bots, Octane hitboxes, CHN_Stadium_P) with `states.jsonl` (one RLBot `GamePacket` per physics frame: 4 cars with physics, boost, air state, jump/double-jump/dodge flags, `dodge_elapsed`, `dodge_dir`, `last_input`, and the ball; 61,465 lines covering frame numbers 23 to 60,197, 59,845 consecutive steps, 1,482 repeated lines, 137 gaps of 192 missing frames in all) and the game's saved `.replay` (11,665 network frames; game build 260918, network version 12). Treated as a diagnostic with ground truth, not a split. It is a local match, so it has no replication delay; it is not an online-timing recording (`meta.json` corrected by hand after the run says so).
+
+**The recorder's output is usable.** `seconds_elapsed` equals `frame_num / 120` to 1.4e-5 s, so the packets are the physics ticks. The tools are `rlbot_onestep` (all cars and the ball stepped in one RocketSim arena from a packet) and `align_rlbot` (replay to recording).
+
+**Input alignment (settled).** `last_input` of the packet at frame n+1 is the control applied during the tick n to n+1. Stepping from n with the input listed in packet n leaves errors (H = 12, ground position p90 0.8 UU and rotation p90 0.7 deg, against 0.02 UU and 0.000 deg with the packet n+1 input). The BakkesMod dump (inputs sampled every 4 ticks) could not settle this.
+
+**RocketSim with the true state and inputs is almost exact** (`rlbot_onestep`, 139,709 car-steps at H = 12; H ticks stepped from each packet with the recorded inputs, everything compared with the recorded state at n + H; the packet supplies pose, velocity, boost, jump and flip state; RocketSim's smoothed handbrake, which the packet lacks, is tracked with its own rates, +5/s held and -2/s released):
+
+| Group (H = 12 ticks) | n | Position p50 / p90 / p99 UU | Velocity p50 / p90 UU/s | Rotation p50 / p90 deg | Angular velocity p50 / p90 rad/s |
+| --- | --- | --- | --- | --- | --- |
+| All | 139,709 | 0.01 / 0.24 / 3.8 | 0.0 / 5.2 | 0.000 / 0.040 | 0.000 / 0.009 |
+| Ground, no boost | 62,468 | 0.01 / 0.02 / 0.2 | 0.0 / 0.1 | 0.000 / 0.000 | 0.000 / 0.001 |
+| Ground, handbrake | 11,364 | 0.01 / 0.08 / 5.4 | 0.0 / 1.7 | 0.000 / 0.000 | 0.000 / 0.001 |
+| Ground, boosting | 21,966 | 0.01 / 0.62 / 4.5 | 0.1 / 24.5 | 0.000 / 0.000 | 0.000 / 0.001 |
+| Air, boosting | 8,216 | 0.01 / 0.80 / 5.7 | 0.0 / 33.1 | 0.000 / 0.626 | 0.001 / 0.162 |
+| Jump window | 5,133 | 0.07 / 0.34 / 4.7 | 1.0 / 8.1 | 0.000 / 0.849 | 0.001 / 0.134 |
+| Flip | 15,022 | 0.01 / 1.26 / 6.0 | 0.1 / 18.6 | 0.000 / 0.660 | 0.001 / 0.067 |
+| Near another car | 6,965 | 0.01 / 0.98 / 36.0 | 0.0 / 18.3 | 0.000 / 0.697 | 0.001 / 0.148 |
+
+So the ground physics, jumps, flips, boosting and air control reproduce the game to a fraction of a UU when the inputs and RocketSim's internal state are right. **The ground-driving error of the converter is therefore inputs, their timing and the carried internal state (the smoothed handbrake), not RocketSim's ground model**; the first tool run without the handbrake tracking had ground handbrake errors of 1.2 UU p50 and 185 UU/s p90 at H = 12, all of it removed by carrying the handbrake state. What remains (boosting velocity p90 25-33 UU/s, near-car p99 36 UU) points at the boost-latch state (`boosting_time`, `time_since_boosted`, unobserved) and bumps.
+
+**Caveats found on the way (for `ROCKETSIM_NOTES.md`).** (1) `set_car_state` with `is_on_ground = false` and no wheel contacts while the car physically touches the ground (the `Jumping` state) gave +500 UU/s of horizontal velocity in one tick (frame 1118, player 1 of the recording); setting the contacts consistently fixes it (jump-window velocity p90 1,075 to 8 UU/s at H = 12). The converter carries the arena's own contact state instead of resetting it from packets, so it is not affected. (2) The angular speed cap: the reported flip angular velocity is above 5.5 rad/s while the game's is capped (uncapped angular velocity error 1.75 rad/s p50 at H = 1, 0.000 with the cap applied, rotation identical); already logged as a speed-limit issue.
+
+**The saved replay of a current game build could not be parsed by `boxcars` 0.11.5** (`TAGame.PRI_TA:PlayerStatus` is not implemented; the corpus is game version 868.32.10, this file 868.34.12). `boxcars` 0.12.0 parses it. To check that a pin update is safe, the new `hash_observations` prints a SHA-256 of the extracted observations of every replay: all 120 train and validation replays give identical hashes under 0.11.5 and 0.12.0, and `evaluate_corpus` and `error_budget` reports on a 9-replay subset are byte-identical. The pin is updated to `=0.12.0` (the rule allows a measured change). The converter runs on the new replay (`evaluate_corpus` 1-step car rotation sim p50 0.00 deg, angular velocity 0.0003 rad/s, against 3.3 deg and 0.22 rad/s for holding the previous packet).
+
+**Alignment of the saved replay to the recording.** Every sampled replay frame (1,507 of them, at least three fresh car positions) matches a recorded packet exactly (nearest-car distance 0.00 UU at p10 to p99), so the replay's car packets are exact server states here too and each maps to a recorded `frame_num`. The offset between the replay's timeline (`round(time * 120)`) and `frame_num` is not constant: it drifts from -5 to +8 ticks over the match (per-frame best offset by replay frame: -5 near frame 1,100, 0 near 5,700, +8 near 10,700), so the replay's frame times and the physics tick counter run at slightly different rates in an offline match. An online-timing analysis must therefore use per-frame alignment by exact state matching, not one global offset.
+
+**Use.** This is the recording to reconstruct against: 4 cars, contacts, boosts, flips and jumps, exact per-tick truth and inputs. Next steps: thin the replay's car packets and reconstruct with the converter against the recording (as `dump_reconstruction` does), with the per-frame alignment; test the ground timing fits with true inputs; carry boost-latch state.
+
 ### The fitted inputs against the dump's true inputs (2026-09-30)
 
 **Method.** `ConvertedFrame::fitted_inputs` (new) lists the jump presses and dodge presses (with the dodge's pitch and yaw controls and the pitch cancel) that the timing fits chose at each fresh packet, on the replay timeline; `dump_inputs` thins the dump replay's car packets to every K-th frame (as `dump_reconstruction`), converts with `zero_packet_lag`, and matches each fitted event to the dump's true event (the latest fit whose tick is within 16 ticks of the record where `b_jumped` or `b_isdodging` first shows; the true press lies in the 4-tick window before that record). `dump_flip` runs one-step RocketSim from each dump record of a flip with the true inputs.

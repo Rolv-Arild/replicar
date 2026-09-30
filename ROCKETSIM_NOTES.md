@@ -40,6 +40,8 @@ Status labels: **verified** (isolated with a reproduction), **fixed upstream** (
 
 - Still true at `0b02051`. `set_car_state` takes the whole `CarState`, including `handbrake_val` (a ramp of +5/s held, -2/s released that scales handbrake friction), which a packet cannot supply; a replay tool has to carry it itself (the converter's arena does, and a per-pair test that starts it at zero overstates errors near handbrake use). Wheel contacts are now `[Option<RaycastHitInfo>; 4]` (hit point, normal, fraction) and `last_extra_hit_tick` moved from the ball to each car, so a snapshot needs more than booleans to restore exactly; the serialized schema keeps booleans and the converter rebuilds contacts with default hit info. A live arena cannot adopt an absolute tick count, RNG state, or private physics, contact and wheel caches, so a snapshot cannot be an exact continuation point. `set_car_state` requires the caller to set `is_on_ground` and wheel contacts consistently. A state restore API (or documented list of what a setter does and does not reset) would help replay tooling.
 
+Measured on 2026-09-30 with an RLBot recording (`rlbot_onestep`): a car in the game's `Jumping` state (on the ground for its first ticks) restored with `is_on_ground = false` and no wheel contacts gained about 500 UU/s of horizontal velocity in one tick (frame 1118 of the recording, player 1); with the contacts set consistently the same steps match the game (jump-window velocity p90 1,075 UU/s to 8 UU/s over 12 ticks). This is the consistency requirement above, with its measured effect.
+
 ## 6. Agreement worth knowing (positive validation)
 
 Rechecked at `0b02051` with the same audits: whole-tick ball flight position error p50/p99 0.0051/0.014 UU (0.0050/0.013 at `79f4d22`), 95.1% of 101,202 pairs below 0.01 UU (97.3% before), velocity 0.010 UU/s unchanged, airborne car ballistic pairs 89.7% below 0.01 UU (91.5% before). The small change is not investigated.
@@ -50,7 +52,7 @@ Rechecked at `0b02051` with the same audits: whole-tick ball flight position err
 
 ## 7. Open leads
 
-- Ground driving: the converter's car model has a systematic velocity error (median 11-14 UU/s) and rotation p90 near 2.5 deg while driving with known throttle, steer and handbrake; not yet attributed to RocketSim's ground model versus unobserved details.
+- Ground driving: the converter's car model has a systematic velocity error (median 11-14 UU/s) and rotation p90 near 2.5 deg while driving with known throttle, steer and handbrake. Attributed on 2026-09-30 (`RESULTS.md`, 'An RLBot recording with every car's true state and inputs'): with the true state, the true inputs (the packet at n+1 holds the input applied in tick n to n+1) and RocketSim's smoothed handbrake carried, ground driving reproduces the game to 0.02 UU p90 and 0.1 UU/s over 12 ticks (139,709 car-steps, 4 cars), so the remaining error is unobserved or mistimed inputs and carried state, not RocketSim's ground model. Verified.
 
 Keep this file current: add each apparent inaccuracy when found, with a reproduction command, RocketSim file and line at the pinned revision, the measured effect, the workaround, and the status.
 
