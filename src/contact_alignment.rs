@@ -29,6 +29,14 @@ const MIN_IMPROVEMENT: f32 = 30.0;
 const MAX_RESIDUAL: f32 = 100.0;
 /// The car packet the simulation starts from is at most this many ticks before the hit.
 const MAX_LEAD_TICKS: i64 = 4;
+
+/// Experiment switch (env `ALIGN_MAX_LEAD`): the default reach in ticks.
+fn max_lead_ticks() -> i64 {
+    static LEAD: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *LEAD.get_or_init(|| {
+        std::env::var("ALIGN_MAX_LEAD").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_LEAD_TICKS)
+    })
+}
 /// Shifts within this (UU/s) of the best are equivalent; the smallest one wins.
 const TIE: f32 = 10.0;
 
@@ -131,7 +139,7 @@ pub fn aligned_lags(
                 }
             }
             let Some((g, car_tick)) = packet else { continue };
-            if hit_tick - car_tick > MAX_LEAD_TICKS {
+            if hit_tick - car_tick > max_lead_ticks() {
                 continue;
             }
             let car_packet = frame_data[g]

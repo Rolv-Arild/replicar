@@ -1565,7 +1565,7 @@ fn apply_body(state: &mut PhysState, body: &Body, index: usize, new_entity: bool
     applied
 }
 
-fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) -> CarControls {
+pub fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) -> CarControls {
     CarControls {
         throttle: car.inputs.throttle.as_ref().map_or(0.0, |v| v.value),
         steer: car.inputs.steer.as_ref().map_or(0.0, |v| v.value),
@@ -3806,6 +3806,25 @@ fn fit_ground_flip_timing(
     })
 }
 
+/// One simulated car state of the main arena (a diagnostic trace, `CAR_TRACE`): the state after the
+/// step that reached `arena_tick`. A row with `slot == u32::MAX` is a frame marker: `rot`/`pos` unused,
+/// `arena_tick` is the arena tick count at the end of replay frame `vel[0]` and `vel[1]` the
+/// timeline offset (timeline tick minus arena tick) of that frame; the rows since the previous
+/// marker belong to it.
+#[derive(Debug, Clone, Copy)]
+pub struct CarTraceRow {
+    pub arena_tick: u64,
+    pub slot: u32,
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub rot: [f32; 9],
+    pub ang: [f32; 3],
+}
+
+/// The per-tick car trace is only kept while a diagnostic tool has switched this on.
+pub static CAR_TRACE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static CAR_TRACE: std::sync::Mutex<Vec<CarTraceRow>> = std::sync::Mutex::new(Vec::new());
+
 fn step_ticks(
     arena: &mut Arena,
     ticks: u64,
@@ -3891,6 +3910,25 @@ fn step_ticks(
                 .into_iter()
                 .map(|event| SimEvent { arena_tick, event }),
         );
+        if CAR_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(mut trace) = CAR_TRACE.lock() {
+                for slot in 0..arena.num_cars() {
+                    let c = arena.get_car_state(slot);
+                    let m = c.phys.rot_mat;
+                    trace.push(CarTraceRow {
+                        arena_tick,
+                        slot: slot as u32,
+                        pos: c.phys.pos.to_array(),
+                        vel: c.phys.vel.to_array(),
+                        rot: [
+                            m.x_axis.x, m.x_axis.y, m.x_axis.z, m.y_axis.x, m.y_axis.y, m.y_axis.z,
+                            m.z_axis.x, m.z_axis.y, m.z_axis.z,
+                        ],
+                        ang: c.phys.ang_vel.to_array(),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -5943,6 +5981,18 @@ pub fn convert_observations_with(
             }
         }
         let timeline_offset = timeline_tick as i64 - arena.tick_count() as i64;
+        if CAR_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(mut trace) = CAR_TRACE.lock() {
+                trace.push(CarTraceRow {
+                    arena_tick: arena.tick_count(),
+                    slot: u32::MAX,
+                    pos: [0.0; 3],
+                    vel: [frame_idx as f32, timeline_offset as f32, 0.0],
+                    rot: [0.0; 9],
+                    ang: [0.0; 3],
+                });
+            }
+        }
         if options.block_sim_pad_pickups {
             // The pads are held on cooldown (the replay reports the pickups): a pickup the
             // simulation still reports would count one twice.
