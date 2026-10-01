@@ -191,6 +191,9 @@ pub struct ConvertOptions {
     /// car's hitbox just touches the ball at the last state before the median hit
     /// (`estimate_ball_car_offset`). Needs 20 bridged hits.
     pub estimate_ball_car_lag_offset: bool,
+    /// Treat a replay whose chain links (9 in 10) match the frame timeline's gaps as lag-free (a
+    /// server's own replay): every fresh packet gets lag 0 instead of an inferred 1-2 ticks.
+    pub detect_lag_free_replays: bool,
     /// Offline: infer when inside its frame each ball and car packet was generated (its lag behind
     /// the frame time, in ticks) from chained packet motion, and apply corrections at that time.
     pub infer_packet_lag: bool,
@@ -281,6 +284,7 @@ impl Default for ConvertOptions {
             ball_hit_chains: true,
             ball_car_lag_offset: None,
             estimate_ball_car_lag_offset: true,
+            detect_lag_free_replays: true,
             infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
@@ -2262,6 +2266,24 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
             },
         );
         car_runs.extend(runs.into_iter().map(|run| ((*actor, *created), run)));
+    }
+    // A replay saved by the server (host) has every packet fresh at its frame's own tick: its chain
+    // links equal the gaps of the frame timeline (99.5-99.7% on two host replays of the remote-client
+    // games, 13-47% on 36 client replays of the corpus and 24-25% on the two remote-client replays),
+    // while a client's packets have lags that jitter inside the window. Such a replay has no lag.
+    if options.detect_lag_free_replays {
+        let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
+        let tl = |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
+        let (mut equal, mut total) = (0usize, 0usize);
+        for run in ball_runs.iter().chain(car_runs.iter().map(|(_, r)| r)) {
+            for pair in run.entries.windows(2) {
+                total += 1;
+                equal += usize::from(pair[1].1 - pair[0].1 == tl(pair[1].0) - tl(pair[0].0));
+            }
+        }
+        if total >= 200 && equal as f64 >= 0.9 * total as f64 {
+            return zero_packet_lags(observations);
+        }
     }
     let offset = options.ball_car_lag_offset.or_else(|| {
         options
