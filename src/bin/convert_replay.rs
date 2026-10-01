@@ -5,7 +5,8 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
-use replay_to_rocketsim::parquet_export::write_parquet;
+use replay_to_rocketsim::parquet_export::write_parquet_with_tables;
+use replay_to_rocketsim::parquet_tables::table_path;
 use replay_to_rocketsim::serialization::write_jsonl;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -18,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?);
     let mut options = ConvertOptions::default();
     let mut mesh_path = None;
+    let mut event_tables = true;
     for arg in args {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
@@ -32,6 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.gate_jump_on_observed_impulse = false;
         } else if arg == "--no-align-contacts" {
             options.align_contacts = false;
+        } else if arg == "--no-event-tables" {
+            event_tables = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--gated-low-air-angular" {
@@ -40,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--no-event-tables]".into());
         }
     }
     if let Some(path) = mesh_path {
@@ -51,7 +55,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("parquet"))
     {
-        write_parquet(&bytes, &options, File::create(&output_path)?)?
+        let summary = write_parquet_with_tables(
+            &bytes,
+            &options,
+            File::create(&output_path)?,
+            event_tables.then_some(output_path.as_path()),
+        )?;
+        for (table, rows) in &summary.table_rows {
+            println!(
+                "{rows} rows -> {}",
+                table_path(&output_path, table).display()
+            );
+        }
+        summary.frames
     } else {
         let conversion = convert_bytes(&bytes, &options)?;
         let file = File::create(&output_path)?;

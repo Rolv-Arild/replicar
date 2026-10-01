@@ -68,6 +68,17 @@ first_rich_frame = next(iter_columnar_frames("target/example.parquet"))
 
 The columnar format keeps complete observations, simulated events, residuals, and hidden RocketSim fields in `frame_json`; typed columns cover the dense state, controls, pads, score, and clock. Parquet is recommended for repeated Python ML reads because the loader can skip the rich payload. JSONL remains faster to export and easier to inspect. The direct Rust Parquet path simulates twice to determine final car-slot widths before writing 512-frame row groups; it avoids retaining all simulated snapshots, but replay bytes and extracted observations remain in memory for offline lookahead. JSONL still retains all snapshots before writing. [RESULTS.md](RESULTS.md) has format, memory, and runtime measurements.
 
+The Rust CLI also writes typed per-record tables next to the main file, so the scoreboard, touches, contacts, pickups, fitted inputs, and events need no per-frame JSON parsing (pass `--no-event-tables` to skip them). The main file gets four more columns appended after `frame_json` (existing columns and positions are unchanged): `scoreboard_period` and `scoreboard_clock_state` (dictionary-encoded strings, read by PyArrow as categoricals) and nullable Float32 `scoreboard_seconds_remaining` and `scoreboard_overtime_seconds`. For `game.parquet` the tables are `game.touches.parquet`, `game.ball_contacts.parquet`, `game.boost_pickups.parquet`, `game.fitted_inputs.parquet`, `game.packet_lags.parquet`, `game.events.parquet` (goals and demolitions) and `game.pad_pickups.parquet`, one row per record with the `frame` it belongs to; they are always written, empty when a replay has none. A null is an unknown or inapplicable value, never zero. [RESULTS.md](RESULTS.md) ("Parquet columns and record tables") lists every column.
+
+```python
+import pyarrow.parquet as pq
+
+frames = pq.read_table("target/example.parquet", columns=["frame", "scoreboard_clock_state", "scoreboard_seconds_remaining"])
+touches = pq.read_table("target/example.touches.parquet").to_pandas()    # frame, car_slot, tick, contact_point
+events = pq.read_table("target/example.events.parquet").to_pandas()      # kind: goal_scored_on | demolish
+demolitions = events[(events.kind == "demolish") & (events.repeat == False)]
+```
+
 Rust callers can parse a schema-v1 rich frame and rebuild a detached native soccar `ArenaState` with `restoration::state_from_frame_json` and `restoration::restore_soccar_state`; the car slots come from `restoration::car_slots_from_header_json`. `apply_soccar_state_to_arena` seeds a live Arena and reports its own tick and pad cooldown error. A live Arena cannot adopt the serialized absolute tick, RNG, or private physics caches, so continuing simulation from it is not an exact replay continuation. To verify all rich frames in a Parquet file, run `cargo run --release --bin verify_state_restoration -- target/example.parquet`.
 
 ## Present accuracy limits

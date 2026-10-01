@@ -17,6 +17,7 @@ pub mod contact_alignment;
 pub mod conversion;
 pub mod observations;
 pub mod parquet_export;
+pub mod parquet_tables;
 pub mod restoration;
 pub mod scoreboard;
 pub mod serialization;
