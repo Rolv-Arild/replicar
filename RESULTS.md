@@ -1978,6 +1978,8 @@ For the converter this changes nothing: the aerial inverse is already in place a
 
 **Result.** One validation 3v3 replay (11,023 frames, one process, release): 10.6 s to 6.8 s for `convert_replay` (-36%). The output is not byte-identical: 273 of 11,024 frames differ (air solves only; `air_bvp_planned` 7,539 to 7,541), because the scratch RocketSim arena is not bit-reproducible (a repeated forward solve of the same controls depends slightly on what ran before; the cached Jacobian removes that repetition). Scored against the server on the LAN client replay of game 1 (`rlbot_reconstruction --thin 2`, 22,922 frames, interior error), every printed row is unchanged to the printed precision (ground, air, jump position p50/p90/p99 and velocity; flip angular velocity p99 3.206 to 3.192 rad/s).
 
+**Reproducibility.** The same binary gives byte-identical JSONL on a 2v2 validation replay in three runs, two of them concurrent (md5 equal), so the evaluation is deterministic run to run; only a code change (such as the Jacobian cache) moves the output, within the scratch-arena noise described above.
+
 **Not taken.** A stall rule for the LM loop (stop when the cost stays above a threshold and improves by less than 3% over three iterations) and a coarse-to-fine shift search were drafted by an agent that ran out of quota before measuring them. Both are approximations with thresholds picked by hand; the exact edits above are kept and the rest is left until a measured need (the conversion is no longer the bottleneck of the reference evaluation, which is dominated by the masked runs).
 
 ## Hit-level control fit: not the bottleneck (2026-10-01)
