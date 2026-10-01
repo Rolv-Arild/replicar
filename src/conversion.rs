@@ -394,24 +394,6 @@ pub struct BoostPickup {
     pub tick: u64,
 }
 
-/// A goal, with the car that touched the ball last before it: the replay reports only the team
-/// scored on; the scorer is inferred from the contacts (ball packets first, else the simulated
-/// touches).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct GoalEvent {
-    pub team_scored_on: u8,
-    /// The car of the scoring team that touched the ball last, its touch tick and where that touch
-    /// came from (`ball_packets` or `simulation`). A defender touching the ball after the shot does
-    /// not take the goal (2 of 18 goals on the remote-client games; the server credited the
-    /// attacker); `None` when the scoring team has not touched the ball.
-    pub last_touch_slot: Option<usize>,
-    pub last_touch_tick: Option<u64>,
-    pub last_touch_source: Option<&'static str>,
-    /// The car that touched the ball last of all (an own goal candidate when it belongs to the team
-    /// scored on and the scoring team has no touch).
-    pub final_toucher_slot: Option<usize>,
-}
-
 /// A ball touch of the simulation: the first tick of a car-ball contact.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TouchEvent {
@@ -469,8 +451,6 @@ pub struct ConvertedFrame {
     /// Boost pad pickups the replay reports in this frame (new ones only), checked against the cars'
     /// paths.
     pub boost_pickups: Vec<BoostPickup>,
-    /// Goals reported in this frame, with the car that touched the ball last (inferred).
-    pub goals: Vec<GoalEvent>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
@@ -4640,9 +4620,6 @@ pub fn convert_observations_with(
     let mut recent_poses: std::collections::VecDeque<(u64, Vec<(usize, Vec3A, Mat3A, bool)>)> =
         std::collections::VecDeque::new();
     let mut recent_touch_ticks: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
-    // Slot, timeline tick and source of the last car-ball touch seen.
-    let mut last_touch: Option<(usize, u64, &'static str)> = None;
-    let mut last_touch_by_team: [Option<(usize, u64, &'static str)>; 2] = [None, None];
     // Last arena tick of a car-ball contact event per slot (to find where a contact starts).
     let mut last_contact_tick: HashMap<usize, u64> = HashMap::new();
     // Timeline tick until which an observed demolition keeps a slot demolished.
@@ -5964,44 +5941,6 @@ pub fn convert_observations_with(
                 });
             }
         }
-        // The last car to touch the ball: the latest ball contact with a car, else simulated touches.
-        let team_of = |slot: usize| car_slots.iter().find(|s| s.slot == slot).map(|s| s.team);
-        for c in &ball_contacts {
-            if let (Some(slot), Some(team)) = (c.car_slot, c.car_slot.and_then(team_of)) {
-                let entry = &mut last_touch_by_team[usize::from(team.min(1))];
-                if entry.is_none_or(|(_, t, _)| c.tick >= t) {
-                    *entry = Some((slot, c.tick, "ball_packets"));
-                }
-                if last_touch.is_none_or(|(_, t, _)| c.tick >= t) {
-                    last_touch = Some((slot, c.tick, "ball_packets"));
-                }
-            }
-        }
-        for t in &touches {
-            // A simulated touch counts when no later ball-packet contact has claimed the ball.
-            if let Some(team) = team_of(t.car_slot) {
-                let entry = &mut last_touch_by_team[usize::from(team.min(1))];
-                if entry.is_none_or(|(_, lt, src)| src == "simulation" && t.tick >= lt) {
-                    *entry = Some((t.car_slot, t.tick, "simulation"));
-                }
-            }
-            if last_touch.is_none_or(|(_, lt, src)| src == "simulation" && t.tick >= lt) {
-                last_touch = Some((t.car_slot, t.tick, "simulation"));
-            }
-        }
-        let mut goals = Vec::new();
-        for event in &frame.events {
-            if let observations::Event::GoalScoredOn { team } = event {
-                let scorer = last_touch_by_team[usize::from(1 - (*team).min(1))];
-                goals.push(GoalEvent {
-                    team_scored_on: *team,
-                    last_touch_slot: scorer.map(|l| l.0),
-                    last_touch_tick: scorer.map(|l| l.1),
-                    last_touch_source: scorer.map(|l| l.2),
-                    final_toucher_slot: last_touch.map(|l| l.0),
-                });
-            }
-        }
         // New pad pickups of this frame, with the instigator checked against the cars' paths.
         let mut boost_pickups = Vec::new();
         for pickup in &frame.pad_pickups {
@@ -6101,7 +6040,6 @@ pub fn convert_observations_with(
             touches,
             ball_contacts,
             boost_pickups,
-            goals,
             packet_lags: applied_lags,
             fitted_inputs: fitted_arena
                 .into_iter()

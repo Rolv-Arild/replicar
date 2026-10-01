@@ -332,9 +332,6 @@ struct FrameLine<'a> {
     /// New boost pad pickups reported by the replay this frame, checked against the cars' paths.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     boost_pickups: &'a [crate::conversion::BoostPickup],
-    /// Goals reported this frame with the car that touched the ball last (inferred).
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    goals: &'a [crate::conversion::GoalEvent],
     position_residuals: &'a [PositionResidual],
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -391,7 +388,6 @@ fn frame_line<'a>(
         touches: &converted.touches,
         ball_contacts: &converted.ball_contacts,
         boost_pickups: &converted.boost_pickups,
-        goals: &converted.goals,
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,

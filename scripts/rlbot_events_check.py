@@ -357,29 +357,3 @@ simcov = sum(1 for fn, n in truth_touches if any(abs(t_ - fn) <= 20 for t_, n2 i
 print(f"  for comparison, truth touches with a simulated touch of the same car within 20 ticks: {simcov} ({simcov/max(1,len(truth_touches)):.1%})")
 either = sum(1 for fn, n in truth_touches if any(a_ - 3 <= fn <= b_ + 3 for _, _, a_, b_, _, _ in contacts) or any(abs(t_ - fn) <= 20 for t_, n2 in sim_touches if n2 == n))
 print(f"  covered by a ball contact or a simulated touch: {either} of {len(truth_touches)} ({either/max(1,len(truth_touches)):.1%})")
-
-# ---- goal scorer: the converter's last toucher before each goal vs the player whose goals/own_goals rose ----
-raw_ps = {}
-scorers = []
-seen_f = set()
-prev_g = {}
-for line in open(states_path):
-    p_ = json.loads(line)['packet']; fn = p_['match_info']['frame_num']
-    if fn in seen_f: continue
-    seen_f.add(fn)
-    for pl in p_['players']:
-        si = pl['score_info']; k = (si['goals'], si['own_goals'])
-        if pl['name'] in prev_g and k != prev_g[pl['name']]:
-            scorers.append((fn, pl['name'], k[1] > prev_g[pl['name']][1]))
-        prev_g[pl['name']] = k
-conv_goals = []
-for r in recs:
-    for g in r.get('goals', []):
-        conv_goals.append((r['timeline_tick'] - floor_at(r['frame']), g['team_scored_on'], slot_name.get(g['last_touch_slot']) if g['last_touch_slot'] is not None else None, g['last_touch_source']))
-print(f"\ngoals with a scorer: truth {[(fn, n, 'own goal' if og else '') for fn, n, og in scorers]}")
-print(f"  converter goals (tick, scored on, last toucher, source): {conv_goals}")
-right = 0
-for t_, team, who, src in conv_goals:
-    near = [s_ for s_ in scorers if abs(s_[0] - t_) <= 400]
-    if near and who == near[0][1]: right += 1
-print(f"  last toucher is the scorer (or the own-goal player) in {right} of {len(conv_goals)} goals")
