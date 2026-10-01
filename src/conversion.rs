@@ -806,24 +806,29 @@ pub fn solve_bvp_with(
     let u0 = to_vec(prior);
     let mut u = u0.clone();
     let mut lambda = 1.0f32;
-    let cost = |u: &[f32]| -> f32 {
-        let r = residual(u);
+    let cost_of = |u: &[f32], r: &[f32; 6]| -> f32 {
         let prior_cost: f32 = u.iter().zip(&u0).map(|(a, b)| (a - b) * (a - b)).sum();
         r.iter().map(|x| x * x).sum::<f32>() + PRIOR_WEIGHT * PRIOR_WEIGHT * prior_cost
     };
-    let mut current = cost(&u);
+    let mut r = residual(&u);
+    let mut current = cost_of(&u, &r);
+    // The Jacobian at `u` is kept while a step is rejected: `u` does not change then, and neither
+    // does the matrix (only `lambda` does), so recomputing it would repeat `dim` forward solves.
+    let mut jac_cache: Option<Vec<[f32; 6]>> = None;
     for _ in 0..12 {
-        let r = residual(&u);
-        // Finite-difference Jacobian (6 x dim).
-        let mut jac = vec![[0.0f32; 6]; dim];
-        for k in 0..dim {
-            let mut up = u.clone();
-            up[k] += 0.02;
-            let rp = residual(&up);
-            for i in 0..6 {
-                jac[k][i] = (rp[i] - r[i]) / 0.02;
+        let jac = &*jac_cache.get_or_insert_with(|| {
+            // Finite-difference Jacobian (6 x dim).
+            let mut jac = vec![[0.0f32; 6]; dim];
+            for k in 0..dim {
+                let mut up = u.clone();
+                up[k] += 0.02;
+                let rp = residual(&up);
+                for i in 0..6 {
+                    jac[k][i] = (rp[i] - r[i]) / 0.02;
+                }
             }
-        }
+            jac
+        });
         // (J^T J + w^2 I + lambda I) delta = -(J^T r + w^2 (u - u0)).
         let mut a = vec![vec![0.0f32; dim]; dim];
         let mut g = vec![0.0f32; dim];
@@ -869,10 +874,13 @@ pub fn solve_bvp_with(
             .zip(&delta)
             .map(|(a, d)| (a + d).clamp(-1.0, 1.0))
             .collect();
-        let candidate_cost = cost(&candidate);
+        let candidate_r = residual(&candidate);
+        let candidate_cost = cost_of(&candidate, &candidate_r);
         if candidate_cost < current {
             let improvement = current - candidate_cost;
             u = candidate;
+            r = candidate_r;
+            jac_cache = None;
             current = candidate_cost;
             lambda = (lambda * 0.3).max(1e-4);
             if improvement < 1e-4 {
@@ -885,7 +893,6 @@ pub fn solve_bvp_with(
             }
         }
     }
-    let r = residual(&u);
     let rot_error = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt() * ROT_SCALE;
     let omega_error = (r[3] * r[3] + r[4] * r[4] + r[5] * r[5]).sqrt() * OMEGA_SCALE;
     (from_vec(&u), rot_error, omega_error)
@@ -3096,7 +3103,17 @@ fn fit_ground_control_timing(
     // touch the car (the fit uses spans with no ball or car nearby).
     let mut parked = rocketsim::BallState::default();
     parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+    // Shifts whose control switches fall on the same ticks of the span (or all outside it) give the
+    // same simulation, so the cost is computed once per distinct schedule.
+    let mut simulated: Vec<(Vec<u32>, f32)> = Vec::new();
     for shift in GROUND_TIMING_SHIFTS {
+        let schedule_key: Vec<u32> = (t_a + 1..=t_c)
+            .map(|tau| entries.partition_point(|e| e.0 + shift <= tau) as u32)
+            .collect();
+        if let Some((_, cost)) = simulated.iter().find(|(key, _)| *key == schedule_key) {
+            costs.push((shift, *cost));
+            continue;
+        }
         scratch.set_ball_state(parked);
         scratch.set_car_state(0, *state);
         for tau in t_a + 1..=t_c {
@@ -3116,6 +3133,7 @@ fn fit_ground_control_timing(
         let end = scratch.get_car_state(0);
         let cost = (end.phys.ang_vel - target_ang).length() / 0.3
             + (end.phys.vel - target_vel).length() / 50.0;
+        simulated.push((schedule_key, cost));
         costs.push((shift, cost));
     }
     // The midpoint rule (shift 0) unless another shift is strictly better.
