@@ -95,6 +95,9 @@ pub struct ConvertOptions {
     /// of 12 on a host replay and 8 of 12 on a client replay of the remote-client games). The car
     /// stays demolished for RocketSim's respawn delay even while the replay's car actor is linked.
     pub apply_observed_demolitions: bool,
+    /// Offline: find car-ball contacts from the ball packets (a ball-only rollout between
+    /// consecutive packets; `ball_evidence`) and report them as `ball_contacts`.
+    pub contacts_from_ball_packets: bool,
     /// With `apply_observed_demolitions`, switch RocketSim's own demolition rule off so that the
     /// observed demolitions are the only ones (no duplicate `car_hit_car` with `is_demo`, no
     /// invented demolitions).
@@ -281,6 +284,7 @@ impl Default for ConvertOptions {
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
             apply_observed_demolitions: true,
+            contacts_from_ball_packets: true,
             disable_simulated_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
@@ -341,6 +345,31 @@ pub struct SimEvent {
     pub event: ArenaEvent,
 }
 
+/// A car-ball contact found from the ball packets (`ball_evidence`): the ball's velocity at a fresh
+/// packet differs from what the ball alone would have by more than
+/// `ball_evidence::CONTACT_VELOCITY_THRESHOLD`. The replay is the evidence; the car and the tick
+/// are placed with the cars' exported states (the first tick the nearest car's hitbox reaches the
+/// ball's no-touch path), so they are estimates.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BallContact {
+    /// The replay frame of the earlier packet; the contact happened after it and up to this frame's
+    /// packet.
+    pub frame_a: usize,
+    /// Estimated tick of the contact on the replay timeline (120 Hz).
+    pub tick: u64,
+    /// The physical ticks of the two packets bracketing it.
+    pub tick_from: u64,
+    pub tick_to: u64,
+    /// The car closest to the ball when it reached it, and that gap in UU (hitbox to ball surface,
+    /// negative: overlapping); `None` when no car was within 150 UU (a goal post or another object).
+    pub car_slot: Option<usize>,
+    pub gap_uu: Option<f32>,
+    /// Velocity difference to the no-touch rollout, UU/s.
+    pub velocity_residual: f32,
+    /// A simulated touch (`touches`) falls in the same interval.
+    pub simulated_touch: bool,
+}
+
 /// A ball touch of the simulation: the first tick of a car-ball contact.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TouchEvent {
@@ -392,6 +421,9 @@ pub struct ConvertedFrame {
     /// within one). A simulated event, not an observation: 86-100% of the server's touches are
     /// reproduced (`RESULTS.md`).
     pub touches: Vec<TouchEvent>,
+    /// Contacts found from the ball packets that end at this frame (`ball_evidence`). Preferred over
+    /// `touches` (which are simulated; the two overlap: do not add them).
+    pub ball_contacts: Vec<BallContact>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
@@ -1566,6 +1598,18 @@ fn team(index: u8) -> Team {
 /// The embedded map is generated from the user's item catalog, the official
 /// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
 /// the Octane fallback.
+pub fn hitbox_config(name: &str) -> CarBodyConfig {
+    match name {
+        "breakout" => CarBodyConfig::BREAKOUT,
+        "dominus" => CarBodyConfig::DOMINUS,
+        "hybrid" => CarBodyConfig::HYBRID,
+        "merc" => CarBodyConfig::MERC,
+        "plank" => CarBodyConfig::PLANK,
+        "psyclops" => CarBodyConfig::PSYCLOPS,
+        _ => CarBodyConfig::OCTANE,
+    }
+}
+
 fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
     static CATALOG: OnceLock<Vec<(u32, &'static str)>> = OnceLock::new();
     let catalog = CATALOG.get_or_init(|| {
@@ -4478,6 +4522,29 @@ pub fn convert_observations_with(
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
     let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    // Ball intervals with a contact, by the frame that ends them (`contacts_from_ball_packets`), and
+    // the exported car poses of the last frames to place the contact.
+    let contact_intervals: HashMap<usize, crate::ball_evidence::BallInterval> = if options
+        .contacts_from_ball_packets
+        && options.infer_packet_lag
+        && !options.zero_packet_lag
+    {
+        packet_lags
+            .as_ref()
+            .and_then(|lags| crate::ball_evidence::ball_intervals(observations, lags, options).ok())
+            .map(|v| {
+                v.into_iter()
+                    .filter(|i| i.velocity_residual > crate::ball_evidence::CONTACT_VELOCITY_THRESHOLD)
+                    .map(|i| (i.frame_b, i))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut recent_poses: std::collections::VecDeque<(u64, Vec<(usize, Vec3A, Mat3A, bool)>)> =
+        std::collections::VecDeque::new();
+    let mut recent_touch_ticks: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // Last arena tick of a car-ball contact event per slot (to find where a contact starts).
     let mut last_contact_tick: HashMap<usize, u64> = HashMap::new();
     // Timeline tick until which an observed demolition keeps a slot demolished.
@@ -5700,6 +5767,91 @@ pub fn convert_observations_with(
                 }
             }
         }
+        // Contacts found from the ball packets that end at this frame.
+        let mut ball_contacts = Vec::new();
+        {
+            let state_now = arena.get_arena_state();
+            recent_poses.push_back((
+                timeline_tick,
+                state_now
+                    .cars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (i, c.1.phys.pos, c.1.phys.rot_mat, c.1.is_demoed))
+                    .collect(),
+            ));
+            while recent_poses.len() > 8 {
+                recent_poses.pop_front();
+            }
+            for t in &touches {
+                recent_touch_ticks.push_back(t.tick);
+            }
+            while recent_touch_ticks.len() > 24 {
+                recent_touch_ticks.pop_front();
+            }
+            if let Some(interval) = contact_intervals.get(&frame_idx) {
+                let (tick_from, tick_to) = (interval.tick_a.max(0) as u64, interval.tick_b.max(0) as u64);
+                let pose_at = |slot: usize, tick: u64| -> Option<(Vec3A, Mat3A, bool)> {
+                    let at = |k: usize| {
+                        recent_poses
+                            .get(k)
+                            .and_then(|(t, cars)| cars.iter().find(|c| c.0 == slot).map(|c| (*t, c.1, c.2, c.3)))
+                    };
+                    let n = recent_poses.len();
+                    let after = (0..n).find(|&k| recent_poses[k].0 >= tick)?;
+                    let (t1, p1, r1, d1) = at(after)?;
+                    if after == 0 || t1 == tick {
+                        return Some((p1, r1, d1));
+                    }
+                    let (t0, p0, _, _) = at(after - 1)?;
+                    let f = (tick - t0) as f32 / (t1 - t0).max(1) as f32;
+                    Some((p0 + (p1 - p0) * f, r1, d1))
+                };
+                let mut best: Option<(u64, usize, f32)> = None; // tick, slot, gap
+                'ticks: for (k, ball_pos) in interval.path.iter().enumerate() {
+                    let tick = tick_from + k as u64 + 1;
+                    let ball = Vec3A::from(*ball_pos);
+                    let mut here: Option<(usize, f32)> = None;
+                    for (&slot, &(_, config)) in slot_bodies.iter() {
+                        let Some((pos, rot, demoed)) = pose_at(slot, tick) else {
+                            continue;
+                        };
+                        if demoed {
+                            continue;
+                        }
+                        let local = rot.transpose() * (ball - pos) - config.hitbox_pos_offset;
+                        let q = local.abs() - config.hitbox_size * 0.5;
+                        let gap = q.max(Vec3A::ZERO).length() + q.max_element().min(0.0) - 91.25;
+                        if here.is_none_or(|(_, g)| gap < g) {
+                            here = Some((slot, gap));
+                        }
+                    }
+                    if let Some((slot, gap)) = here {
+                        if best.is_none_or(|(_, _, g)| gap < g) {
+                            best = Some((tick, slot, gap));
+                        }
+                        if gap <= 0.0 {
+                            best = Some((tick, slot, gap));
+                            break 'ticks;
+                        }
+                    }
+                }
+                let simulated_touch = recent_touch_ticks
+                    .iter()
+                    .any(|&t| t + 2 >= tick_from && t <= tick_to + 2);
+                let near = best.filter(|&(_, _, gap)| gap <= 150.0);
+                ball_contacts.push(BallContact {
+                    frame_a: interval.frame_a,
+                    tick: near.map_or((tick_from + tick_to) / 2, |b| b.0),
+                    tick_from,
+                    tick_to,
+                    car_slot: near.map(|b| b.1),
+                    gap_uu: near.map(|b| b.2),
+                    velocity_residual: interval.velocity_residual,
+                    simulated_touch,
+                });
+            }
+        }
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -5707,6 +5859,7 @@ pub fn convert_observations_with(
             state: arena.get_arena_state(),
             simulated_events: events,
             touches,
+            ball_contacts,
             packet_lags: applied_lags,
             fitted_inputs: fitted_arena
                 .into_iter()

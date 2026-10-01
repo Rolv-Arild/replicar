@@ -330,3 +330,30 @@ o = np.array(offs_s) if offs_s else np.array([0])
 both = sum(1 for t_, v_, a_ in sim_demo_ev if any(d[1] == v_ and abs(d[0] - t_) <= 30 for d in dd))
 print(f"\nsimulated demolitions (car_hit_car is_demo): {len(sim_demo_ev)}; matched to a truth onset {m_} (tick offset p10/p50/p90 {np.percentile(o,10):.0f}/{np.percentile(o,50):.0f}/{np.percentile(o,90):.0f}), surplus {sur}")
 print(f"  of the simulated demolitions, {both} also have an observed event for the same victim within 30 ticks (the same demolition reported by both sources); observed events {len(dd)}")
+
+# ---- ball_contacts (from the ball packets) vs truth touches ----
+contacts = []  # (server tick of the estimate, slot name, from, to, gap)
+for r in recs:
+    fl_ = floor_at(r['frame'])
+    for c in r.get('ball_contacts', []):
+        contacts.append((c['tick'] - fl_, slot_name.get(c['car_slot']) if c['car_slot'] is not None else None, c['tick_from'] - fl_, c['tick_to'] - fl_, c['gap_uu'], c['simulated_touch']))
+used = set(); found = 0; right_car = 0; tick_err = []; surplus = []
+for t_, n_, a_, b_, gap_, sim_ in sorted(contacts, key=lambda c: c[0]):
+    inside = [(abs(t_ - fn), (fn, n)) for fn, n in truth_touches if (fn, n) not in used and a_ - 3 <= fn <= b_ + 3]
+    if inside:
+        _, k = min(inside)
+        used.add(k); found += 1; right_car += (k[1] == n_); tick_err.append(t_ - k[0])
+    else:
+        surplus.append((t_, n_, gap_))
+o = np.array(tick_err) if tick_err else np.array([0])
+print(f"\nball_contacts:{len(contacts)} intervals; truth touches covered one-to-one {found} of {len(truth_touches)} ({found/max(1,len(truth_touches)):.1%}); right car {right_car} ({right_car/max(1,found):.1%}); contact tick minus truth p10/p50/p90 {np.percentile(o,10):.0f}/{np.percentile(o,50):.0f}/{np.percentile(o,90):.0f}; surplus intervals {len(surplus)}")
+print(f"  of the contacts, a simulated touch in the same interval: {sum(1 for c in contacts if c[5])} ({sum(1 for c in contacts if c[5])/max(1,len(contacts)):.1%}); simulated touches in the stream {len(sim_touches)}")
+covered = sum(1 for fn, n in truth_touches if any(a_ - 3 <= fn <= b_ + 3 for _, _, a_, b_, _, _ in contacts))
+quiet_iv = sum(1 for c in contacts if not any(c[2] - 3 <= fn <= c[3] + 3 for fn, n in truth_touches))
+hit_iv = len(contacts) - quiet_iv
+tot_in = sum(sum(1 for fn, n in truth_touches if c[2] - 3 <= fn <= c[3] + 3) for c in contacts)
+print(f"  any-interval view: truth touches inside some contact interval {covered} of {len(truth_touches)} ({covered/max(1,len(truth_touches)):.1%}); intervals holding a truth touch {hit_iv} of {len(contacts)}, holding two or more {sum(1 for c in contacts if sum(1 for fn, n in truth_touches if c[2]-3 <= fn <= c[3]+3) >= 2)}; intervals with no truth touch {quiet_iv}")
+simcov = sum(1 for fn, n in truth_touches if any(abs(t_ - fn) <= 20 for t_, n2 in sim_touches if n2 == n))
+print(f"  for comparison, truth touches with a simulated touch of the same car within 20 ticks: {simcov} ({simcov/max(1,len(truth_touches)):.1%})")
+either = sum(1 for fn, n in truth_touches if any(a_ - 3 <= fn <= b_ + 3 for _, _, a_, b_, _, _ in contacts) or any(abs(t_ - fn) <= 20 for t_, n2 in sim_touches if n2 == n))
+print(f"  covered by a ball contact or a simulated touch: {either} of {len(truth_touches)} ({either/max(1,len(truth_touches)):.1%})")

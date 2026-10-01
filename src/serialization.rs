@@ -326,6 +326,9 @@ struct FrameLine<'a> {
     /// One entry per ball touch of the simulation (first tick of a contact).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     touches: &'a [crate::conversion::TouchEvent],
+    /// Car-ball contacts found from the ball packets that end at this frame.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    ball_contacts: &'a [crate::conversion::BallContact],
     position_residuals: &'a [PositionResidual],
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -380,6 +383,7 @@ fn frame_line<'a>(
         observations: observed,
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
         touches: &converted.touches,
+        ball_contacts: &converted.ball_contacts,
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,
