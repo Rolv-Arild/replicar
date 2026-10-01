@@ -43,7 +43,7 @@ ticks = sorted(truth)
 
 recs = []
 header = None
-with open(conv_path) as f:
+with open(conv_path, encoding='utf-8') as f:
     for line in f:
         d = json.loads(line)
         if d['record_type'] != 'frame':
@@ -160,35 +160,25 @@ with open(states_path) as f:
                     truth_touches.append((fn, pl['name']))
                 last_gs[pl['name']] = lt['game_seconds']
 # the first value seen per player is a touch from before the recording only if the recording started mid-match; keep all
-sim_touches = []  # (server tick, name)
+sim_touches = []  # (server tick, name): the converter's `touches` (first tick of each contact)
 for r in recs:
-    f = r['frame']
-    fl = floor_at(f)
-    for e in r['simulated_events']:
-        ev = e['event']
-        if ev['kind'] != 'car_hit_ball' or not any(abs(x) > 1e-3 for x in ev['extra_hit_velocity']):
-            continue
-        tick = r['timeline_tick'] - (r['state']['arena_tick'] - e['arena_tick']) - fl
-        sim_touches.append((tick, slot_name.get(ev['car_slot'])))
-print(f"\ntouches: truth {len(truth_touches)}, converter hits with an impulse {len(sim_touches)}")
-by_name_sim = collections.defaultdict(list)
-for t, n in sim_touches:
-    by_name_sim[n].append(t)
-offs_t = []
-missed = 0
-for fn, name in truth_touches:
-    cand = [t for t in by_name_sim.get(name, []) if abs(t - fn) <= 20]
-    if cand:
-        offs_t.append(min(cand, key=lambda t: abs(t - fn)) - fn)
-    else:
-        missed += 1
-by_name_truth = collections.defaultdict(list)
+    fl = floor_at(r['frame'])
+    for t in r.get('touches', []):
+        sim_touches.append((t['tick'] - fl, slot_name.get(t['car_slot'])))
+print(f"\ntouches: truth {len(truth_touches)}, converter touches {len(sim_touches)}")
+bt = collections.defaultdict(list)
 for fn, n in truth_touches:
-    by_name_truth[n].append(fn)
-extra = sum(1 for t, n in sim_touches if not any(abs(t - fn) <= 20 for fn in by_name_truth.get(n, [])))
+    bt[n].append(fn)
+used = set(); offs_t = []; surplus = 0
+for t, n in sorted(sim_touches, key=lambda e: e[0]):
+    cand = [(abs(t - fn), fn) for fn in bt.get(n, []) if (fn, n) not in used and abs(t - fn) <= 20]
+    if cand:
+        dd_, fn = min(cand); used.add((fn, n)); offs_t.append(t - fn)
+    else:
+        surplus += 1
 o = np.array(offs_t) if offs_t else np.array([0])
-print(f"  truth touches reproduced within 20 ticks: {len(offs_t)} ({len(offs_t)/max(1,len(truth_touches)):.1%}), missed {missed}; converter hits with no truth touch: {extra} ({extra/max(1,len(sim_touches)):.1%})")
-print(f"  sim minus truth tick p10/p50/p90: {np.percentile(o,10):.0f}/{np.percentile(o,50):.0f}/{np.percentile(o,90):.0f}")
+print(f"  one-to-one (+-20 ticks): truth touches reproduced {len(offs_t)} ({len(offs_t)/max(1,len(truth_touches)):.1%}), missed {len(truth_touches)-len(offs_t)}; surplus converter touches {surplus} ({surplus/max(1,len(sim_touches)):.1%} of {len(sim_touches)})")
+print(f"  converter minus truth tick p10/p50/p90: {np.percentile(o,10):.0f}/{np.percentile(o,50):.0f}/{np.percentile(o,90):.0f}")
 
 # ---- demolitions: truth demolished_timeout onsets vs the converter's car state is_demoed ----
 truth_demo_on = []  # (frame_num, name)

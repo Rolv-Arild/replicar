@@ -145,6 +145,10 @@ pub struct PadPickup {
     pub instigator_car_id: Option<i32>,
     /// Non-255 odd values count pickups; 255 marks available/inactive in the train corpus.
     pub picked_up: u8,
+    /// The pad's counter value was already reported with an instigator: the replay re-announces
+    /// earlier pickups at resets (about a third of the records on the remote-client games), so only
+    /// records with `repeat` false are new pickups.
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -279,6 +283,8 @@ struct Tracker {
     /// Teams of the goal events already reported in the current post-goal phase: the attribute is
     /// sometimes sent again 100-150 ticks later (two goals in one phase cannot happen).
     goal_events_this_phase: Vec<u8>,
+    /// Last counter value reported with an instigator, per pad actor.
+    pad_reported: HashMap<ActorId, u8>,
     diagnostics: Diagnostics,
 }
 
@@ -647,11 +653,18 @@ impl Tracker {
                         Some(ActorKind::Pad(name)) => Some(name.clone()),
                         _ => None,
                     };
+                    let repeat = pickup.instigator.is_some()
+                        && pickup.picked_up != 255
+                        && self.pad_reported.get(&actor) == Some(&pickup.picked_up);
+                    if pickup.instigator.is_some() && pickup.picked_up != 255 {
+                        self.pad_reported.insert(actor, pickup.picked_up);
+                    }
                     pad_pickups.push(PadPickup {
                         pad_actor_id: actor.0,
                         pad_actor_name,
                         instigator_car_id: pickup.instigator.map(|id| id.0),
                         picked_up: pickup.picked_up,
+                        repeat,
                     });
                 }
             }

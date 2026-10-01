@@ -336,6 +336,15 @@ pub struct SimEvent {
     pub event: ArenaEvent,
 }
 
+/// A ball touch of the simulation: the first tick of a car-ball contact.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TouchEvent {
+    pub car_slot: usize,
+    /// On the replay timeline (120 Hz, like `ConvertedFrame::timeline_tick`).
+    pub tick: u64,
+    pub contact_point: [f32; 3],
+}
+
 /// The packet lag applied to one object in a frame (`infer_packet_lag`): its packet was treated as
 /// generated `ticks` 120 Hz ticks before the frame time. `source` is `chain` (the object's own
 /// motion chain), `frame_median` (median of the frame's chained cars) or `default` (half the frame
@@ -373,6 +382,11 @@ pub struct ConvertedFrame {
     pub timeline_tick: u64,
     pub state: ArenaState,
     pub simulated_events: Vec<SimEvent>,
+    /// One entry per ball touch the simulation produced: the first tick of a contact between a car
+    /// and the ball (RocketSim reports a hit every tick of a contact, and the extra impulse again
+    /// within one). A simulated event, not an observation: 86-100% of the server's touches are
+    /// reproduced (`RESULTS.md`).
+    pub touches: Vec<TouchEvent>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
@@ -4453,6 +4467,8 @@ pub fn convert_observations_with(
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
     let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    // Last arena tick of a car-ball contact event per slot (to find where a contact starts).
+    let mut last_contact_tick: HashMap<usize, u64> = HashMap::new();
     // Timeline tick until which an observed demolition keeps a slot demolished.
     let mut demo_hold_until: HashMap<usize, u64> = HashMap::new();
     // Informative shifts chosen by the ground timing fit, per car actor lifetime.
@@ -5652,12 +5668,34 @@ pub fn convert_observations_with(
             }
         }
         let timeline_offset = timeline_tick as i64 - arena.tick_count() as i64;
+        if options.block_sim_pad_pickups {
+            // The pads are held on cooldown (the replay reports the pickups): a pickup the
+            // simulation still reports would count one twice.
+            events.retain(|e| !matches!(e.event, ArenaEvent::CarPickupBoost(_)));
+        }
+        let mut touches = Vec::new();
+        for e in &events {
+            if let ArenaEvent::CarHitBall(hit) = &e.event {
+                let new_contact = last_contact_tick
+                    .get(&hit.car_idx)
+                    .is_none_or(|&last| e.arena_tick > last + 2);
+                last_contact_tick.insert(hit.car_idx, e.arena_tick);
+                if new_contact {
+                    touches.push(TouchEvent {
+                        car_slot: hit.car_idx,
+                        tick: (e.arena_tick as i64 + timeline_offset).max(0) as u64,
+                        contact_point: hit.contact_point.to_array(),
+                    });
+                }
+            }
+        }
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
             timeline_tick,
             state: arena.get_arena_state(),
             simulated_events: events,
+            touches,
             packet_lags: applied_lags,
             fitted_inputs: fitted_arena
                 .into_iter()
@@ -5922,6 +5960,7 @@ mod tests {
             }),
             events: Vec::new(),
             pad_pickups: vec![PadPickup {
+                repeat: false,
                 pad_actor_id: 50,
                 pad_actor_name: Some(
                     "cs_p.TheWorld:PersistentLevel.VehiclePickup_Boost_TA_0".to_string(),

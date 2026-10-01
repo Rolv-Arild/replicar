@@ -323,6 +323,9 @@ struct FrameLine<'a> {
     state: StateRecord,
     observations: &'a observations::Frame,
     simulated_events: Vec<TimedSimEventRecord>,
+    /// One entry per ball touch of the simulation (first tick of a contact).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    touches: &'a [crate::conversion::TouchEvent],
     position_residuals: &'a [PositionResidual],
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -376,6 +379,7 @@ fn frame_line<'a>(
         state: StateRecord::from_arena_state(&converted.state),
         observations: observed,
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
+        touches: &converted.touches,
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,
