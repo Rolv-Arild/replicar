@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use glam::Quat;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, ArenaState, BoostPadState, CarBodyConfig, CarControls,
-    CarState, GameMode, Mat3A, PhysState, Team, Vec3A,
+    CarState, DemoMode, GameMode, Mat3A, PhysState, Team, Vec3A,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -95,6 +95,10 @@ pub struct ConvertOptions {
     /// of 12 on a host replay and 8 of 12 on a client replay of the remote-client games). The car
     /// stays demolished for RocketSim's respawn delay even while the replay's car actor is linked.
     pub apply_observed_demolitions: bool,
+    /// With `apply_observed_demolitions`, switch RocketSim's own demolition rule off so that the
+    /// observed demolitions are the only ones (no duplicate `car_hit_car` with `is_demo`, no
+    /// invented demolitions).
+    pub disable_simulated_demolitions: bool,
     /// Keep every boost pad on cooldown inside the simulation, so a simulated car never picks boost up
     /// by driving over a pad (a car whose simulated position is off by a few UU picks up a pad the real
     /// car missed, or the reverse): the boost amount then comes only from the replay's own updates
@@ -277,6 +281,7 @@ impl Default for ConvertOptions {
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
             apply_observed_demolitions: true,
+            disable_simulated_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
             boost_pickup_lookahead: false,
@@ -4438,6 +4443,12 @@ pub fn convert_observations_with(
     rocketsim::init(Path::new(&options.collision_meshes), true).map_err(ConvertError::Init)?;
     let mut config = ArenaConfig::new(GameMode::Soccar);
     config.rng_seed = Some(options.seed);
+    if options.apply_observed_demolitions && options.disable_simulated_demolitions {
+        // The replay reports every demolition; RocketSim's own bump detection reproduced 83% of
+        // them and invented as many (114 of 254 on the train split, 27 of 57 replays with no
+        // demolition in the replay at all).
+        config.mutators.demo_mode = DemoMode::Disabled;
+    }
     let mut arena = Arena::new_with_config(config);
     let mut slots: HashMap<String, usize> = HashMap::new();
     let mut car_slots = Vec::new();
@@ -5566,7 +5577,7 @@ pub fn convert_observations_with(
         }
         advance_to!(span);
         let _ = remaining;
-        if options.apply_observed_demolitions && simulated {
+        if options.apply_observed_demolitions && simulated && !frame_withheld {
             for event in &frame.events {
                 let observations::Event::Demolish {
                     source,

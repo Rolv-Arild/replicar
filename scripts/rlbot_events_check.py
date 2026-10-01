@@ -308,3 +308,25 @@ for n, w in tw.items():
 if dur:
     dd_ = np.array(dur)
     print(f"demolition durations: matched {len(dur)}; truth ticks p50 {np.percentile(dd_[:,1],50):.0f}, converter p50 {np.percentile(dd_[:,2],50):.0f}; converter minus truth p10/p50/p90 {np.percentile(dd_[:,0],10):.0f}/{np.percentile(dd_[:,0],50):.0f}/{np.percentile(dd_[:,0],90):.0f}")
+
+# ---- simulated demolitions (car_hit_car with is_demo) vs truth onsets and vs the observed events ----
+sim_demo_ev = []
+for r in recs:
+    fl_ = floor_at(r['frame'])
+    for e in r['simulated_events']:
+        ev = e['event']
+        if ev['kind'] == 'car_hit_car' and ev.get('is_demo'):
+            t_ = r['timeline_tick'] - (r['state']['arena_tick'] - e['arena_tick']) - fl_
+            sim_demo_ev.append((t_, slot_name.get(ev['victim_slot']), slot_name.get(ev['bumper_slot'])))
+used_t = set(); m_ = 0; sur = []
+offs_s = []
+for t_, v_, a_ in sorted(sim_demo_ev, key=lambda e: e[0]):
+    c = [(abs(t_ - fn), (fn, n)) for fn, n in truth_demo_on if n == v_ and (fn, n) not in used_t and abs(t_ - fn) <= 120]
+    if c:
+        _, k = min(c); used_t.add(k); m_ += 1; offs_s.append(t_ - k[0])
+    else:
+        sur.append((t_, v_, a_))
+o = np.array(offs_s) if offs_s else np.array([0])
+both = sum(1 for t_, v_, a_ in sim_demo_ev if any(d[1] == v_ and abs(d[0] - t_) <= 30 for d in dd))
+print(f"\nsimulated demolitions (car_hit_car is_demo): {len(sim_demo_ev)}; matched to a truth onset {m_} (tick offset p10/p50/p90 {np.percentile(o,10):.0f}/{np.percentile(o,50):.0f}/{np.percentile(o,90):.0f}), surplus {sur}")
+print(f"  of the simulated demolitions, {both} also have an observed event for the same victim within 30 ticks (the same demolition reported by both sources); observed events {len(dd)}")
