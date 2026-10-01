@@ -291,6 +291,7 @@ pub fn aligned_lags(
     // A run's packets share one level: it moves by the median of its contacts' shifts when they agree
     // (within one tick), as far as its feasible range allows.
     let mut moved_runs = 0usize;
+    let mut moved_frames: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (run_index, mut v) in votes {
         v.sort_unstable();
         let median = v[v.len() / 2];
@@ -312,6 +313,21 @@ pub fn aligned_lags(
             lags.car_actor.insert((run.actor, run.created, frame), lag);
         }
         lags.car_runs[run_index].start = start;
+        moved_frames.extend(run.entries.iter().map(|e| e.0));
+    }
+    // The per-frame median car lag (the fallback for a car without a chain of its own) follows the
+    // moved runs.
+    if !moved_frames.is_empty() {
+        let mut per_frame: HashMap<usize, Vec<f32>> = HashMap::new();
+        for (&(_, _, frame), &lag) in &lags.car_actor {
+            if moved_frames.contains(&frame) {
+                per_frame.entry(frame).or_default().push(lag);
+            }
+        }
+        for (frame, mut values) in per_frame {
+            values.sort_by(|a, b| a.total_cmp(b));
+            lags.cars[frame] = Some(values[values.len() / 2]);
+        }
     }
     summary.moved_runs = moved_runs;
     if std::env::var_os("ALIGN_DEBUG").is_some() {

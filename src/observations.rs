@@ -381,6 +381,10 @@ impl Tracker {
                 ActorKind::Component(_) => {
                     self.components.remove(&id);
                 }
+                ActorKind::Pad(_) => {
+                    // A recycled actor id must not inherit the previous pad's counter.
+                    self.pad_reported.remove(&id);
+                }
                 _ => {}
             }
         }
