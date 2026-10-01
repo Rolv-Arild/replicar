@@ -258,3 +258,5 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-01 (refused flips): the near-ground flips the air solve refuses are mostly not landings (9%) and not tolerance (relaxing makes the interior worse); RocketSim with true inputs already deviates 1.6 deg p90 in flips over 12 ticks. Dodges with no exact chain lag in the next 12 frames (2,285 in train) are not a speed problem either; unexplained.
 
 - 2026-10-01 (dodge coverage): 83% fitted was diluted by post-goal celebration flips (never simulated); in `Active` play 91.8% are fitted (96% with chain packets either side). The 562 unfitted in play (3%) have no chain packet after the activation.
+
+- 2026-10-01 (online corpus): the corpus replays are real online play: recorder's own car shows fitted control shifts of +6..+15 ticks in nearly every replay (others 0..-3). Per-car median shift for unfit intervals: corpus car velocity p90 -2.7%/-3.9% (validation/train), near-ball velocity p90 -15%; default on. The ball-car offset estimator is moot at 30 fps (gap ~0 at every offset). `diagnose_online_timing` added.

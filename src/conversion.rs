@@ -120,6 +120,11 @@ pub struct ConvertOptions {
     /// ticks before the frame time (mean 10.9 ticks late there, about 7 by the rule). With both
     /// packets' exact chain lags the rule is the middle of that interval; without, the old rule.
     pub packet_interval_control_rule: bool,
+    /// Offline: a car's observed controls can lead or lag the server by a car-specific amount (the
+    /// recording client's own inputs lead by a median 16 ticks, everyone else's are within a few).
+    /// The intervals the ground timing fit does not cover use the midpoint rule moved by the median
+    /// of that car's last 15 informative fitted shifts (at least 5 so far).
+    pub per_car_control_shift: bool,
     /// Offline: fit one common timing shift of a grounded car's observed control changes against the
     /// second-next fresh car packet and drive the interval to the next fresh packet with it
     /// (`fit_ground_control_timing`). Needs the inferred packet lags; overrides
@@ -273,6 +278,7 @@ impl Default for ConvertOptions {
             infer_dodge_start: true,
             lookahead_ground_controls: true,
             packet_interval_control_rule: false,
+            per_car_control_shift: true,
             fit_ground_control_timing: true,
             fit_jump_timing: true,
             flip_cancel_packets: 1,
@@ -1575,6 +1581,7 @@ pub fn zero_packet_lags(observations: &ObservedReplay) -> PacketLags {
         ball: vec![None; frames.len()],
         cars: vec![None; frames.len()],
         car_actor: HashMap::new(),
+        ..PacketLags::default()
     };
     for (f, frame) in frames.iter().enumerate() {
         if frame
@@ -1604,6 +1611,10 @@ pub struct PacketLags {
     pub cars: Vec<Option<f32>>,
     /// Lag of one car's own packet, keyed by (actor id, creation frame, frame).
     pub car_actor: HashMap<(i32, usize, usize), f32>,
+    /// Diagnostics of the ball-car placement: the offset used (ticks, ball minus car) and the
+    /// number of bridged ball hits found.
+    pub ball_car_offset: Option<f32>,
+    pub bridged_hits: usize,
 }
 
 /// One fresh packet of a chained object: frame index, position, and velocity.
@@ -1676,7 +1687,11 @@ fn estimate_ball_car_offset(
         let offset = step as f32 * STEP;
         let mut b = ball_runs.to_vec();
         place_ball_runs(&mut b, car_runs, offset);
-        let (gap, _) = median_hit_gap(hits, &b, car_runs, samples, hitboxes)?;
+        let result = median_hit_gap(hits, &b, car_runs, samples, hitboxes);
+        if std::env::var_os("OFFSET_PROFILE").is_some() {
+            eprintln!("offset {offset}: {result:?} of {} hits", hits.len());
+        }
+        let (gap, _) = result?;
         if gap <= 0.0 {
             let (before, gap_before) = previous?;
             return Some(before + STEP * gap_before / (gap_before - gap));
@@ -2115,6 +2130,7 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
         ball: vec![None; frames.len()],
         cars: vec![None; frames.len()],
         car_actor: HashMap::new(),
+        ..PacketLags::default()
     };
     let active = |frame: usize| {
         frames[frame]
@@ -2304,6 +2320,8 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     if std::env::var_os("LAG_MU_PROFILE").is_some() {
         eprintln!("ball-car lag offset used: {offset:?}");
     }
+    lags.ball_car_offset = offset;
+    lags.bridged_hits = ball_hits.borrow().len();
     if let Some(offset) = offset {
         place_ball_runs(&mut ball_runs, &car_runs, offset);
     }
@@ -2409,6 +2427,9 @@ struct GroundSchedule {
     /// (first arena tick, throttle, steer, handbrake, boost, jump), in order; a jump of `None`
     /// leaves the jump control as it is.
     entries: Vec<(u64, f32, f32, bool, bool, Option<bool>)>,
+    /// The timing shift the ground control fit chose, when it was strictly better than the midpoint
+    /// rule (the fit is informative); `None` for other fits.
+    shift: Option<i64>,
 }
 
 /// Per-tick air controls for one car over the interval to its next fresh packet (`plan_air_bvp`):
@@ -2989,10 +3010,12 @@ fn fit_ground_control_timing(
             schedule[0] = (now_tick, e.1, e.2, e.3, e.4, None);
         }
     }
+    let zero_cost = costs.iter().find(|(s, _)| *s == 0).map(|c| c.1);
     Some(GroundSchedule {
         slot,
         end_tick: now_tick + ticks_ab as u64,
         entries: schedule,
+        shift: zero_cost.filter(|&z| costs[best].1 < z - 1e-6).map(|_| shift),
     })
 }
 
@@ -3207,6 +3230,7 @@ fn fit_jump_timing(
         slot,
         end_tick: now_tick + ticks_ab as u64,
         entries: schedule,
+        shift: None,
     })
 }
 
@@ -3604,6 +3628,7 @@ fn fit_ground_flip_timing(
             slot,
             end_tick: now_tick + ticks_ab_eff as u64,
             entries: entries_out,
+            shift: None,
         },
         first_packet,
         dodge: (press <= ticks_ab_eff || options.defer_dodge_past_next_packet).then_some(
@@ -4422,6 +4447,8 @@ pub fn convert_observations_with(
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
     let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    // Informative shifts chosen by the ground timing fit, per car actor lifetime.
+    let mut car_shifts: HashMap<(i32, usize), Vec<i64>> = HashMap::new();
     let mut air_schedules: Vec<AirSchedule> = Vec::new();
     let mut ground_scratch: HashMap<&'static str, Arena> = HashMap::new();
     let mut slot_bodies: HashMap<usize, (&'static str, CarBodyConfig)> = HashMap::new();
@@ -4586,6 +4613,59 @@ pub fn convert_observations_with(
         {
             let interval_start = timeline_tick as i64 - gap as i64;
             for car in frame_cars.iter().copied() {
+                let median_shift = options
+                    .per_car_control_shift
+                    .then(|| car_shifts.get(&(car.actor_id, car.actor_created_frame)))
+                    .flatten()
+                    .filter(|v| v.len() >= 5)
+                    .map(|v| {
+                        let mut recent: Vec<i64> = v[v.len().saturating_sub(15)..].to_vec();
+                        recent.sort_unstable();
+                        recent[recent.len() / 2]
+                    })
+                    .filter(|&m| m != 0);
+                if let Some(shift) = median_shift {
+                    // Observed controls of the frames around this one, each moved by the car's shift
+                    // from the midpoint rule; the latest one in effect at the interval's start is
+                    // applied at its start.
+                    let mut in_effect: Option<&observations::Car> = None;
+                    let mut later: Vec<(u64, &observations::Car)> = Vec::new();
+                    for g in frame_idx.saturating_sub(4)..=(frame_idx + 4).min(observations.frames.len() - 1) {
+                        let Some(other) = observations.frames[g].cars.iter().find(|c| {
+                            c.actor_id == car.actor_id
+                                && c.actor_created_frame == car.actor_created_frame
+                        }) else {
+                            continue;
+                        };
+                        let spacing = if g == 0 {
+                            4
+                        } else {
+                            let t = |x: usize| {
+                                ((f64::from(observations.frames[x].time) - f64::from(first_time))
+                                    * 120.0)
+                                    .round() as i64
+                            };
+                            t(g) - t(g - 1)
+                        };
+                        let tick = ((f64::from(observations.frames[g].time) - f64::from(first_time))
+                            * 120.0)
+                            .round() as i64
+                            - 2
+                            - spacing / 2
+                            + shift;
+                        let switch = tick - interval_start;
+                        if switch < 0 {
+                            in_effect = Some(other);
+                        } else if switch as u64 <= span {
+                            later.push((switch as u64, other));
+                        }
+                    }
+                    if let Some(other) = in_effect {
+                        switches.push((0, other));
+                    }
+                    switches.extend(later);
+                    continue;
+                }
                 let switch = packet_interval_change_tick(
                     observations,
                     options,
@@ -5354,6 +5434,12 @@ pub fn convert_observations_with(
                             )
                         })
                         .flatten();
+                    if let Some(shift) = schedule.as_ref().and_then(|s| s.shift) {
+                        car_shifts
+                            .entry((car.actor_id, car.actor_created_frame))
+                            .or_default()
+                            .push(shift);
+                    }
                     if schedule.is_none() && options.fit_jump_timing {
                         let ball_now = *arena.get_ball_state();
                         schedule = fit_jump_timing(
