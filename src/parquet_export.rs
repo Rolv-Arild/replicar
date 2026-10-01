@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
@@ -19,9 +20,9 @@ use sha2::{Digest, Sha256};
 
 use crate::conversion::{self, ConvertOptions, ConvertedFrame, PositionResidual};
 use crate::observations;
+use crate::parquet_tables::{BATCH_SIZE, ExportSummary, Tables, dict, dict_type};
+use crate::scoreboard::ScoreboardFrame;
 use crate::serialization;
-
-const BATCH_SIZE: usize = 512;
 
 struct Row {
     frame: u32,
@@ -46,6 +47,8 @@ struct Row {
     scores: Vec<f32>,
     seconds_remaining: f32,
     frame_json: Vec<u8>,
+    /// Reconstructed match clock (`None`: no scoreboard for the frame, so unknown, not zero).
+    scoreboard: Option<ScoreboardFrame>,
 }
 
 fn rotation(rot: Mat3A) -> Vec<f32> {
@@ -113,6 +116,7 @@ fn row(
             .map_or(f32::NAN, |v| v.value as f32),
         frame_json: serialization::frame_json(converted, observed, residuals)
             .map_err(io::Error::other)?,
+        scoreboard: converted.scoreboard.clone(),
     };
     let mut seen = HashSet::new();
     for (info, car) in &state.cars {
@@ -192,6 +196,11 @@ fn schema(
         list_field("scores", f.clone(), 2),
         Field::new("seconds_remaining", f, true),
         Field::new("frame_json", DataType::LargeBinary, true),
+        // Appended after the original columns so existing positions and names are unchanged.
+        Field::new("scoreboard_period", dict_type(), true),
+        Field::new("scoreboard_clock_state", dict_type(), true),
+        Field::new("scoreboard_seconds_remaining", DataType::Float32, true),
+        Field::new("scoreboard_overtime_seconds", DataType::Float32, true),
     ];
     let metadata = HashMap::from([
         ("columnar_version".to_owned(), "1".to_owned()),
@@ -269,6 +278,21 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
         Arc::new(LargeBinaryArray::from_iter_values(
             rows.iter().map(|r| r.frame_json.as_slice()),
         )),
+        dict(rows.iter().map(|r| r.scoreboard.as_ref().map(|s| s.period)))?,
+        dict(
+            rows.iter()
+                .map(|r| r.scoreboard.as_ref().map(|s| s.clock_state)),
+        )?,
+        Arc::new(Float32Array::from(
+            rows.iter()
+                .map(|r| r.scoreboard.as_ref().and_then(|s| s.seconds_remaining))
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float32Array::from(
+            rows.iter()
+                .map(|r| r.scoreboard.as_ref().and_then(|s| s.overtime_seconds))
+                .collect::<Vec<_>>(),
+        )),
     ];
     RecordBatch::try_new(schema, columns).map_err(io::Error::other)
 }
@@ -281,6 +305,19 @@ pub fn write_parquet(
     options: &ConvertOptions,
     file: File,
 ) -> Result<usize, Box<dyn Error>> {
+    Ok(write_parquet_with_tables(bytes, options, file, None)?.frames)
+}
+
+/// `write_parquet` that also writes the record tables (`parquet_tables::TABLE_NAMES`) beside
+/// `tables_beside`, the main file's path (see `parquet_tables::table_path`), in the same pass and
+/// with the same bounded batches. The tables are always created, empty when the replay has no such
+/// records, so their schemas can be relied on.
+pub fn write_parquet_with_tables(
+    bytes: &[u8],
+    options: &ConvertOptions,
+    file: File,
+    tables_beside: Option<&Path>,
+) -> Result<ExportSummary, Box<dyn Error>> {
     let replay = crate::parse_replay(bytes)?;
     let observed = observations::extract(&replay).ok_or("replay has no network frames")?;
     drop(replay);
@@ -314,6 +351,9 @@ pub fn write_parquet(
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
         .set_max_row_group_row_count(Some(BATCH_SIZE))
         .build();
+    let mut tables = tables_beside
+        .map(|main| Tables::create(main, &properties))
+        .transpose()?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(properties))?;
     let mut rows = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0usize;
@@ -332,6 +372,9 @@ pub fn write_parquet(
                     io::ErrorKind::InvalidData,
                     "nonsequential frame index",
                 ));
+            }
+            if let Some(tables) = tables.as_mut() {
+                tables.add_frame(frame, observation)?;
             }
             rows.push(row(
                 frame,
@@ -363,5 +406,151 @@ pub fn write_parquet(
         writer.write(&batch(&rows, schema, expected.car_slots.len(), pads.len())?)?;
     }
     writer.close()?;
-    Ok(count)
+    let table_rows = match tables {
+        Some(tables) => tables.finish()?,
+        None => Vec::new(),
+    };
+    Ok(ExportSummary {
+        frames: count,
+        table_rows,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{Float32Type, UInt8Type};
+    use arrow_array::{Array, DictionaryArray};
+
+    use super::*;
+
+    fn blank_row(frame: u32, scoreboard: Option<ScoreboardFrame>) -> Row {
+        Row {
+            frame,
+            replay_time: 0.0,
+            timeline_tick: 0,
+            arena_tick: 0,
+            ball_position: vec![0.0; 3],
+            ball_rotation_columns: vec![0.0; 9],
+            ball_velocity: vec![0.0; 3],
+            ball_angular_velocity: vec![0.0; 3],
+            car_position: vec![f32::NAN; 3],
+            car_rotation_columns: vec![f32::NAN; 9],
+            car_velocity: vec![f32::NAN; 3],
+            car_angular_velocity: vec![f32::NAN; 3],
+            car_boost: vec![f32::NAN; 1],
+            car_present: vec![false; 1],
+            car_demoed: vec![false; 1],
+            control_axes: vec![f32::NAN; 5],
+            control_buttons: vec![false; 3],
+            boost_pad_active: vec![true; 1],
+            boost_pad_cooldown: vec![0.0; 1],
+            scores: vec![0.0, 1.0],
+            seconds_remaining: f32::NAN,
+            frame_json: b"{}".to_vec(),
+            scoreboard,
+        }
+    }
+
+    #[test]
+    fn original_columns_keep_their_positions_and_scoreboard_columns_follow() {
+        let schema = schema(1, 1, b"{}".to_vec(), b"[]".to_vec()).unwrap();
+        let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names[..22],
+            [
+                "frame",
+                "replay_time",
+                "timeline_tick",
+                "arena_tick",
+                "ball_position",
+                "ball_rotation_columns",
+                "ball_velocity",
+                "ball_angular_velocity",
+                "car_position",
+                "car_rotation_columns",
+                "car_velocity",
+                "car_angular_velocity",
+                "car_boost",
+                "car_present",
+                "car_demoed",
+                "control_axes",
+                "control_buttons",
+                "boost_pad_active",
+                "boost_pad_cooldown",
+                "scores",
+                "seconds_remaining",
+                "frame_json",
+            ]
+        );
+        assert_eq!(
+            names[22..],
+            [
+                "scoreboard_period",
+                "scoreboard_clock_state",
+                "scoreboard_seconds_remaining",
+                "scoreboard_overtime_seconds",
+            ]
+        );
+        assert_eq!(schema.metadata()["columnar_version"], "1");
+    }
+
+    #[test]
+    fn a_missing_scoreboard_or_clock_value_is_null_not_zero() {
+        let schema = schema(1, 1, b"{}".to_vec(), b"[]".to_vec()).unwrap();
+        let rows = [
+            blank_row(
+                0,
+                Some(ScoreboardFrame {
+                    period: "regulation",
+                    clock_state: "running",
+                    seconds_remaining: Some(123.5),
+                    overtime_seconds: None,
+                }),
+            ),
+            blank_row(
+                1,
+                Some(ScoreboardFrame {
+                    period: "overtime",
+                    clock_state: "kickoff",
+                    seconds_remaining: None,
+                    overtime_seconds: Some(0.0),
+                }),
+            ),
+            blank_row(2, None),
+        ];
+        let batch = batch(&rows, schema, 1, 1).unwrap();
+        let strings = |name: &str| -> Vec<Option<String>> {
+            let column = batch.column_by_name(name).unwrap();
+            let dictionary = column
+                .as_any()
+                .downcast_ref::<DictionaryArray<UInt8Type>>()
+                .unwrap();
+            let values = dictionary.values().as_string::<i32>();
+            (0..dictionary.len())
+                .map(|i| dictionary.key(i).map(|k| values.value(k).to_owned()))
+                .collect()
+        };
+        assert_eq!(
+            strings("scoreboard_period"),
+            [Some("regulation".into()), Some("overtime".into()), None]
+        );
+        assert_eq!(
+            strings("scoreboard_clock_state"),
+            [Some("running".into()), Some("kickoff".into()), None]
+        );
+        let remaining = batch
+            .column_by_name("scoreboard_seconds_remaining")
+            .unwrap()
+            .as_primitive::<Float32Type>();
+        assert_eq!(remaining.value(0), 123.5);
+        assert!(remaining.is_null(1) && remaining.is_null(2));
+        let overtime = batch
+            .column_by_name("scoreboard_overtime_seconds")
+            .unwrap()
+            .as_primitive::<Float32Type>();
+        assert!(overtime.is_null(0) && overtime.is_null(2));
+        // An overtime clock of exactly 0 s is a value, distinct from unknown.
+        assert!(overtime.is_valid(1) && overtime.value(1) == 0.0);
+    }
 }

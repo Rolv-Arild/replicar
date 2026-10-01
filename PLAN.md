@@ -291,6 +291,6 @@ Done items are struck through in the work log above; this is what is still open,
 6. **A real online replay with a remote client** to check the ball-car offset, the recorder's input lead and the clock delay.
 7. **The recorder's own controls** (ground steer wrong on 13-15% of LAN client frames).
 8. **Speed**: the air solve is half of a conversion; the ground shift search could be coarse-to-fine.
-9. **Export**: flat Parquet columns for the scoreboard, touches, contacts, pad pickups and fitted presses.
+9. **Export** (done 2026-10-01): scoreboard columns in the main Parquet file and seven record tables beside it (RESULTS.md, "Parquet columns and record tables"). Left: the Python loader (`python/replay_columnar.py`) does not read the new columns or tables yet, and the Python second-stage writer does not write them.
 10. Review leftovers: the recorded jump-press edge starts from the current frame's jump control; pad and demolition tracking keyed by actor id is not cleared when an id is recycled; a car's fallback lag does not follow a moved run.
 11. Open from the original plan: a causal timing model for masked prediction, live simulation continuation, replay-sized memory.
