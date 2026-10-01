@@ -1016,6 +1016,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Ok(())
     };
+    if std::env::var_os("SHIFT_LOG").is_some() {
+        replay_to_rocketsim::conversion::GROUND_SHIFT_LOG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     for (label, tweak) in variants {
         let mut options = ConvertOptions::default();
         options.zero_packet_lag = zero_lag;

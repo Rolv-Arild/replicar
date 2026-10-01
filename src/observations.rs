@@ -118,6 +118,9 @@ pub struct Player {
     pub stats: PlayerStats,
 }
 
+/// Seconds within which a second report of one victim is a repeat.
+const DEMOLITION_REPEAT_WINDOW: f32 = 5.0;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -135,10 +138,10 @@ pub enum Event {
         self_demolish: bool,
         attacker_velocity: [f32; 3],
         victim_velocity: [f32; 3],
-        /// The same victim car actor was reported as demolished less than 3 s (the respawn time)
-        /// before: a car cannot be demolished twice in that time, and the replay does send a
-        /// demolition again (3 of 16 events on the remote-client games, 200-530 ticks after). Count
-        /// only events with `repeat` false.
+        /// The same victim car actor was reported as demolished less than 5 s before (a car cannot
+        /// be demolished during its 3 s respawn time, and the replay sends a demolition again 200-530
+        /// ticks after: 4 of 16 events on the remote-client games). Count only events with `repeat`
+        /// false.
         repeat: bool,
     },
 }
@@ -745,7 +748,7 @@ impl Tracker {
                 *repeat = self
                     .demolished_at
                     .get(victim)
-                    .is_some_and(|&t| time - t < 3.0);
+                    .is_some_and(|&t| time - t < DEMOLITION_REPEAT_WINDOW);
                 if !*repeat {
                     self.demolished_at.insert(*victim, time);
                 }

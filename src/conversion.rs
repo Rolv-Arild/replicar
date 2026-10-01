@@ -1628,10 +1628,7 @@ fn team(index: u8) -> Team {
     if index == 0 { Team::Blue } else { Team::Orange }
 }
 
-/// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
-/// The embedded map is generated from the user's item catalog, the official
-/// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
-/// the Octane fallback.
+/// RocketSim's hitbox preset of a roster name (`octane` for an unknown one).
 pub fn hitbox_config(name: &str) -> CarBodyConfig {
     match name {
         "breakout" => CarBodyConfig::BREAKOUT,
@@ -1644,6 +1641,10 @@ pub fn hitbox_config(name: &str) -> CarBodyConfig {
     }
 }
 
+/// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
+/// The embedded map is generated from the user's item catalog, the official
+/// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
+/// the Octane fallback.
 fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
     static CATALOG: OnceLock<Vec<(u32, &'static str)>> = OnceLock::new();
     let catalog = CATALOG.get_or_init(|| {
@@ -2721,7 +2722,10 @@ fn plan_air_bvp(
             // flip time a simulated flip has reached), so a shift of it is tried too: the first
             // that reaches the end state, else the one that gets closest.
             let mut best: Option<(Vec<AirControls>, f32, f32, i32)> = None;
-            for offset in [0i32, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6] {
+            // Offsets beyond three ticks are rare and cost 20% of a conversion: limiting them from six to
+            // three left the interior flip error unchanged (rotation p90 4.70 to 4.73 deg).
+            let max_offset = std::env::var("AIR_BVP_MAX_OFFSET").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(3);
+            for offset in [0i32, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6].into_iter().filter(|o| o.abs() <= max_offset) {
                 let mut start = *state;
                 start.phys.rot_mat = rot_a;
                 start.phys.ang_vel = omega_a;
@@ -2915,6 +2919,8 @@ fn air_refused<T>(reason: usize) -> Option<T> {
 /// Diagnostic: (actor id, shift chosen by `fit_ground_control_timing`, whether it is the best), in
 /// the order the fits ran.
 pub static GROUND_SHIFT_LOG: std::sync::Mutex<Vec<(i32, i64, bool)>> = std::sync::Mutex::new(Vec::new());
+/// The log is only kept while a diagnostic tool has switched this on (it grows with every fit).
+pub static GROUND_SHIFT_LOG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
 const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
@@ -3120,7 +3126,9 @@ fn fit_ground_control_timing(
         }
     }
     let shift = costs[best].0;
-    if let Ok(mut log) = GROUND_SHIFT_LOG.lock() {
+    if !GROUND_SHIFT_LOG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        // not logging
+    } else if let Ok(mut log) = GROUND_SHIFT_LOG.lock() {
         log.push((car.actor_id, shift, costs[best].1 < costs.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) + 1e-6));
     }
     // The schedule for the interval to the next packet, in arena ticks.
@@ -4579,6 +4587,10 @@ pub fn convert_observations_with(
     let mut last_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
     let mut ground_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
     let mut pad_actor_to_index: HashMap<i32, usize> = HashMap::new();
+    // The pads' true cooldowns in seconds (0 = available), tracked from the replay's pickups while
+    // the arena's own pads are held on cooldown to stop simulated pickups; written to the arena
+    // before each export.
+    let mut pad_cooldowns: Vec<f32> = vec![0.0; arena.num_boost_pads()];
     // A pad keeps its name (`VehiclePickup_Boost_TA_14`) when its actor is created again (after a
     // goal: 184 actors for 34 pads in one game), so the pad list index is voted for by the nearest
     // pad to the instigator at every pickup of that name, over the whole replay.
@@ -4857,7 +4869,10 @@ pub fn convert_observations_with(
                     // applied at its start.
                     let mut in_effect: Option<&observations::Car> = None;
                     let mut later: Vec<(u64, &observations::Car)> = Vec::new();
-                    for g in frame_idx.saturating_sub(4)..=(frame_idx + 4).min(observations.frames.len() - 1) {
+                    // The frames whose switch (at their rule tick plus the shift) can fall in this
+                    // interval: further back the larger the shift (at least three ticks per frame).
+                    let back = 4 + shift.unsigned_abs() as usize / 3;
+                    for g in frame_idx.saturating_sub(back)..=(frame_idx + 4).min(observations.frames.len() - 1) {
                         let Some(other) = observations.frames[g].cars.iter().find(|c| {
                             c.actor_id == car.actor_id
                                 && c.actor_created_frame == car.actor_created_frame
@@ -5769,6 +5784,14 @@ pub fn convert_observations_with(
         }
         advance_to!(span);
         let _ = remaining;
+        if options.block_sim_pad_pickups {
+            // The pads the replay has not picked up recharge in real time; the arena's own copy is
+            // held on cooldown only to keep the simulation from picking them up.
+            let elapsed = gap as f32 / 120.0;
+            for cooldown in pad_cooldowns.iter_mut() {
+                *cooldown = (*cooldown - elapsed).max(0.0);
+            }
+        }
         if options.apply_observed_demolitions && simulated && !frame_withheld {
             for event in &frame.events {
                 let observations::Event::Demolish {
@@ -5788,9 +5811,17 @@ pub fn convert_observations_with(
                 {
                     continue;
                 }
-                let Some(&(slot, _)) = actor_slots.get(victim) else {
+                let Some(&(slot, created)) = actor_slots.get(victim) else {
                     continue;
                 };
+                // The slot belongs to this car actor's lifetime, not to an earlier owner of the id.
+                if !frame
+                    .cars
+                    .iter()
+                    .any(|c| c.actor_id == *victim && c.actor_created_frame == created)
+                {
+                    continue;
+                }
                 let mut state = *arena.get_car_state(slot);
                 if !state.is_demoed {
                     state.is_demoed = true;
@@ -5867,6 +5898,7 @@ pub fn convert_observations_with(
                     if let Some(idx) = pad_idx {
                         if pickup.picked_up == 255 {
                             arena.set_boost_pad_state(idx, BoostPadState { cooldown: 0.0 });
+                            pad_cooldowns[idx] = 0.0;
                         } else if pickup.picked_up % 2 == 1 {
                             let max_cooldown = if arena.get_boost_pad_config(idx).is_big {
                                 10.0
@@ -5879,9 +5911,17 @@ pub fn convert_observations_with(
                                     cooldown: max_cooldown,
                                 },
                             );
+                            pad_cooldowns[idx] = max_cooldown;
                         }
                     }
                 }
+            }
+        }
+        if options.block_sim_pad_pickups {
+            // Write the true pad cooldowns (decayed at the start of this frame, then updated by this
+            // frame's pickups) back into the arena for the export.
+            for (idx, cooldown) in pad_cooldowns.iter().enumerate() {
+                arena.set_boost_pad_state(idx, BoostPadState { cooldown: *cooldown });
             }
         }
         let timeline_offset = timeline_tick as i64 - arena.tick_count() as i64;

@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let max: usize = args.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    replay_to_rocketsim::conversion::GROUND_SHIFT_LOG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     let options = ConvertOptions::default();
     for replay in replay_paths(&path)?.into_iter().take(max) {
         GROUND_SHIFT_LOG.lock().unwrap().clear();

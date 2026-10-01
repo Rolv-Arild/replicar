@@ -151,7 +151,14 @@ pub fn reconstruct(observations: &ObservedReplay) -> Vec<ScoreboardFrame> {
             };
             if run.overtime {
                 // Seconds played: 0 until the first touch, then counting up.
-                let start_tick = fit.unwrap_or_else(|| timeline(first));
+                // Without a change of the integer there is no evidence the clock moved: hold at 0.
+                let Some(start_tick) = fit else {
+                    for state in &mut out[first..=last] {
+                        state.overtime_seconds = Some(0.0);
+                        state.clock_state = "kickoff";
+                    }
+                    continue;
+                };
                 for f in first..=last {
                     let x = ((timeline(f) - start_tick) / TICKS_PER_SECOND).max(0.0);
                     out[f].overtime_seconds = Some(x as f32);

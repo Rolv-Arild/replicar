@@ -1460,6 +1460,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 masked_options.block_sim_pad_pickups = false;
                 masked_options.air_bvp = false;
                 masked_options.fit_on_next_packet = false;
+                // The causal prediction has no demolition report for a withheld frame, so RocketSim's
+                // own demolition rule stays on; the contact alignment uses later ball packets.
+                masked_options.disable_simulated_demolitions = false;
+                masked_options.align_contacts = false;
                 masked_options.withheld_frames = Some(std::sync::Arc::new(
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())

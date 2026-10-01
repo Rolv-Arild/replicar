@@ -92,7 +92,7 @@ Acceptance, per metric and per game size (1v1, 2v2, 3v3), for the test split aga
 * the ordering simulated < linear < hold of the masked rows holds at every horizon and size;
 * no individual replay has a car p90 above three times the validation p90 of its game size, and any that
   has is listed with its cause when it can be found from its own data;
-* 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 25 s, maximum 65 s per replay with four converting in parallel, 120 replays in 50 minutes of CPU time).
+* 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 9 s, maximum 24 s per replay with four converting in parallel, 120 replays).
 A miss is reported as a finding, not as a failure of the assessment.
 
 ## 5. Truth-free consistency checks (reported, not graded against validation)

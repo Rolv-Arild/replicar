@@ -68,9 +68,17 @@ pub fn aligned_lags(
         return Ok((lags, summary));
     }
     // First pass: the normal conversion, for its contacts and exported poses.
+    // Only the contacts, the cars that made them and rough car poses are needed from it: the lags
+    // are reused and the expensive fits (the boundary-value solves, the timing fits, the flip fits)
+    // are left out, which is most of a conversion's cost.
     let mut first = options.clone();
     first.align_contacts = false;
-    first.external_packet_lags = None;
+    first.external_packet_lags = Some(std::sync::Arc::new(lags.clone()));
+    first.air_bvp = false;
+    first.infer_dodge_start = false;
+    first.infer_flip_cancel = false;
+    first.fit_ground_control_timing = false;
+    first.fit_jump_timing = false;
     let mut frames = Vec::new();
     let summary_pass = convert_observations_with(observations, &first, |converted, _, _| {
         frames.push(converted.clone());
@@ -83,7 +91,7 @@ pub fn aligned_lags(
     let mut arena = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
     arena.add_car(Team::Blue, rocketsim::CarBodyConfig::OCTANE);
     let mut current_config = "octane".to_string();
-    let mut votes: HashMap<usize, Vec<i64>> = HashMap::new();
+    let mut votes: std::collections::BTreeMap<usize, Vec<i64>> = std::collections::BTreeMap::new();
     for converted in &frames {
         for contact in &converted.ball_contacts {
             let Some(slot) = contact.car_slot else { continue };
@@ -191,8 +199,8 @@ pub fn aligned_lags(
                 if tick_c >= tick_b {
                     continue;
                 }
-                arena.set_car_controls(0, controls);
-                // The earlier object runs alone until the later one starts.
+                // The earlier object runs alone until the later one starts. (`set_car_state` replaces the
+                // whole state, controls included: the controls are set after it.)
                 let t1 = tick_a.max(tick_c);
                 if tick_a <= tick_c {
                     ball_arena.set_ball_state(ball_state(&ball_a));
@@ -201,9 +209,11 @@ pub fn aligned_lags(
                     }
                     arena.set_ball_state(*ball_arena.get_ball_state());
                     arena.set_car_state(0, car_state);
+                    arena.set_car_controls(0, controls);
                 } else {
                     arena.set_ball_state(parked);
                     arena.set_car_state(0, car_state);
+                    arena.set_car_controls(0, controls);
                     for _ in tick_c..tick_a {
                         arena.step_tick();
                     }
@@ -294,6 +304,10 @@ pub fn aligned_lags(
         }
         moved_runs += 1;
         for &(frame, k) in &run.entries {
+            // A packet shared with the neighbouring run belongs to the run `car_run_of` names.
+            if lags.car_run_of.get(&(run.actor, run.created, frame)) != Some(&run_index) {
+                continue;
+            }
             let lag = (timeline(frame) - (start + k)).max(0) as f32;
             lags.car_actor.insert((run.actor, run.created, frame), lag);
         }
