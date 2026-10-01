@@ -269,6 +269,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .collect::<Vec<_>>()
             );
         }
+        if std::env::var_os("SHIFT_LOG").is_some() && label.starts_with("all fits") {
+            let mut by_actor: HashMap<i32, String> = HashMap::new();
+            for frame in frames {
+                for car in &frame.cars {
+                    if let Some(name) = car.player_key.as_ref().and_then(|k| names.get(k)) {
+                        by_actor.insert(car.actor_id, name.clone());
+                    }
+                }
+            }
+            let log = replay_to_rocketsim::conversion::GROUND_SHIFT_LOG.lock().unwrap();
+            let mut per_name: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+            for &(actor, shift, _) in log.iter() {
+                if let Some(name) = by_actor.get(&actor) {
+                    per_name.entry(name.clone()).or_default().push(shift);
+                }
+            }
+            for (name, mut shifts) in per_name {
+                shifts.sort_unstable();
+                let q = |p: f64| shifts[((shifts.len() - 1) as f64 * p) as usize];
+                let at = |v: i64| shifts.iter().filter(|&&x| x == v).count() as f64 / shifts.len() as f64;
+                println!(
+                    "  ground timing shifts {name:<28} n {:>5} p10/p50/p90 {}/{}/{}  at -8: {:.2} at +40: {:.2} at 0: {:.2}",
+                    shifts.len(), q(0.1), q(0.5), q(0.9), at(-8), at(40), at(0)
+                );
+            }
+        }
+        if label.starts_with("all fits") {
+            replay_to_rocketsim::conversion::GROUND_SHIFT_LOG.lock().unwrap().clear();
+        }
         // Matched fresh packets: (frame index, offset between converter timeline and server ticks).
         let mut matched: Vec<(usize, i64)> = Vec::new();
         for (f, frame) in frames.iter().enumerate() {

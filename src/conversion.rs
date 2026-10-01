@@ -2744,8 +2744,12 @@ fn air_refused<T>(reason: usize) -> Option<T> {
     None
 }
 
+/// Diagnostic: (actor id, shift chosen by `fit_ground_control_timing`, whether it is the best), in
+/// the order the fits ran.
+pub static GROUND_SHIFT_LOG: std::sync::Mutex<Vec<(i32, i64, bool)>> = std::sync::Mutex::new(Vec::new());
+
 /// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
-const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=8;
+const GROUND_TIMING_SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
 
 /// Fits when the observed throttle, steer, handbrake and boost changes took effect. A control change
 /// is first seen in the frame after it happened and each frame's state is 0-4 ticks older than its
@@ -2948,6 +2952,9 @@ fn fit_ground_control_timing(
         }
     }
     let shift = costs[best].0;
+    if let Ok(mut log) = GROUND_SHIFT_LOG.lock() {
+        log.push((car.actor_id, shift, costs[best].1 < costs.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) + 1e-6));
+    }
     // The schedule for the interval to the next packet, in arena ticks.
     let mut schedule = vec![(
         now_tick,
