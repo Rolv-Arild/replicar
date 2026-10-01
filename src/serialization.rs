@@ -329,6 +329,9 @@ struct FrameLine<'a> {
     /// Car-ball contacts found from the ball packets that end at this frame.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     ball_contacts: &'a [crate::conversion::BallContact],
+    /// New boost pad pickups reported by the replay this frame, checked against the cars' paths.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    boost_pickups: &'a [crate::conversion::BoostPickup],
     position_residuals: &'a [PositionResidual],
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -384,6 +387,7 @@ fn frame_line<'a>(
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
         touches: &converted.touches,
         ball_contacts: &converted.ball_contacts,
+        boost_pickups: &converted.boost_pickups,
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,

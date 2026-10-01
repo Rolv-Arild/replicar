@@ -135,6 +135,11 @@ pub enum Event {
         self_demolish: bool,
         attacker_velocity: [f32; 3],
         victim_velocity: [f32; 3],
+        /// The same victim car actor was reported as demolished less than 3 s (the respawn time)
+        /// before: a car cannot be demolished twice in that time, and the replay does send a
+        /// demolition again (3 of 16 events on the remote-client games, 200-530 ticks after). Count
+        /// only events with `repeat` false.
+        repeat: bool,
     },
 }
 
@@ -285,6 +290,8 @@ struct Tracker {
     goal_events_this_phase: Vec<u8>,
     /// Last counter value reported with an instigator, per pad actor.
     pad_reported: HashMap<ActorId, u8>,
+    /// Time of the last demolition reported for each victim car actor.
+    demolished_at: HashMap<i32, f32>,
     diagnostics: Diagnostics,
 }
 
@@ -616,6 +623,7 @@ impl Tracker {
                         victim_car: active(&d.victim),
                         attacker_pri: active(&d.attacker_pri),
                         self_demolish: d.self_demolish,
+                        repeat: false,
                         attacker_velocity: [d.attacker_velocity.x, d.attacker_velocity.y, d.attacker_velocity.z],
                         victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
                     });
@@ -629,6 +637,7 @@ impl Tracker {
                         victim_car: d.victim_flag.then_some(d.victim.0),
                         attacker_pri: None,
                         self_demolish: false,
+                        repeat: false,
                         attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
                         victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
                     });
@@ -642,6 +651,7 @@ impl Tracker {
                         victim_car: d.victim_flag.then_some(d.victim.0),
                         attacker_pri: None,
                         self_demolish: false,
+                        repeat: false,
                         attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
                         victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
                     });
@@ -720,6 +730,27 @@ impl Tracker {
         events: Vec<Event>,
         pad_pickups: Vec<PadPickup>,
     ) -> Frame {
+        let mut events = events;
+        for event in &mut events {
+            if let Event::Demolish {
+                source,
+                victim_car: Some(victim),
+                repeat,
+                ..
+            } = event
+            {
+                if *source == "goal_explosion" {
+                    continue;
+                }
+                *repeat = self
+                    .demolished_at
+                    .get(victim)
+                    .is_some_and(|&t| time - t < 3.0);
+                if !*repeat {
+                    self.demolished_at.insert(*victim, time);
+                }
+            }
+        }
         if self
             .seconds_remaining
             .as_ref()

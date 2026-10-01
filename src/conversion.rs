@@ -370,6 +370,30 @@ pub struct BallContact {
     pub simulated_touch: bool,
 }
 
+/// A boost pad pickup reported by the replay (`PadPickup`, not a repeat), placed on the simulation's
+/// pad list and checked against the cars' paths: the replay's instigator is believed only if its
+/// path over the last frames crosses the pad's trigger cylinder.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BoostPickup {
+    /// Index in RocketSim's pad list (matched from the instigator's position when the pad was first
+    /// seen; `None` while the pad could not be matched).
+    pub pad_index: Option<usize>,
+    pub pad_actor_id: i32,
+    pub is_big: Option<bool>,
+    /// The slot of the replay's instigator car.
+    pub car_slot: Option<usize>,
+    /// The instigator's path (straight lines between the exported poses of the last frames) enters
+    /// the pad's trigger cylinder (radius 144 small, 208 big, plus 60 for the car's size).
+    pub verified: bool,
+    /// Closest horizontal distance of the instigator's path to the pad centre (UU).
+    pub distance_uu: Option<f32>,
+    /// When the instigator is not verified: another car whose path does.
+    pub suggested_car_slot: Option<usize>,
+    /// Closest approach of the (verified or suggested) car on the replay timeline; the frame's tick
+    /// when no path reaches the pad.
+    pub tick: u64,
+}
+
 /// A ball touch of the simulation: the first tick of a car-ball contact.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TouchEvent {
@@ -424,6 +448,9 @@ pub struct ConvertedFrame {
     /// Contacts found from the ball packets that end at this frame (`ball_evidence`). Preferred over
     /// `touches` (which are simulated; the two overlap: do not add them).
     pub ball_contacts: Vec<BallContact>,
+    /// Boost pad pickups the replay reports in this frame (new ones only), checked against the cars'
+    /// paths.
+    pub boost_pickups: Vec<BoostPickup>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
@@ -4505,6 +4532,54 @@ pub fn convert_observations_with(
     let mut last_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
     let mut ground_counters: HashMap<(i32, usize), [u8; 3]> = HashMap::new();
     let mut pad_actor_to_index: HashMap<i32, usize> = HashMap::new();
+    // A pad keeps its name (`VehiclePickup_Boost_TA_14`) when its actor is created again (after a
+    // goal: 184 actors for 34 pads in one game), so the pad list index is voted for by the nearest
+    // pad to the instigator at every pickup of that name, over the whole replay.
+    let pad_name_to_index: HashMap<String, usize> = if options.sync_boost_pad_pickups {
+        let mut votes: HashMap<String, HashMap<usize, u32>> = HashMap::new();
+        for frame in &observations.frames {
+            for pickup in &frame.pad_pickups {
+                let (Some(name), Some(instigator)) = (&pickup.pad_actor_name, pickup.instigator_car_id) else {
+                    continue;
+                };
+                if pickup.picked_up == 255 || pickup.repeat {
+                    continue;
+                }
+                let Some(pos) = frame
+                    .cars
+                    .iter()
+                    .find(|c| c.actor_id == instigator)
+                    .and_then(|c| c.body.position.as_ref())
+                    .filter(|p| p.frame <= frame.index && frame.time - observations.frames[p.frame].time <= 0.1)
+                    .map(|p| vec3(p.value))
+                else {
+                    continue;
+                };
+                let mut ranked: Vec<(f32, usize)> = (0..arena.num_boost_pads())
+                    .map(|idx| {
+                        let pad = arena.get_boost_pad_config(idx).pos;
+                        ((pad.x - pos.x).hypot(pad.y - pos.y), idx)
+                    })
+                    .collect();
+                ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if ranked.len() >= 2 && ranked[0].0 < 350.0 && ranked[1].0 - ranked[0].0 >= 100.0 {
+                    *votes.entry(name.clone()).or_default().entry(ranked[0].1).or_default() += 1;
+                }
+            }
+        }
+        votes
+            .into_iter()
+            .filter_map(|(name, v)| {
+                let mut ranked: Vec<(u32, usize)> = v.into_iter().map(|(i, n)| (n, i)).collect();
+                ranked.sort_by(|a, b| b.cmp(a));
+                let top = ranked[0];
+                let second = ranked.get(1).map_or(0, |r| r.0);
+                (top.0 >= 2 && top.0 >= 2 * second).then_some((name, top.1))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let mut last_pad_counter: HashMap<i32, u8> = HashMap::new();
     let mut diagnostics = Diagnostics::default();
     let first_time = observations.frames.first().map_or(0.0, |frame| frame.time);
@@ -5649,12 +5724,18 @@ pub fn convert_observations_with(
                 let observations::Event::Demolish {
                     source,
                     victim_car: Some(victim),
+                    repeat,
                     ..
                 } = event
                 else {
                     continue;
                 };
-                if *source == "goal_explosion" {
+                // A repeated report would demolish a respawned car a second time; a victim actor
+                // that is gone from the frame has been replaced.
+                if *source == "goal_explosion"
+                    || *repeat
+                    || !frame.cars.iter().any(|c| c.actor_id == *victim)
+                {
                     continue;
                 }
                 let Some(&(slot, _)) = actor_slots.get(victim) else {
@@ -5671,6 +5752,14 @@ pub fn convert_observations_with(
         }
         if options.sync_boost_pad_pickups {
             for pickup in &frame.pad_pickups {
+                let by_name = pickup
+                    .pad_actor_name
+                    .as_ref()
+                    .and_then(|name| pad_name_to_index.get(name))
+                    .copied();
+                if let Some(idx) = by_name {
+                    pad_actor_to_index.insert(pickup.pad_actor_id, idx);
+                }
                 let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {
                     Some(idx)
                 } else if let Some(instigator_id) = pickup.instigator_car_id {
@@ -5852,6 +5941,96 @@ pub fn convert_observations_with(
                 });
             }
         }
+        // New pad pickups of this frame, with the instigator checked against the cars' paths.
+        let mut boost_pickups = Vec::new();
+        for pickup in &frame.pad_pickups {
+            if pickup.repeat || pickup.picked_up == 255 || pickup.instigator_car_id.is_none() {
+                continue;
+            }
+            let pad_index = pad_actor_to_index.get(&pickup.pad_actor_id).copied();
+            let (pad_pos, is_big) = match pad_index {
+                Some(idx) => {
+                    let config = arena.get_boost_pad_config(idx);
+                    (Some(config.pos), Some(config.is_big))
+                }
+                None => (None, None),
+            };
+            let car_slot = pickup
+                .instigator_car_id
+                .and_then(|id| actor_slots.get(&id).map(|&(slot, _)| slot));
+            // Closest approach of a slot's path to the pad over the recent frames: (distance in the
+            // horizontal plane, tick).
+            let closest = |slot: usize| -> Option<(f32, u64)> {
+                let pad = pad_pos?;
+                let mut best: Option<(f32, u64)> = None;
+                let mut previous: Option<(u64, Vec3A)> = None;
+                for (tick, cars) in recent_poses.iter() {
+                    let Some(&(_, pos, _, demoed)) = cars.iter().find(|c| c.0 == slot) else {
+                        previous = None;
+                        continue;
+                    };
+                    if demoed {
+                        previous = None;
+                        continue;
+                    }
+                    if let Some((t0, p0)) = previous {
+                        // Distance from the pad to the segment p0 -> pos in the horizontal plane.
+                        let (a, b) = (glam::Vec2::new(p0.x, p0.y), glam::Vec2::new(pos.x, pos.y));
+                        let target = glam::Vec2::new(pad.x, pad.y);
+                        let ab = b - a;
+                        let f = if ab.length_squared() > 1e-6 {
+                            ((target - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let d = (a + ab * f - target).length();
+                        if best.is_none_or(|(bd, _)| d < bd) {
+                            best = Some((d, t0 + ((*tick - t0) as f32 * f) as u64));
+                        }
+                    } else {
+                        let d = (glam::Vec2::new(pos.x, pos.y) - glam::Vec2::new(pad.x, pad.y)).length();
+                        if best.is_none_or(|(bd, _)| d < bd) {
+                            best = Some((d, *tick));
+                        }
+                    }
+                    previous = Some((*tick, pos));
+                }
+                best
+            };
+            // The trigger radius plus half a car (the game tests the hitbox, RocketSim the centre).
+            let radius = if is_big == Some(true) { 208.0 } else { 144.0 } + 60.0;
+            let own = car_slot.and_then(&closest);
+            let verified = own.is_some_and(|(d, _)| d <= radius);
+            let mut suggested = None;
+            if !verified && pad_pos.is_some() {
+                let mut best: Option<(f32, usize, u64)> = None;
+                for (&slot, _) in slot_bodies.iter() {
+                    if Some(slot) == car_slot {
+                        continue;
+                    }
+                    if let Some((d, t)) = closest(slot) {
+                        if d <= radius && best.is_none_or(|(bd, _, _)| d < bd) {
+                            best = Some((d, slot, t));
+                        }
+                    }
+                }
+                suggested = best.map(|(_, slot, t)| (slot, t));
+            }
+            boost_pickups.push(BoostPickup {
+                pad_index,
+                pad_actor_id: pickup.pad_actor_id,
+                is_big,
+                car_slot,
+                verified,
+                distance_uu: own.map(|o| o.0),
+                suggested_car_slot: suggested.map(|s| s.0),
+                tick: if verified {
+                    own.map_or(timeline_tick, |o| o.1)
+                } else {
+                    suggested.map_or(timeline_tick, |s| s.1)
+                },
+            });
+        }
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -5860,6 +6039,7 @@ pub fn convert_observations_with(
             simulated_events: events,
             touches,
             ball_contacts,
+            boost_pickups,
             packet_lags: applied_lags,
             fitted_inputs: fitted_arena
                 .into_iter()

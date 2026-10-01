@@ -43,8 +43,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut simulated: Vec<(u64, usize)> = Vec::new();
         for (frame, converted) in output.observations.frames.iter().zip(&output.frames) {
             for event in &frame.events {
-                if let Event::Demolish { source, victim_car: Some(v), .. } = event {
-                    if *source != "goal_explosion" {
+                if let Event::Demolish { source, victim_car: Some(v), repeat, .. } = event {
+                    if *source != "goal_explosion" && !*repeat {
                         let slot = output
                             .car_slots
                             .iter()

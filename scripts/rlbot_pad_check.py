@@ -141,3 +141,25 @@ for fn, n, jump in sorted(truth_pick):
 kinds = collections.Counter(("big (jump >= 50)" if j >= 50 else "small") for _, _, j in unmatched)
 alln = collections.Counter(("big (jump >= 50)" if j >= 50 else "small") for _, _, j in truth_pick)
 print(f"  truth pickups without a replay record: {dict(kinds)} of {dict(alln)}; with any replay record of that car within 120 ticks: {sum(1 for fn,n,j in unmatched if any(abs(t-fn)<=120 for t in bt.get(n,[])))}")
+
+# ---- converter boost_pickups (verified against the cars' paths) ----
+bp = []
+for r in recs:
+    fl_ = floor_at(r['frame'])
+    for b in r.get('boost_pickups', []):
+        bp.append((b['tick'] - fl_, b))
+print(f"\nboost_pickups: {len(bp)}; pad matched {sum(1 for _, b in bp if b['pad_index'] is not None)}; instigator verified {sum(1 for _, b in bp if b['verified'])}; not verified but another car's path reaches the pad {sum(1 for _, b in bp if not b['verified'] and b['suggested_car_slot'] is not None)}; neither {sum(1 for _, b in bp if not b['verified'] and b['suggested_car_slot'] is None)}")
+def score(evs, label):
+    bt_ = collections.defaultdict(list)
+    for fn, n, _ in truth_pick: bt_[n].append(fn)
+    used_ = set(); matched_ = 0; offs_ = []; sur_ = 0
+    for t_, n_ in sorted(evs, key=lambda e: e[0]):
+        c = [(abs(t_ - fn), fn) for fn in bt_.get(n_, []) if (fn, n_) not in used_ and abs(t_ - fn) <= 40]
+        if c:
+            _, fn = min(c); used_.add((fn, n_)); matched_ += 1; offs_.append(t_ - fn)
+        else: sur_ += 1
+    o_ = np.array(offs_) if offs_ else np.array([0])
+    print(f"  {label}: matched {matched_}, surplus {sur_}, truth pickups unmatched {len(truth_pick)-len(used_)}; tick offset p10/p50/p90 {np.percentile(o_,10):.0f}/{np.percentile(o_,50):.0f}/{np.percentile(o_,90):.0f}")
+score([(t_, slot_name.get(b['car_slot'])) for t_, b in bp if b['car_slot'] is not None], "replay instigator as reported")
+score([(t_, slot_name.get(b['car_slot'] if b['verified'] or b['suggested_car_slot'] is None else b['suggested_car_slot'])) for t_, b in bp if b['car_slot'] is not None or b['suggested_car_slot'] is not None], "verified instigator, else the car whose path reaches the pad")
+score([(t_, slot_name.get(b['car_slot'])) for t_, b in bp if b['verified']], "verified only")
