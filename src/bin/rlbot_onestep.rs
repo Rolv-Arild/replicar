@@ -211,6 +211,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         packets.push(packet);
     }
+    // Only packets with the full player count (the first packets of a recording can have fewer).
+    let max_players = packets.iter().map(|p| p.players.len()).max().unwrap_or(0);
+    packets.retain(|p| p.players.len() == max_players);
     println!("{} distinct-frame packets", packets.len());
     let n_players = packets[0].players.len();
     let mut arena = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));

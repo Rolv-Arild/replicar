@@ -2668,7 +2668,9 @@ fn plan_air_bvp(
     if rot_error > rot_tol_deg.to_radians() || omega_error > omega_tol {
         if std::env::var_os("AIR_NOSOL").is_some() {
             eprintln!(
-                "NOSOL frame {index} ticks {total} flip_time {:.3} flipping {} press {} z {:.0} speed {:.0} rot_err {:.1} deg omega_err {:.2} omega_a {:.2} omega_b {:.2}",
+                "NOSOL frame {index} pos {:.2} {:.2} ticks {total} flip_time {:.3} flipping {} press {} z {:.0} speed {:.0} rot_err {:.1} deg omega_err {:.2} omega_a {:.2} omega_b {:.2}",
+                state.phys.pos.x,
+                state.phys.pos.y,
                 state.flip_time,
                 state.is_flipping,
                 press.is_some(),
