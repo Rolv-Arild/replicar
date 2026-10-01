@@ -71,6 +71,9 @@ struct Truth {
     dodge_timeout: f32,
     supersonic: bool,
     dodge_dir: (f32, f32),
+    /// The input applied in the tick that ended at this packet: throttle, steer, pitch, yaw, roll,
+    /// then jump, boost, handbrake as 0 or 1.
+    input: [f32; 8],
 }
 
 #[derive(Default)]
@@ -132,6 +135,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pl["dodge_dir"]["x"].as_f64().unwrap_or(0.0) as f32,
                     pl["dodge_dir"]["y"].as_f64().unwrap_or(0.0) as f32,
                 ),
+                input: {
+                    let li = &pl["last_input"];
+                    let num = |k: &str| li[k].as_f64().unwrap_or(0.0) as f32;
+                    let flag = |k: &str| f32::from(u8::from(li[k].as_bool().unwrap_or(false)));
+                    [
+                        num("throttle"),
+                        num("steer"),
+                        num("pitch"),
+                        num("yaw"),
+                        num("roll"),
+                        flag("jump"),
+                        flag("boost"),
+                        flag("handbrake"),
+                    ]
+                },
             };
             by_position
                 .entry((name.clone(), key(state.pos)))
@@ -157,6 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 dodge_timeout: -1.0,
                 supersonic: false,
                 dodge_dir: (0.0, 0.0),
+                input: [0.0; 8],
             },
         );
         by_position
@@ -320,6 +339,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut rel_tick: Vec<f32> = Vec::new();
         // Full car state (not only physics): counts of mismatches with the truth, by fresh packet or not.
         let mut flags: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // name -> (n, mismatches)
+        // Exported controls against the input the server applied: per control, the absolute errors
+        // (frames where it can matter: the air controls only while airborne).
+        let control_names = ["throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"];
+        let mut control_err: Vec<Vec<f32>> = vec![Vec::new(); 16]; // [control][ground] then [control][air] at 8 + control
         let mut boost_err: Vec<f32> = Vec::new();
         let mut boost_err_fresh: Vec<f32> = Vec::new();
         let mut timeout_err: Vec<f32> = Vec::new();
@@ -567,6 +590,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "can flip now (jumped, no flip, within 1.25 s, airborne)",
                         sim_can_flip != truth_can_flip,
                     );
+                    let exported = [
+                        sim.controls.throttle,
+                        sim.controls.steer,
+                        sim.controls.pitch,
+                        sim.controls.yaw,
+                        sim.controls.roll,
+                        f32::from(u8::from(sim.controls.jump)),
+                        f32::from(u8::from(sim.controls.boost)),
+                        f32::from(u8::from(sim.controls.handbrake)),
+                    ];
+                    if std::env::var_os("STEER_TRACE").is_some()
+                        && label.starts_with("all fits")
+                        && t.air_state == 0
+                        && (sim.controls.steer - t.input[1]).abs() > 0.5
+                    {
+                        let observed = |g: usize| {
+                            frames
+                                .get(g)
+                                .and_then(|fr| fr.cars.iter().find(|c| c.player_key == car.player_key))
+                                .and_then(|c| c.inputs.steer.as_ref())
+                                .map(|v| (v.value, v.frame))
+                        };
+                        let around: Vec<String> = (-6i64..=6)
+                            .map(|d| {
+                                truth
+                                    .get(&((server_tick + d).max(0) as u64))
+                                    .and_then(|m| m.get(name))
+                                    .map_or("?".to_string(), |x| format!("{:.1}", x.input[1]))
+                            })
+                            .collect();
+                        println!(
+                            "STEER frame {f} {name} tick {server_tick} fresh {fresh} sim {:.2} truth {:.2} | observed f-1 {:?} f {:?} f+1 {:?} f+2 {:?} | truth steer ticks -6..+6: {}",
+                            sim.controls.steer,
+                            t.input[1],
+                            observed(f.wrapping_sub(1)),
+                            observed(f),
+                            observed(f + 1),
+                            observed(f + 2),
+                            around.join(" ")
+                        );
+                    }
+                    for (i, (&x, &y)) in exported.iter().zip(&t.input).enumerate() {
+                        if (2..=4).contains(&i) && t.air_state == 0 {
+                            continue;
+                        }
+                        control_err[i + if t.air_state == 0 { 0 } else { 8 }].push((x - y).abs());
+                    }
                     let e = (sim.boost - t.boost).abs();
                     boost_err.push(e);
                     if fresh {
@@ -761,6 +831,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     100.0 * *bad as f64 / (*n).max(1) as f64
                 );
             }
+            println!("    exported controls against the server's applied input (|error|; pitch, yaw, roll while airborne):");
+            for (i, name) in control_names.iter().enumerate() {
+                for (part, label) in [(0, "on the ground"), (8, "airborne")] {
+                    let errs = &mut control_err[i + part];
+                    if errs.is_empty() {
+                        continue;
+                    }
+                    let n = errs.len();
+                    let mean = errs.iter().sum::<f32>() / n as f32;
+                    let off = errs.iter().filter(|e| **e > 0.1).count();
+                    println!(
+                        "      {name:<10} {label:<13} n {n:>6} mean |err| {mean:.3}, |err| > 0.1 in {:.2}% (p99 {:.2})",
+                        100.0 * off as f64 / n as f64,
+                        quantile(errs, 0.99)
+                    );
+                }
+            }
             println!(
                 "    boost error (units of 0..100) p50/p90/p99 {:.2}/{:.2}/{:.2}; on frames with a fresh packet {:.2}/{:.2}/{:.2}",
                 quantile(&mut boost_err.clone(), 0.5),
@@ -836,6 +923,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         options.ball_hit_chains = std::env::var_os("NO_BALL_HITS").is_none();
         options.estimate_ball_car_lag_offset = std::env::var_os("NO_EST_MU").is_none();
         options.detect_lag_free_replays = std::env::var_os("NO_LAG_FREE").is_none();
+        options.packet_interval_control_rule = std::env::var_os("PACKET_CONTROL_RULE").is_some();
         tweak(&mut options);
         score(label, options)?;
     }

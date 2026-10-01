@@ -113,6 +113,13 @@ pub struct ConvertOptions {
     /// ticks; without them every state sits at its frame time) and is not used for a frame withheld
     /// by an evaluator.
     pub lookahead_ground_controls: bool,
+    /// Where a control change first seen in a frame took effect: a replicated attribute is sent with
+    /// the car's next update, so the change tick lies in `(S_prev, S_cur]`, the physical ticks of
+    /// the car's previous packet and its packet in this frame (97% of 21,000 changes on the two
+    /// remote-client games; uniform inside, median at 0.57 of the span), not a fixed `2 + gap / 2`
+    /// ticks before the frame time (mean 10.9 ticks late there, about 7 by the rule). With both
+    /// packets' exact chain lags the rule is the middle of that interval; without, the old rule.
+    pub packet_interval_control_rule: bool,
     /// Offline: fit one common timing shift of a grounded car's observed control changes against the
     /// second-next fresh car packet and drive the interval to the next fresh packet with it
     /// (`fit_ground_control_timing`). Needs the inferred packet lags; overrides
@@ -265,6 +272,7 @@ impl Default for ConvertOptions {
             infer_air_steer_controls: true,
             infer_dodge_start: true,
             lookahead_ground_controls: true,
+            packet_interval_control_rule: false,
             fit_ground_control_timing: true,
             fit_jump_timing: true,
             flip_cancel_packets: 1,
@@ -2683,6 +2691,54 @@ fn plan_air_bvp(
 pub static AIR_BVP_REFUSALS: [std::sync::atomic::AtomicUsize; 11] =
     [const { std::sync::atomic::AtomicUsize::new(0) }; 11];
 
+/// The physical tick (timeline) from which the controls first seen in frame `g` act. The middle of
+/// the car's packet interval `(S_prev, S_cur]` with exact chain lags (see
+/// `ConvertOptions::packet_interval_control_rule`), otherwise `2 + spacing / 2` ticks before the
+/// frame time.
+fn control_change_tick(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    lags: Option<&PacketLags>,
+    first_time: f32,
+    car: &observations::Car,
+    g: usize,
+) -> i64 {
+    let frames = &observations.frames;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let spacing = if g == 0 { 4 } else { timeline(g) - timeline(g - 1) };
+    packet_interval_change_tick(observations, options, lags, first_time, car, g)
+        .unwrap_or(timeline(g) - 2 - spacing / 2)
+}
+
+/// The middle of the car's packet interval `(S_prev, S_cur]` for the control change first seen in
+/// frame `g`, when both packets have exact chain lags (`packet_interval_control_rule`).
+fn packet_interval_change_tick(
+    observations: &ObservedReplay,
+    options: &ConvertOptions,
+    lags: Option<&PacketLags>,
+    first_time: f32,
+    car: &observations::Car,
+    g: usize,
+) -> Option<i64> {
+    if !options.packet_interval_control_rule {
+        return None;
+    }
+    let lags = lags?;
+    let frames = &observations.frames;
+    let timeline = |frame: usize| -> i64 {
+        ((f64::from(frames[frame].time) - f64::from(first_time)) * 120.0).round() as i64
+    };
+    let key = |frame: usize| (car.actor_id, car.actor_created_frame, frame);
+    let s_cur = timeline(g) - lags.car_actor.get(&key(g))?.round() as i64;
+    let h = (g.saturating_sub(8)..g)
+        .rev()
+        .find(|&h| lags.car_actor.contains_key(&key(h)))?;
+    let s_prev = timeline(h) - lags.car_actor[&key(h)].round() as i64;
+    (s_prev < s_cur && s_cur - s_prev <= 40).then(|| (s_prev + s_cur + 1).div_euclid(2))
+}
+
 fn air_refused<T>(reason: usize) -> Option<T> {
     AIR_BVP_REFUSALS[reason].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     None
@@ -2831,14 +2887,9 @@ fn fit_ground_control_timing(
         let Some(other) = frames[g].cars.iter().find(same_car) else {
             continue;
         };
-        let spacing = if g == 0 {
-            4
-        } else {
-            timeline(g) - timeline(g - 1)
-        };
         let controls = controls_from_observation(other, options);
         entries.push((
-            timeline(g) - 2 - spacing / 2,
+            control_change_tick(observations, options, Some(lags), first_time, other, g),
             controls.throttle,
             controls.steer,
             controls.handbrake,
@@ -3053,16 +3104,11 @@ fn fit_jump_timing(
         let Some(other) = frames[g].cars.iter().find(same_car) else {
             continue;
         };
-        let spacing = if g == 0 {
-            4
-        } else {
-            timeline(g) - timeline(g - 1)
-        };
         let mut controls = controls_from_observation(other, options);
         controls.jump = jump_odd(other);
         entries.push((
             timeline(g),
-            timeline(g) - 2 - spacing / 2,
+            control_change_tick(observations, options, Some(lags), first_time, other, g),
             controls.throttle,
             controls.steer,
             controls.handbrake,
@@ -3329,16 +3375,11 @@ fn fit_ground_flip_timing(
         let Some(other) = frames[g].cars.iter().find(same_car) else {
             continue;
         };
-        let spacing = if g == 0 {
-            4
-        } else {
-            timeline(g) - timeline(g - 1)
-        };
         let mut controls = controls_from_observation(other, options);
         controls.jump = jump_odd(other);
         entries.push((
             timeline(g),
-            timeline(g) - 2 - spacing / 2,
+            control_change_tick(observations, options, Some(lags), first_time, other, g),
             controls.throttle,
             controls.steer,
             controls.handbrake,
@@ -4506,61 +4547,134 @@ pub fn convert_observations_with(
             .withheld_frames
             .as_ref()
             .is_some_and(|w| w.get(frame_idx).copied().unwrap_or(false));
+        // Control switches inside this interval: (ticks after its start, the car whose observed
+        // controls take effect), in time order. Controls first seen at this frame act from the
+        // middle of the car's packet interval (`packet_interval_control_rule`) or else `gap / 2 - 2`
+        // ticks into the interval that ends at its state (from the start if shorter). The next
+        // frame's controls also act inside this interval when the middle of its car's packet
+        // interval falls before this frame's time (a change takes about as long to be seen as a
+        // frame lasts).
+        let span = remaining;
+        let mut switches: Vec<(u64, &observations::Car)> = Vec::new();
         if options.lookahead_ground_controls
             && packet_lags.is_some()
             && remaining > 0
             && !frame_withheld
         {
-            // Controls first seen at this frame act from `gap / 2 - 2` ticks into the interval
-            // that ends at its state (from the start if shorter).
-            let switch = (gap / 2).saturating_sub(2).min(remaining);
-            if switch > 0 {
-                step_ticks(
-                    &mut arena,
-                    switch,
-                    options.apply_hit_extra_impulse,
-                    &mut pending_dodges,
-                    &mut ground_schedules,
-                    &mut air_schedules,
-                    &mut events,
-                );
-                if options.limit_reported_velocities {
-                    limit_reported_velocities(&mut arena, slots.len());
-                }
-                remaining -= switch;
-            }
+            let interval_start = timeline_tick as i64 - gap as i64;
             for car in frame_cars.iter().copied() {
-                let Some(&(slot, created)) = actor_slots.get(&car.actor_id) else {
-                    continue;
-                };
-                if created != car.actor_created_frame || !arena.get_car_state(slot).is_on_ground {
-                    continue;
-                }
-                let next = controls_from_observation(car, options);
-                let mut controls = *arena.get_car_controls(slot);
-                controls.throttle = next.throttle;
-                controls.steer = next.steer;
-                controls.handbrake = next.handbrake;
-                controls.boost = next.boost;
-                arena.set_car_controls(slot, controls);
+                let switch = packet_interval_change_tick(
+                    observations,
+                    options,
+                    packet_lags.as_ref(),
+                    first_time,
+                    car,
+                    frame_idx,
+                )
+                .map_or((gap / 2).saturating_sub(2), |tick| {
+                    (tick - interval_start).max(0) as u64
+                });
+                switches.push((switch.min(span), car));
             }
+            if options.packet_interval_control_rule && frame_idx + 1 < observations.frames.len() {
+                let next_frame = &observations.frames[frame_idx + 1];
+                let next_active = next_frame
+                    .game_state
+                    .as_ref()
+                    .is_some_and(|state| state.value == "Active");
+                let next_withheld = options
+                    .withheld_frames
+                    .as_ref()
+                    .is_some_and(|w| w.get(frame_idx + 1).copied().unwrap_or(false));
+                if next_active && !next_withheld {
+                    for car in frame_cars.iter().copied() {
+                        let Some(next_car) = next_frame.cars.iter().find(|c| {
+                            c.actor_id == car.actor_id
+                                && c.actor_created_frame == car.actor_created_frame
+                        }) else {
+                            continue;
+                        };
+                        let Some(tick) = packet_interval_change_tick(
+                            observations,
+                            options,
+                            packet_lags.as_ref(),
+                            first_time,
+                            next_car,
+                            frame_idx + 1,
+                        ) else {
+                            continue;
+                        };
+                        let switch = tick - interval_start;
+                        if switch >= 0 && (switch as u64) < span {
+                            switches.push((switch as u64, next_car));
+                        }
+                    }
+                }
+            }
+            switches.sort_by_key(|(switch, _)| *switch);
+        }
+        let mut next_switch = 0usize;
+        // Steps the arena to `target` ticks after the interval's start, applying every control
+        // switch due on the way.
+        macro_rules! advance_to {
+            ($target:expr) => {{
+                let target: u64 = ($target).min(span);
+                while next_switch < switches.len() && switches[next_switch].0 <= target {
+                    let (switch, car) = switches[next_switch];
+                    next_switch += 1;
+                    let elapsed = span - remaining;
+                    if switch > elapsed {
+                        step_ticks(
+                            &mut arena,
+                            switch - elapsed,
+                            options.apply_hit_extra_impulse,
+                            &mut pending_dodges,
+                            &mut ground_schedules,
+                            &mut air_schedules,
+                            &mut events,
+                        );
+                        if options.limit_reported_velocities {
+                            limit_reported_velocities(&mut arena, slots.len());
+                        }
+                        remaining -= switch - elapsed;
+                    }
+                    let Some(&(slot, created)) = actor_slots.get(&car.actor_id) else {
+                        continue;
+                    };
+                    if created != car.actor_created_frame
+                        || !arena.get_car_state(slot).is_on_ground
+                    {
+                        continue;
+                    }
+                    let next = controls_from_observation(car, options);
+                    let mut controls = *arena.get_car_controls(slot);
+                    controls.throttle = next.throttle;
+                    controls.steer = next.steer;
+                    controls.handbrake = next.handbrake;
+                    controls.boost = next.boost;
+                    arena.set_car_controls(slot, controls);
+                }
+                let elapsed = span - remaining;
+                if target > elapsed {
+                    step_ticks(
+                        &mut arena,
+                        target - elapsed,
+                        options.apply_hit_extra_impulse,
+                        &mut pending_dodges,
+                        &mut ground_schedules,
+                        &mut air_schedules,
+                        &mut events,
+                    );
+                    if options.limit_reported_velocities {
+                        limit_reported_velocities(&mut arena, slots.len());
+                    }
+                    remaining -= target - elapsed;
+                }
+            }};
         }
         for lag in phase_lags {
             // Advance to this group's packet time (`lag` ticks before the frame time).
-            let stepped = remaining - lag.min(remaining);
-            step_ticks(
-                &mut arena,
-                stepped,
-                options.apply_hit_extra_impulse,
-                &mut pending_dodges,
-                &mut ground_schedules,
-                &mut air_schedules,
-                &mut events,
-            );
-            if stepped > 0 && options.limit_reported_velocities {
-                limit_reported_velocities(&mut arena, slots.len());
-            }
-            remaining = lag.min(remaining);
+            advance_to!(span - lag.min(remaining));
             if ball_lag == lag {
                 if let Some(body) = &frame.ball {
                     if simulated && ball_initialized {
@@ -5311,18 +5425,8 @@ pub fn convert_observations_with(
                 arena.set_boost_pad_state(idx, BoostPadState { cooldown: 20.0 });
             }
         }
-        step_ticks(
-            &mut arena,
-            remaining,
-            options.apply_hit_extra_impulse,
-            &mut pending_dodges,
-            &mut ground_schedules,
-            &mut air_schedules,
-            &mut events,
-        );
-        if remaining > 0 && options.limit_reported_velocities {
-            limit_reported_velocities(&mut arena, slots.len());
-        }
+        advance_to!(span);
+        let _ = remaining;
         if options.sync_boost_pad_pickups {
             for pickup in &frame.pad_pickups {
                 let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {
