@@ -6230,6 +6230,7 @@ mod tests {
             ball: vec![None; 7],
             cars: vec![None; 7],
             car_actor: HashMap::new(),
+            ..PacketLags::default()
         };
         for frame in fresh_frames {
             lags.car_actor.insert((1, 0, frame), 0.0);
@@ -6408,6 +6409,7 @@ mod tests {
             ball: vec![None; 7],
             cars: vec![None; 7],
             car_actor: HashMap::new(),
+            ..PacketLags::default()
         };
         for frame in fresh_frames {
             lags.car_actor.insert((1, 0, frame), 0.0);
@@ -6594,6 +6596,7 @@ mod tests {
             ball: vec![None; 7],
             cars: vec![None; 7],
             car_actor: HashMap::new(),
+            ..PacketLags::default()
         };
         for frame in fresh_frames {
             lags.car_actor.insert((1, 0, frame), 0.0);
@@ -6796,6 +6799,7 @@ mod tests {
             ball: vec![None; 7],
             cars: vec![None; 7],
             car_actor: HashMap::new(),
+            ..PacketLags::default()
         };
         for frame in [0usize, 4] {
             lags.car_actor.insert((1, 0, frame), 0.0);
@@ -6944,6 +6948,7 @@ mod tests {
             ball: vec![None; 9],
             cars: vec![None; 9],
             car_actor: HashMap::new(),
+            ..PacketLags::default()
         };
         for frame in fresh_frames {
             lags.car_actor.insert((1, 0, frame), 0.0);
