@@ -104,6 +104,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.apply_hit_extra_impulse = env::args_os().any(|arg| arg == "--apply-hit-impulse");
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
+    options.ball_hit_chains = !env::args_os().any(|arg| arg == "--no-ball-hit-chains");
+    options.estimate_ball_car_lag_offset =
+        env::args_os().any(|arg| arg == "--estimate-ball-car-offset");
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     // Parity of each car's dodge counter at its previous residual, to spot the first packet after
     // an activation.

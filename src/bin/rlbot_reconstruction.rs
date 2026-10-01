@@ -832,6 +832,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (label, tweak) in variants {
         let mut options = ConvertOptions::default();
         options.zero_packet_lag = zero_lag;
+        options.ball_car_lag_offset = std::env::var("LAG_MU").ok().and_then(|v| v.parse().ok());
+        options.ball_hit_chains = std::env::var_os("NO_BALL_HITS").is_none();
+        options.estimate_ball_car_lag_offset = std::env::var_os("NO_EST_MU").is_none();
         tweak(&mut options);
         score(label, options)?;
     }

@@ -55,3 +55,37 @@ for kind in ('ball', 'car'):
     for lo,hi in ((3,6),(6,12),(12,30),(30,1000)):
         m=(L>=lo)&(L<hi)
         if m.sum()>3: print(f"   length {lo}-{hi}: n {m.sum()}  |err| p50/p90 {np.round(np.percentile(np.abs(E[m]),[50,90]),2)}")
+# feasible width of a run's level from the true lags and the frame windows (min lag + min (window - lag))
+ft = {row['f']: row['t'] for row in rows}
+def window(f): return (ft[f] - ft.get(f-1, ft[f]-1/30))*120
+widths = []
+for o, c in runs:
+    if len(c) < 8: continue
+    lag_true = np.array([true[i] for i in c]); w = np.array([window(recs[i][0]) for i in c])
+    widths.append((o == 'ball', len(c), lag_true.min() + (w - lag_true).min(), np.median(w)))
+wd = np.array(widths, float)
+for isball in (1, 0):
+    m = wd[:, 0] == isball
+    if m.sum(): print(("ball" if isball else "car"), "runs>=8:", m.sum(), "feasible level width (ticks) p10/p50/p90", np.round(np.percentile(wd[m, 2], [10, 50, 90]), 1), "median window", np.median(wd[m, 3]))
+# same-frame ball vs car true offsets: do they come from one server snapshot?
+byf = collections.defaultdict(dict)
+for r in recs: byf[r[0]][r[1]] = r[2]
+d_same = [v[o] - v['ball'] for f, v in byf.items() if 'ball' in v for o in v if o != 'ball']
+d_same = np.array(d_same)
+print("same-frame car-ball server tick difference: n", len(d_same), "p10/p50/p90", np.percentile(d_same, [10, 50, 90]), "fraction zero", np.mean(d_same == 0).round(3), "within 1", np.mean(abs(d_same) <= 1).round(3))
+items = [(f, o, v[o] - v['ball']) for f, v in byf.items() if 'ball' in v for o in v if o != 'ball']
+items.sort(key=lambda x: x[0])
+fs = np.array([x[0] for x in items]); dd = np.array([x[2] for x in items], float)
+blocks = np.array_split(np.arange(len(dd)), 8)
+print("mean diff by time block:", [round(dd[b].mean(), 2) for b in blocks], " std within:", [round(dd[b].std(), 2) for b in blocks])
+percar = collections.defaultdict(list)
+for f, o, x in items: percar[o[1]].append(x)
+print("per car mean:", {k: (round(np.mean(v), 2), round(np.std(v), 2), len(v)) for k, v in percar.items()})
+# run-level: mean diff within contiguous car-run (by actor, split when gap>40 frames)
+cc = []
+for f, v in byf.items():
+    cars_ = [v[o] for o in v if o != 'ball']
+    for i in range(len(cars_)):
+        for j in range(i + 1, len(cars_)): cc.append(cars_[i] - cars_[j])
+cc = np.array(cc, float)
+print("same-frame car-car tick difference: n", len(cc), "mean", cc.mean().round(3), "std", cc.std().round(2))

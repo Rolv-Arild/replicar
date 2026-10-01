@@ -177,6 +177,20 @@ pub struct ConvertOptions {
     /// pairs more than 0.25 tick from one), so lag differences are exact instead of independently
     /// rounded estimates, and fix the absolute tick with the packets' real-time windows.
     pub exact_tick_lag_chains: bool,
+    /// Continue a ball chain across a hit: the exact free-flight paths before and after it meet at
+    /// the hit, which fixes the ticks between the two packets (`ball_hit_interval_ticks`). Joins
+    /// the ball runs on both sides of a hit into one run with one lag level.
+    pub ball_hit_chains: bool,
+    /// Place the chain runs of ball and cars on common lag levels: in one frame the ball's physical
+    /// tick minus a car's has this mean (ticks; measured 3.1 on the two remote-client games, both
+    /// stable across cars, minutes and games) and cars have equal means, so each run's level is
+    /// pulled toward the levels of the runs it shares frames with (`place_ball_runs`), inside the
+    /// run's feasible range. `None` keeps each run at the middle of its own range.
+    pub ball_car_lag_offset: Option<f32>,
+    /// Without `ball_car_lag_offset`, estimate it from the hits: the offset at which the hitting
+    /// car's hitbox just touches the ball at the last state before the median hit
+    /// (`estimate_ball_car_offset`). Needs 20 bridged hits.
+    pub estimate_ball_car_lag_offset: bool,
     /// Offline: infer when inside its frame each ball and car packet was generated (its lag behind
     /// the frame time, in ticks) from chained packet motion, and apply corrections at that time.
     pub infer_packet_lag: bool,
@@ -264,6 +278,9 @@ impl Default for ConvertOptions {
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
             exact_tick_lag_chains: true,
+            ball_hit_chains: true,
+            ball_car_lag_offset: None,
+            estimate_ball_car_lag_offset: true,
             infer_packet_lag: true,
             infer_air_roll_from_handbrake: true,
             infer_air_controls_from_lookahead: true,
@@ -1613,6 +1630,291 @@ fn finish_lag_run(run: &[(usize, f32, f32)], lo: f32, hi: f32, mut assign: impl 
     }
 }
 
+fn packet_pos(car: &observations::Car, frame: usize) -> [f32; 3] {
+    car.body
+        .position
+        .as_ref()
+        .filter(|v| v.frame == frame)
+        .map_or([0.0; 3], |v| v.value)
+}
+
+fn packet_vel(car: &observations::Car, frame: usize) -> [f32; 3] {
+    car.body
+        .linear_velocity
+        .as_ref()
+        .filter(|v| v.frame == frame)
+        .map_or([0.0; 3], |v| v.value)
+}
+
+/// The ball-minus-car offset at which the median hit is a touch. The gap between the hitting car
+/// and the ball at the last state before a hit shrinks as the offset grows (the car is placed
+/// earlier relative to the ball). It is evaluated on a grid of offsets with the runs placed by
+/// `place_ball_runs`; the first grid step where the median gap drops to zero or below is
+/// interpolated linearly. (On the two remote-client games, truth 3.1 ticks: 2.75 and 2.97.)
+fn estimate_ball_car_offset(
+    hits: &[BallHit],
+    ball_runs: &[RawRun],
+    car_runs: &[((i32, usize), RawRun)],
+    samples: &HashMap<(i32, usize, usize), CarSample>,
+    hitboxes: &HashMap<(i32, usize), CarBodyConfig>,
+) -> Option<f32> {
+    const STEP: f32 = 0.5;
+    let mut previous: Option<(f32, f32)> = None;
+    for step in -8..=20 {
+        let offset = step as f32 * STEP;
+        let mut b = ball_runs.to_vec();
+        place_ball_runs(&mut b, car_runs, offset);
+        let (gap, _) = median_hit_gap(hits, &b, car_runs, samples, hitboxes)?;
+        if gap <= 0.0 {
+            let (before, gap_before) = previous?;
+            return Some(before + STEP * gap_before / (gap_before - gap));
+        }
+        previous = Some((offset, gap));
+    }
+    None
+}
+
+/// One run of chained packets on the integer tick timeline: `(frame, K)` entries (physical tick of
+/// each packet relative to the run's first), the feasible integer starts `lo..=hi` of the run (the
+/// physical tick of the entry with `K = 0`), and the start chosen so far.
+#[derive(Debug, Clone)]
+struct RawRun {
+    entries: Vec<(usize, i64)>,
+    lo: i64,
+    hi: i64,
+    start: i64,
+}
+
+/// Places the ball runs relative to the car runs. A car's physical tick in a frame is
+/// `tick - lag` with a lag spread uniformly over the frame window, so a car run is already
+/// centred by its own window bounds (`chain_packet_lags_exact`). In one frame the ball's physical
+/// tick minus a car's is `offset` on average (standard deviation 2.55 ticks per pair, measured on
+/// the two remote-client games; the offset 3.1 there, stable across cars, minutes and games), so
+/// every ball run starts at the mean over its frames of (the frame's car ticks + offset - its own
+/// K), rounded and clamped to its feasible range. Car runs do not move: pulling them toward
+/// the ball's noisy levels made the cars worse.
+fn place_ball_runs(ball_runs: &mut [RawRun], car_runs: &[((i32, usize), RawRun)], offset: f32) {
+    let mut car_ticks: HashMap<usize, (f64, usize)> = HashMap::new();
+    for (_, run) in car_runs {
+        for &(frame, k) in &run.entries {
+            let entry = car_ticks.entry(frame).or_default();
+            entry.0 += (run.start + k) as f64;
+            entry.1 += 1;
+        }
+    }
+    for run in ball_runs.iter_mut() {
+        let (mut sum, mut count) = (0.0f64, 0usize);
+        for &(frame, k) in &run.entries {
+            if let Some(&(total, n)) = car_ticks.get(&frame) {
+                // The mean car tick of the frame, one term per car.
+                sum += n as f64 * (total / n as f64 + f64::from(offset) - k as f64);
+                count += n;
+            }
+        }
+        if count > 0 {
+            run.start = ((sum / count as f64).round() as i64).clamp(run.lo, run.hi);
+        }
+    }
+}
+
+/// One tick of the ball in free flight (gravity, then the exponential damping; the position moves
+/// with the new velocity; measured against server states: 0.008 UU/s and 0.005 UU per tick).
+fn ball_free_step(pos: [f32; 3], vel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    const DT: f32 = 1.0 / 120.0;
+    let keep = 0.97f32.powf(DT);
+    let vel = [vel[0] * keep, vel[1] * keep, vel[2] * keep - 650.0 * DT];
+    (
+        [pos[0] + vel[0] * DT, pos[1] + vel[1] * DT, pos[2] + vel[2] * DT],
+        vel,
+    )
+}
+
+/// The inverse of `ball_free_step`: the state one tick earlier.
+fn ball_free_step_back(pos: [f32; 3], vel: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    const DT: f32 = 1.0 / 120.0;
+    let keep = 0.97f32.powf(DT);
+    let before = [pos[0] - vel[0] * DT, pos[1] - vel[1] * DT, pos[2] - vel[2] * DT];
+    (
+        before,
+        [vel[0] / keep, vel[1] / keep, (vel[2] + 650.0 * DT) / keep],
+    )
+}
+
+/// Whether a ball position is in free flight: away from the floor, ceiling, side walls and goals
+/// (a bounce or a wall hit changes the velocity just like a hit does).
+fn ball_in_free_air(pos: [f32; 3]) -> bool {
+    pos[2] > 125.0 && pos[2] < 1900.0 && pos[0].abs() < 3900.0 && pos[1].abs() < 4900.0
+}
+
+/// Elapsed ticks between two ball packets with a hit between them. The ball follows its exact
+/// free-flight path up to the hit, and after it the exact path leading to the second packet. The
+/// two paths meet at the hit up to the part of the hit tick spent moving with the new velocity:
+/// the displacement of that tick lies along the velocity change, by a fraction (measured between
+/// -0.4 and +0.4 of one tick of the velocity change at the 10th to 90th percentile; the window
+/// here is wider). The candidate elapsed time `d` (ticks between the packets, within the real-time
+/// bounds `d_lo..=d_hi` of the frame windows) that leaves the smallest component across the
+/// velocity change wins; it must beat every other candidate by more than `HIT_MARGIN` UU, or the
+/// pair is not used.
+fn ball_hit_interval_ticks(
+    a: &ChainPacket,
+    b: &ChainPacket,
+    d_lo: i64,
+    d_hi: i64,
+) -> Option<(i64, usize, [f32; 3])> {
+    const MIN_VELOCITY_CHANGE: f32 = 400.0;
+    const HIT_MARGIN: f32 = 2.0;
+    const ALONG_MIN: f32 = -0.6;
+    const ALONG_MAX: f32 = 1.2;
+    const DT: f32 = 1.0 / 120.0;
+    let dv = [b.vel[0] - a.vel[0], b.vel[1] - a.vel[1], b.vel[2] - a.vel[2]];
+    let dv_norm = (dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]).sqrt();
+    if dv_norm < MIN_VELOCITY_CHANGE || d_hi < d_lo.max(1) || d_hi > 64 {
+        return None;
+    }
+    let dir = [dv[0] / dv_norm, dv[1] / dv_norm, dv[2] / dv_norm];
+    let steps = d_hi as usize;
+    // Positions along the pre-hit path (forward from a) and the post-hit path (back from b), as
+    // long as the ball stays in free flight.
+    let mut pre = vec![a.pos];
+    let (mut p, mut v) = (a.pos, a.vel);
+    for _ in 0..steps {
+        (p, v) = ball_free_step(p, v);
+        if !ball_in_free_air(p) {
+            break;
+        }
+        pre.push(p);
+    }
+    let mut post = vec![b.pos];
+    let (mut p, mut v) = (b.pos, b.vel);
+    for _ in 0..steps {
+        (p, v) = ball_free_step_back(p, v);
+        if !ball_in_free_air(p) {
+            break;
+        }
+        post.push(p);
+    }
+    if !ball_in_free_air(a.pos) || !ball_in_free_air(b.pos) {
+        return None;
+    }
+    let mut costs: Vec<(i64, usize, f32)> = Vec::new();
+    for d in d_lo.max(1)..=d_hi {
+        let mut best = f32::INFINITY;
+        let mut best_t1 = 0;
+        for t1 in 0..=(d as usize) {
+            let t2 = d as usize - t1;
+            let (Some(pa), Some(pb)) = (pre.get(t1), post.get(t2)) else {
+                continue;
+            };
+            let r = [pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]];
+            let along = r[0] * dir[0] + r[1] * dir[1] + r[2] * dir[2];
+            let fraction = along / (dv_norm * DT);
+            if !(ALONG_MIN..=ALONG_MAX).contains(&fraction) {
+                continue;
+            }
+            let across = [r[0] - along * dir[0], r[1] - along * dir[1], r[2] - along * dir[2]];
+            let across = (across[0] * across[0] + across[1] * across[1] + across[2] * across[2]).sqrt();
+            if across < best {
+                best = across;
+                best_t1 = t1;
+            }
+        }
+        costs.push((d, best_t1, best));
+    }
+    costs.sort_by(|x, y| x.2.total_cmp(&y.2));
+    let (first, second) = (costs.first()?, costs.get(1));
+    if !first.2.is_finite() {
+        return None;
+    }
+    match second {
+        Some(second) if second.2 - first.2 <= HIT_MARGIN => None,
+        // The last state before the hit: `t1` ticks after the first packet.
+        _ => Some((first.0, first.1, pre[first.1])),
+    }
+}
+
+/// A hit between two ball packets that the chain bridged: the last free-flight state before it.
+#[derive(Debug, Clone)]
+struct BallHit {
+    frame_a: usize,
+    frame_b: usize,
+    ticks_after_a: usize,
+    ball_pos: [f32; 3],
+}
+
+/// One fresh car sample for the contact check: replay position, velocity, rotation and angular
+/// velocity at a frame.
+#[derive(Debug, Clone, Copy)]
+struct CarSample {
+    pos: glam::Vec3A,
+    vel: glam::Vec3A,
+    rot: Quat,
+    ang: glam::Vec3A,
+}
+
+/// Median over the bridged hits of the gap between the hitting car's hitbox and the ball at the
+/// last state before the hit (the closest car, its fresh samples extrapolated to that tick;
+/// negative: overlapping), for run starts as they are now. The extrapolation uses the car's
+/// velocity, gravity when it is off the ground, and its angular velocity: over a few ticks the
+/// error is a few UU. Returns the median and the number of hits used.
+fn median_hit_gap(
+    hits: &[BallHit],
+    ball_runs: &[RawRun],
+    car_runs: &[((i32, usize), RawRun)],
+    samples: &HashMap<(i32, usize, usize), CarSample>,
+    hitboxes: &HashMap<(i32, usize), CarBodyConfig>,
+) -> Option<(f32, usize)> {
+    const MAX_EXTRAPOLATION_TICKS: i64 = 12;
+    let mut gaps: Vec<f32> = Vec::new();
+    for hit in hits {
+        let Some(run) = ball_runs.iter().find(|r| {
+            r.entries.iter().any(|e| e.0 == hit.frame_a) && r.entries.iter().any(|e| e.0 == hit.frame_b)
+        }) else {
+            continue;
+        };
+        let Some(&(_, ka)) = run.entries.iter().find(|e| e.0 == hit.frame_a) else {
+            continue;
+        };
+        let tick = run.start + ka + hit.ticks_after_a as i64;
+        let ball = glam::Vec3A::from(hit.ball_pos);
+        let mut best: Option<f32> = None;
+        for (key, car_run) in car_runs {
+            let Some(&(frame, k)) = car_run
+                .entries
+                .iter()
+                .min_by_key(|(_, k)| (car_run.start + k - tick).abs())
+            else {
+                continue;
+            };
+            let delta = tick - (car_run.start + k);
+            if delta.abs() > MAX_EXTRAPOLATION_TICKS {
+                continue;
+            }
+            let (Some(sample), Some(config)) = (samples.get(&(key.0, key.1, frame)), hitboxes.get(key)) else {
+                continue;
+            };
+            let seconds = delta as f32 / 120.0;
+            let airborne = sample.pos.z > 30.0;
+            let gravity = if airborne { -650.0 } else { 0.0 };
+            let pos = sample.pos
+                + sample.vel * seconds
+                + glam::Vec3A::new(0.0, 0.0, 0.5 * gravity * seconds * seconds);
+            let rot = glam::Mat3A::from_quat(Quat::from_scaled_axis((sample.ang * seconds).into()) * sample.rot);
+            let local = rot.transpose() * (ball - pos) - config.hitbox_pos_offset;
+            let q = local.abs() - config.hitbox_size * 0.5;
+            let gap = q.max(glam::Vec3A::ZERO).length() + q.max_element().min(0.0) - 91.25;
+            best = Some(best.map_or(gap, |b: f32| b.min(gap)));
+        }
+        if let Some(gap) = best {
+            gaps.push(gap);
+        }
+    }
+    if gaps.len() < 20 {
+        return None;
+    }
+    gaps.sort_by(|a, b| a.total_cmp(b));
+    Some((gaps[gaps.len() / 2], gaps.len()))
+}
+
 /// Exact whole-tick chains. Elapsed ticks between chained packets are snapped to integers (pairs
 /// more than 0.25 tick from one are rejected), so each packet's physical tick is `S = S0 + K` with
 /// integer `K`. A packet was generated no later than its frame time and no earlier than the
@@ -1625,7 +1927,8 @@ fn chain_packet_lags_exact(
     observations: &ObservedReplay,
     packets: &[ChainPacket],
     valid: impl Fn(&ChainPacket, &ChainPacket) -> bool,
-    mut assign: impl FnMut(usize, f32),
+    fallback: impl Fn(&ChainPacket, &ChainPacket, i64, i64) -> Option<i64>,
+    runs: &mut Vec<RawRun>,
 ) {
     let frames = &observations.frames;
     let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
@@ -1651,7 +1954,7 @@ fn chain_packet_lags_exact(
     // (frame, K): physical tick relative to the first packet of the run.
     let mut run: Vec<(usize, i64)> = Vec::new();
     let (mut lo, mut hi) = (i64::MIN, i64::MAX);
-    let finish = |run: &[(usize, i64)], lo: i64, hi: i64, assign: &mut dyn FnMut(usize, f32)| {
+    let finish = |run: &[(usize, i64)], lo: i64, hi: i64, runs: &mut Vec<RawRun>| {
         if run.len() < 2 || lo > hi {
             return;
         }
@@ -1671,9 +1974,12 @@ fn chain_packet_lags_exact(
             .map(|&(s, _)| s)
             .collect();
         let start = tied[tied.len() / 2];
-        for &(frame, k) in run {
-            assign(frame, (timeline(frame) - (start + k)).max(0) as f32);
-        }
+        runs.push(RawRun {
+            entries: run.to_vec(),
+            lo,
+            hi,
+            start,
+        });
     };
     for pair in packets.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
@@ -1685,8 +1991,14 @@ fn chain_packet_lags_exact(
         } else {
             None
         };
+        // Physical ticks between two packets lie between the frame times that bracket them.
+        let interval = interval.or_else(|| {
+            let d_lo = timeline(b.frame.saturating_sub(1)) - timeline(a.frame);
+            let d_hi = timeline(b.frame) - timeline(a.frame.saturating_sub(1));
+            fallback(a, b, d_lo, d_hi)
+        });
         let Some(interval) = interval else {
-            finish(&run, lo, hi, &mut assign);
+            finish(&run, lo, hi, runs);
             run.clear();
             (lo, hi) = (i64::MIN, i64::MAX);
             continue;
@@ -1703,7 +2015,7 @@ fn chain_packet_lags_exact(
             run.push((b.frame, k_next));
             (lo, hi) = (new_lo, new_hi);
         } else {
-            finish(&run, lo, hi, &mut assign);
+            finish(&run, lo, hi, runs);
             let (la, ha) = bounds(a.frame, 0);
             let (lb, hb) = bounds(b.frame, interval);
             let (start_lo, start_hi) = (la.max(lb), ha.min(hb));
@@ -1716,7 +2028,7 @@ fn chain_packet_lags_exact(
             }
         }
     }
-    finish(&run, lo, hi, &mut assign);
+    finish(&run, lo, hi, runs);
 }
 
 /// Walks one chain of fresh packets. `valid(prev, next)` decides whether a pair's implied interval
@@ -1726,10 +2038,12 @@ fn chain_packet_lags(
     packets: &[ChainPacket],
     exact: bool,
     valid: impl Fn(&ChainPacket, &ChainPacket) -> bool,
+    fallback: impl Fn(&ChainPacket, &ChainPacket, i64, i64) -> Option<i64>,
+    runs: &mut Vec<RawRun>,
     mut assign: impl FnMut(usize, f32),
 ) {
     if exact {
-        return chain_packet_lags_exact(observations, packets, valid, assign);
+        return chain_packet_lags_exact(observations, packets, valid, fallback, runs);
     }
     let frame_window = |frame: usize| -> f32 {
         let previous = frame.saturating_sub(1);
@@ -1826,6 +2140,8 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                 .and_then(|body| fresh(body, frame.index))
         })
         .collect();
+    let mut ball_runs: Vec<RawRun> = Vec::new();
+    let ball_hits: std::cell::RefCell<Vec<BallHit>> = std::cell::RefCell::new(Vec::new());
     chain_packet_lags(
         observations,
         &ball_packets,
@@ -1847,12 +2163,29 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                 && cosine >= 0.97
                 && (na - nb).abs() <= 0.25 * na.max(nb)
         },
+        |a, b, d_lo, d_hi| {
+            let (d, ticks_after_a, ball_pos) = (options.ball_hit_chains
+                && bridge_ok(a.frame, b.frame)
+                && b.frame - a.frame <= 3)
+                .then(|| ball_hit_interval_ticks(a, b, d_lo, d_hi))
+                .flatten()?;
+            ball_hits.borrow_mut().push(BallHit {
+                frame_a: a.frame,
+                frame_b: b.frame,
+                ticks_after_a,
+                ball_pos,
+            });
+            Some(d)
+        },
+        &mut ball_runs,
         |frame, lag| lags.ball[frame] = Some(lag),
     );
 
     // Cars: fast, smooth motion between packets of one actor lifetime (dodges excluded).
     let mut chains: HashMap<(i32, usize), Vec<ChainPacket>> = HashMap::new();
     let mut dodge_frames: HashSet<(i32, usize, usize)> = HashSet::new();
+    let mut samples: HashMap<(i32, usize, usize), CarSample> = HashMap::new();
+    let mut hitboxes: HashMap<(i32, usize), CarBodyConfig> = HashMap::new();
     for frame in frames {
         for car in &frame.cars {
             if car
@@ -1868,11 +2201,41 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                     .entry((car.actor_id, car.actor_created_frame))
                     .or_default()
                     .push(packet);
+                let key = (car.actor_id, car.actor_created_frame);
+                hitboxes.entry(key).or_insert_with(|| {
+                    car.body_product_id
+                        .as_ref()
+                        .and_then(|v| hitbox_for_body_product(v.value))
+                        .map_or(CarBodyConfig::OCTANE, |(_, config)| config)
+                });
+                if let Some(rot) = car
+                    .body
+                    .rotation_xyzw
+                    .as_ref()
+                    .and_then(|r| quaternion(r.value))
+                {
+                    let ang = car
+                        .body
+                        .angular_velocity_replay_units
+                        .as_ref()
+                        .map_or([0.0; 3], |v| v.value);
+                    samples.insert(
+                        (car.actor_id, car.actor_created_frame, frame.index),
+                        CarSample {
+                            pos: glam::Vec3A::from(packet_pos(car, frame.index)),
+                            vel: glam::Vec3A::from(packet_vel(car, frame.index)),
+                            rot,
+                            ang: glam::Vec3A::from(ang) * 0.01,
+                        },
+                    );
+                }
             }
         }
     }
     let mut per_frame: Vec<Vec<f32>> = vec![Vec::new(); frames.len()];
+    let mut car_runs: Vec<((i32, usize), RawRun)> = Vec::new();
     for ((actor, created), packets) in &chains {
+        let mut runs: Vec<RawRun> = Vec::new();
         chain_packet_lags(
             observations,
             packets,
@@ -1891,11 +2254,43 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                     && (na - nb).abs() <= 0.4 * na.max(nb)
                     && (a.frame..=b.frame).all(|f| !dodge_frames.contains(&(*actor, *created, f)))
             },
+            |_, _, _, _| None,
+            &mut runs,
             |frame, lag| {
                 per_frame[frame].push(lag);
                 lags.car_actor.insert((*actor, *created, frame), lag);
             },
         );
+        car_runs.extend(runs.into_iter().map(|run| ((*actor, *created), run)));
+    }
+    let offset = options.ball_car_lag_offset.or_else(|| {
+        options
+            .estimate_ball_car_lag_offset
+            .then(|| {
+                estimate_ball_car_offset(&ball_hits.borrow(), &ball_runs, &car_runs, &samples, &hitboxes)
+            })
+            .flatten()
+    });
+    if std::env::var_os("LAG_MU_PROFILE").is_some() {
+        eprintln!("ball-car lag offset used: {offset:?}");
+    }
+    if let Some(offset) = offset {
+        place_ball_runs(&mut ball_runs, &car_runs, offset);
+    }
+    // Exact runs: the lag of an entry is the frame's tick minus its physical tick.
+    let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
+    let timeline = |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
+    for run in &ball_runs {
+        for &(frame, k) in &run.entries {
+            lags.ball[frame] = Some((timeline(frame) - (run.start + k)).max(0) as f32);
+        }
+    }
+    for ((actor, created), run) in &car_runs {
+        for &(frame, k) in &run.entries {
+            let lag = (timeline(frame) - (run.start + k)).max(0) as f32;
+            per_frame[frame].push(lag);
+            lags.car_actor.insert((*actor, *created, frame), lag);
+        }
     }
     for (frame, values) in per_frame.iter_mut().enumerate() {
         if !values.is_empty() {
@@ -5126,6 +5521,56 @@ mod tests {
 
         car.body.linear_velocity.as_mut().unwrap().frame = 0;
         assert!(dodge_impulse_unobserved(&car, 1, &sim_state));
+    }
+
+    #[test]
+    fn ball_hit_interval_recovers_the_ticks_between_packets() {
+        // A ball in free flight, hit at tick 7 (its velocity changes by 1500 UU/s), seen at ticks 3
+        // and 14: the two exact paths meet at the hit, so the interval between the packets is 11.
+        let mut pos = [100.0f32, -300.0, 600.0];
+        let mut vel = [1200.0f32, 200.0, 300.0];
+        let mut packets = Vec::new();
+        for tick in 0..=14 {
+            if tick == 3 || tick == 14 {
+                packets.push(ChainPacket { frame: tick, pos, vel });
+            }
+            if tick == 7 {
+                vel = [vel[0] - 900.0, vel[1] + 1100.0, vel[2] + 400.0];
+            }
+            (pos, vel) = ball_free_step(pos, vel);
+        }
+        let (a, b) = (&packets[0], &packets[1]);
+        let (d, ticks_after_a, _) = ball_hit_interval_ticks(a, b, 6, 16).expect("hit interval");
+        assert_eq!(d, 11);
+        assert_eq!(ticks_after_a, 4);
+        // The step and its inverse agree.
+        let (p, v) = ball_free_step(a.pos, a.vel);
+        let (p0, v0) = ball_free_step_back(p, v);
+        for i in 0..3 {
+            assert!((p0[i] - a.pos[i]).abs() < 1e-2 && (v0[i] - a.vel[i]).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn ball_runs_are_placed_relative_to_the_cars() {
+        // A car run starts at tick 100 and a ball run overlaps it in frames 0..4; with an offset
+        // of 3 ticks the ball run's start is the car's physical tick plus 3, clamped to the range.
+        let car = RawRun {
+            entries: (0..5).map(|f| (f, 8 * f as i64)).collect(),
+            lo: 90,
+            hi: 110,
+            start: 100,
+        };
+        let mut ball = vec![RawRun {
+            entries: (0..5).map(|f| (f, 8 * f as i64)).collect(),
+            lo: 90,
+            hi: 110,
+            start: 95,
+        }];
+        place_ball_runs(&mut ball, &[((1, 0), car.clone())], 3.0);
+        assert_eq!(ball[0].start, 103);
+        place_ball_runs(&mut ball, &[((1, 0), car)], 30.0);
+        assert_eq!(ball[0].start, 110);
     }
 
     #[test]
