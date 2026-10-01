@@ -90,6 +90,11 @@ pub struct ConvertOptions {
     pub gate_dodge_on_observed_impulse: bool,
     /// Reconcile boost pad pickups and cooldowns from replay pickup data.
     pub sync_boost_pad_pickups: bool,
+    /// Demolish the victim car in the simulation when the replay reports a demolition
+    /// (`ReplicatedDemolish*`), instead of relying on RocketSim's own bump detection (which found 10
+    /// of 12 on a host replay and 8 of 12 on a client replay of the remote-client games). The car
+    /// stays demolished for RocketSim's respawn delay even while the replay's car actor is linked.
+    pub apply_observed_demolitions: bool,
     /// Keep every boost pad on cooldown inside the simulation, so a simulated car never picks boost up
     /// by driving over a pad (a car whose simulated position is off by a few UU picks up a pad the real
     /// car missed, or the reverse): the boost amount then comes only from the replay's own updates
@@ -271,6 +276,7 @@ impl Default for ConvertOptions {
             gate_jump_on_observed_impulse: true,
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
+            apply_observed_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
             boost_pickup_lookahead: false,
@@ -4447,6 +4453,8 @@ pub fn convert_observations_with(
     let mut ball_initialized = false;
     let mut pending_dodges: Vec<PendingDodge> = Vec::new();
     let mut ground_schedules: Vec<GroundSchedule> = Vec::new();
+    // Timeline tick until which an observed demolition keeps a slot demolished.
+    let mut demo_hold_until: HashMap<usize, u64> = HashMap::new();
     // Informative shifts chosen by the ground timing fit, per car actor lifetime.
     let mut car_shifts: HashMap<(i32, usize), Vec<i64>> = HashMap::new();
     let mut air_schedules: Vec<AirSchedule> = Vec::new();
@@ -4879,7 +4887,8 @@ pub fn convert_observations_with(
                             arena.set_car_state(slot, car_state);
                         }
                     }
-                    if let Some(residual) = position_residual(
+                    // A demolished car is not simulated: comparing it with a packet means nothing.
+                    if let Some(residual) = (!car_state.is_demoed).then(|| position_residual(
                         frame.index,
                         Some(car.actor_id),
                         &car.body,
@@ -4887,7 +4896,7 @@ pub fn convert_observations_with(
                         &car_state.phys,
                         Some(car_state.is_on_ground),
                         &observations.frames,
-                    ) {
+                    )).flatten() {
                         frame_residuals.push(residual);
                     }
                 }
@@ -4898,7 +4907,10 @@ pub fn convert_observations_with(
                 };
                 let mut dirty = apply_body(&mut state.phys, &car.body, frame.index, new_lifetime)
                     || new_lifetime;
-                if car.player_link_active && state.is_demoed {
+                if car.player_link_active
+                    && state.is_demoed
+                    && demo_hold_until.get(&slot).is_none_or(|&until| timeline_tick >= until)
+                {
                     state.is_demoed = false;
                     state.demo_respawn_timer = 0.0;
                     diagnostics.active_pawn_demo_corrections += 1;
@@ -5538,6 +5550,31 @@ pub fn convert_observations_with(
         }
         advance_to!(span);
         let _ = remaining;
+        if options.apply_observed_demolitions && simulated {
+            for event in &frame.events {
+                let observations::Event::Demolish {
+                    source,
+                    victim_car: Some(victim),
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                if *source == "goal_explosion" {
+                    continue;
+                }
+                let Some(&(slot, _)) = actor_slots.get(victim) else {
+                    continue;
+                };
+                let mut state = *arena.get_car_state(slot);
+                if !state.is_demoed {
+                    state.is_demoed = true;
+                    state.demo_respawn_timer = 3.0;
+                    arena.set_car_state(slot, state);
+                }
+                demo_hold_until.insert(slot, timeline_tick + 360);
+            }
+        }
         if options.sync_boost_pad_pickups {
             for pickup in &frame.pad_pickups {
                 let pad_idx = if let Some(&idx) = pad_actor_to_index.get(&pickup.pad_actor_id) {

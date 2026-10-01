@@ -105,6 +105,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
     options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
     options.ball_hit_chains = !env::args_os().any(|arg| arg == "--no-ball-hit-chains");
+    options.apply_observed_demolitions =
+        !env::args_os().any(|arg| arg == "--no-observed-demolitions");
     options.per_car_control_shift = !env::args_os().any(|arg| arg == "--no-per-car-control-shift");
     options.estimate_ball_car_lag_offset =
         env::args_os().any(|arg| arg == "--estimate-ball-car-offset");

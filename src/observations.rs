@@ -122,6 +122,20 @@ pub struct Player {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     GoalScoredOn { team: u8 },
+    /// A demolition replicated on the victim car (`ReplicatedDemolish*`). Car fields are replay car
+    /// actor ids (the player a car belongs to comes from `Frame::cars`); velocities are in replay
+    /// units. The same demolition can be replicated in more than one update.
+    Demolish {
+        /// `extended`, `plain`, or `goal_explosion` (the celebration demolition after a goal).
+        source: &'static str,
+        attacker_car: Option<i32>,
+        victim_car: Option<i32>,
+        /// Extended only: the attacker's player (PRI) actor and whether the victim demolished itself.
+        attacker_pri: Option<i32>,
+        self_demolish: bool,
+        attacker_velocity: [f32; 3],
+        victim_velocity: [f32; 3],
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +276,9 @@ struct Tracker {
     seconds_remaining: Option<Value<i32>>,
     overtime: Option<Value<bool>>,
     game_state: Option<Value<String>>,
+    /// Teams of the goal events already reported in the current post-goal phase: the attribute is
+    /// sometimes sent again 100-150 ticks later (two goals in one phase cannot happen).
+    goal_events_this_phase: Vec<u8>,
     diagnostics: Diagnostics,
 }
 
@@ -569,13 +586,59 @@ impl Tracker {
                         .ok()
                         .and_then(|index| names.get(index))
                     {
+                        if !matches!(name.as_str(), "PostGoalScored" | "ReplayPlayback") {
+                            self.goal_events_this_phase.clear();
+                        }
                         self.game_state = Some(Value::replay(name.clone(), frame));
                     }
                 }
             }
             "TAGame.GameEvent_Soccar_TA:ReplicatedScoredOnTeam" => {
                 if let Attribute::Byte(team @ 0..=1) = attribute {
-                    events.push(Event::GoalScoredOn { team: *team });
+                    if !self.goal_events_this_phase.contains(team) {
+                        self.goal_events_this_phase.push(*team);
+                        events.push(Event::GoalScoredOn { team: *team });
+                    }
+                }
+            }
+            "TAGame.Car_TA:ReplicatedDemolishExtended" => {
+                if let Attribute::DemolishExtended(d) = attribute {
+                    let active = |a: &boxcars::ActiveActor| a.active.then_some(a.actor.0);
+                    events.push(Event::Demolish {
+                        source: "extended",
+                        attacker_car: active(&d.attacker),
+                        victim_car: active(&d.victim),
+                        attacker_pri: active(&d.attacker_pri),
+                        self_demolish: d.self_demolish,
+                        attacker_velocity: [d.attacker_velocity.x, d.attacker_velocity.y, d.attacker_velocity.z],
+                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                    });
+                }
+            }
+            "TAGame.Car_TA:ReplicatedDemolish" => {
+                if let Attribute::Demolish(d) = attribute {
+                    events.push(Event::Demolish {
+                        source: "plain",
+                        attacker_car: d.attacker_flag.then_some(d.attacker.0),
+                        victim_car: d.victim_flag.then_some(d.victim.0),
+                        attacker_pri: None,
+                        self_demolish: false,
+                        attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
+                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                    });
+                }
+            }
+            "TAGame.Car_TA:ReplicatedDemolishGoalExplosion" => {
+                if let Attribute::DemolishFx(d) = attribute {
+                    events.push(Event::Demolish {
+                        source: "goal_explosion",
+                        attacker_car: d.attacker_flag.then_some(d.attacker.0),
+                        victim_car: d.victim_flag.then_some(d.victim.0),
+                        attacker_pri: None,
+                        self_demolish: false,
+                        attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
+                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                    });
                 }
             }
             "TAGame.VehiclePickup_TA:NewReplicatedPickupData" => {
