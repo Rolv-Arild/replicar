@@ -272,3 +272,5 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-01 (pads, repeats): pad actors are re-created after goals; pads now identified by name (voted over the replay): all pads matched, `boost_pickups` with the instigator checked against the car paths (91-98% verified, truth coverage 98-99.7%, earlier lower figures were a script bug); `Event::Demolish.repeat` (within 3 s) is ignored by the converter.
 
 - 2026-10-01 (scoreboard): `scoreboard` per frame (period, clock_state incl. kickoff/expired/decided, fractional regulation and overtime clocks); clock error p99 0.03 s host, 0.12 s client; phases 98-99%; the 5 s kickoff fallback is unverified (never occurred). Reverted the goal-scorer inference (not needed).
+
+- 2026-10-01 (contact alignment): per-contact car/ball tick alignment (scratch fit, two passes) gives no gain (11% of contacts reproducible within 100 UU/s, touches +0 to +2 points, corpus slightly worse); left off. If hit-level fidelity matters: fit the car's start position and last controls against the post-hit ball velocity instead.

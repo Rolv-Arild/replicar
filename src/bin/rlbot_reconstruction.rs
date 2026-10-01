@@ -1023,6 +1023,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         options.ball_hit_chains = std::env::var_os("NO_BALL_HITS").is_none();
         options.estimate_ball_car_lag_offset = std::env::var_os("NO_EST_MU").is_none();
         options.detect_lag_free_replays = std::env::var_os("NO_LAG_FREE").is_none();
+        options.align_contacts = std::env::var_os("ALIGN_CONTACTS").is_some();
         options.per_car_control_shift = std::env::var_os("NO_CAR_SHIFT").is_none();
         options.packet_interval_control_rule = std::env::var_os("PACKET_CONTROL_RULE").is_some();
         tweak(&mut options);

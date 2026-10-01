@@ -98,6 +98,10 @@ pub struct ConvertOptions {
     /// Offline: find car-ball contacts from the ball packets (a ball-only rollout between
     /// consecutive packets; `ball_evidence`) and report them as `ball_contacts`.
     pub contacts_from_ball_packets: bool,
+    /// Offline, two passes: place each car packet before a ball contact -3..=+3 ticks off in a scratch
+    /// arena, simulate the hit to the next ball packet, and keep the shift whose ball velocity is
+    /// closest (`contact_alignment`); the second pass uses the moved lags. Uses a future ball packet.
+    pub align_contacts: bool,
     /// With `apply_observed_demolitions`, switch RocketSim's own demolition rule off so that the
     /// observed demolitions are the only ones (no duplicate `car_hit_car` with `is_demo`, no
     /// invented demolitions).
@@ -285,6 +289,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             apply_observed_demolitions: true,
             contacts_from_ball_packets: true,
+            align_contacts: false,
             disable_simulated_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
@@ -4508,6 +4513,18 @@ pub fn convert_observations_with(
         &[PositionResidual],
     ) -> io::Result<()>,
 ) -> Result<ConversionSummary, ConvertError> {
+    if options.align_contacts
+        && options.external_packet_lags.is_none()
+        && options.infer_packet_lag
+        && !options.zero_packet_lag
+        && options.contacts_from_ball_packets
+    {
+        let (lags, _) = crate::contact_alignment::aligned_lags(observations, options)?;
+        let mut second = options.clone();
+        second.align_contacts = false;
+        second.external_packet_lags = Some(Arc::new(lags));
+        return convert_observations_with(observations, &second, on_frame);
+    }
     if observations.header.game_type != "TAGame.Replay_Soccar_TA" {
         return Err(ConvertError::UnsupportedMode(
             observations.header.game_type.clone(),
