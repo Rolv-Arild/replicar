@@ -270,3 +270,5 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-01 (touch evidence): `ball_contacts` from a ball-only RocketSim rollout between consecutive ball packets: all true touches show as a velocity residual over 10 UU/s (quiet intervals 0.02), car right 96-99%, contact tick within 1 (host) / 3 (client); union with the simulated touches covers 98.4-100%. Not used by the simulation yet (a touch interval could pin the car/ball tick alignment, RESULTS 'Ball touches').
 
 - 2026-10-01 (pads, repeats): pad actors are re-created after goals; pads now identified by name (voted over the replay): all pads matched, `boost_pickups` with the instigator checked against the car paths (91-98% verified, truth coverage 98-99.7%, earlier lower figures were a script bug); `Event::Demolish.repeat` (within 3 s) is ignored by the converter.
+
+- 2026-10-01 (scoreboard): `scoreboard` per frame (period, clock_state incl. kickoff/expired/decided, fractional regulation and overtime clocks); clock error p99 0.03 s host, 0.12 s client; phases 98-99%; the 5 s kickoff fallback is unverified (never occurred). Reverted the goal-scorer inference (not needed).

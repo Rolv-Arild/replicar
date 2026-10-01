@@ -451,6 +451,8 @@ pub struct ConvertedFrame {
     /// Boost pad pickups the replay reports in this frame (new ones only), checked against the cars'
     /// paths.
     pub boost_pickups: Vec<BoostPickup>,
+    /// The match clock and its phase (`scoreboard`).
+    pub scoreboard: Option<crate::scoreboard::ScoreboardFrame>,
     /// Applied packet lags for objects with a fresh packet; empty unless `infer_packet_lag`.
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
@@ -4620,6 +4622,9 @@ pub fn convert_observations_with(
     let mut recent_poses: std::collections::VecDeque<(u64, Vec<(usize, Vec3A, Mat3A, bool)>)> =
         std::collections::VecDeque::new();
     let mut recent_touch_ticks: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    // The match clock and its lifecycle from the replay's integer clock (offline).
+    let scoreboard = crate::scoreboard::reconstruct(observations);
+    let mut ball_decided = false;
     // Last arena tick of a car-ball contact event per slot (to find where a contact starts).
     let mut last_contact_tick: HashMap<usize, u64> = HashMap::new();
     // Timeline tick until which an observed demolition keeps a slot demolished.
@@ -6031,6 +6036,23 @@ pub fn convert_observations_with(
                 },
             });
         }
+        let scoreboard_frame = scoreboard.get(frame_idx).cloned().map(|mut sb| {
+            // After expiry the first floor contact of the ball (the simulation's) decides the
+            // game, also when no fresh ball packet caught it.
+            if sb.clock_state == "expired" || sb.clock_state == "decided" {
+                if events.iter().any(|e| {
+                    matches!(&e.event, ArenaEvent::BallHitWorld(h) if h.contact_normal.z > 0.9)
+                }) {
+                    ball_decided = true;
+                }
+                if ball_decided {
+                    sb.clock_state = "decided";
+                }
+            } else {
+                ball_decided = false;
+            }
+            sb
+    });
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -6040,6 +6062,7 @@ pub fn convert_observations_with(
             touches,
             ball_contacts,
             boost_pickups,
+            scoreboard: scoreboard_frame,
             packet_lags: applied_lags,
             fitted_inputs: fitted_arena
                 .into_iter()

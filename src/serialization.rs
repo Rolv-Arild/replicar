@@ -332,6 +332,9 @@ struct FrameLine<'a> {
     /// New boost pad pickups reported by the replay this frame, checked against the cars' paths.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     boost_pickups: &'a [crate::conversion::BoostPickup],
+    /// The match clock and its phase, reconstructed from the replay's clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scoreboard: Option<&'a crate::scoreboard::ScoreboardFrame>,
     position_residuals: &'a [PositionResidual],
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -388,6 +391,7 @@ fn frame_line<'a>(
         touches: &converted.touches,
         ball_contacts: &converted.ball_contacts,
         boost_pickups: &converted.boost_pickups,
+        scoreboard: converted.scoreboard.as_ref(),
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,
