@@ -37,6 +37,24 @@ VECTOR_COLUMNS = {
     "boost_pad_cooldown": 1,
     "scores": 2,
 }
+# Appended after ``frame_json`` by the Rust writer (and by ``write_columnar``): the reconstructed match
+# clock. A file written before they existed lacks them; the loader then reports unknown.
+SCOREBOARD_COLUMNS = (
+    "scoreboard_period",
+    "scoreboard_clock_state",
+    "scoreboard_seconds_remaining",
+    "scoreboard_overtime_seconds",
+)
+# Side tables written beside the main file by the Rust writer as ``<stem>.<table>.parquet``.
+RECORD_TABLES = (
+    "touches",
+    "ball_contacts",
+    "boost_pickups",
+    "fitted_inputs",
+    "packet_lags",
+    "events",
+    "pad_pickups",
+)
 HOT_COLUMNS = (
     "frame", "replay_time", "timeline_tick", "arena_tick",
     *VECTOR_COLUMNS, "seconds_remaining",
@@ -86,6 +104,11 @@ def _schema(pa: Any, header: dict[str, Any], pads: list[dict[str, Any]]):
     fields.extend((
         pa.field("seconds_remaining", f32),
         pa.field("frame_json", pa.large_binary()),
+        # The Rust writer dictionary-encodes these two; the strings are the contract.
+        pa.field("scoreboard_period", pa.string()),
+        pa.field("scoreboard_clock_state", pa.string()),
+        pa.field("scoreboard_seconds_remaining", f32),
+        pa.field("scoreboard_overtime_seconds", f32),
     ))
     metadata = {
         b"columnar_version": str(COLUMNAR_VERSION).encode(),
@@ -134,6 +157,7 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
         for score in frame["observations"]["team_scores"]
     ]
     clock = frame["observations"]["seconds_remaining"]
+    board = frame.get("scoreboard")
     return {
         "frame": frame["frame"],
         "replay_time": frame["replay_time"],
@@ -157,6 +181,10 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
         "scores": scores,
         "seconds_remaining": missing if clock is None else clock["value"],
         "frame_json": json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode(),
+        "scoreboard_period": None if board is None else board["period"],
+        "scoreboard_clock_state": None if board is None else board["clock_state"],
+        "scoreboard_seconds_remaining": None if board is None else board["seconds_remaining"],
+        "scoreboard_overtime_seconds": None if board is None else board["overtime_seconds"],
     }
 
 
@@ -256,6 +284,30 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         values = table[name].combine_chunks().values.to_numpy(zero_copy_only=False)
         return values.astype(dtype, copy=True).reshape(shape)
 
+    # The scoreboard columns are optional (older files); a null is unknown, not zero.
+    if _kind(path) == "parquet":
+        available = set(pq.ParquetFile(str(path)).schema_arrow.names)
+    else:
+        available = set(ipc.open_file(str(path)).schema.names)
+    board = None
+    if set(SCOREBOARD_COLUMNS) <= available:
+        if _kind(path) == "parquet":
+            board = pq.read_table(str(path), columns=list(SCOREBOARD_COLUMNS))
+        else:
+            board = ipc.open_file(str(path)).read_all().select(list(SCOREBOARD_COLUMNS))
+
+    def label(name: str):
+        if board is None:
+            return np.full(count, None, dtype=object)
+        values = np.empty(count, dtype=object)
+        values[:] = board[name].to_pylist()
+        return values
+
+    def clock(name: str):
+        if board is None:
+            return np.full(count, np.nan, dtype=np.float32)
+        return np.array(board[name].to_pylist(), dtype=np.float32)  # None becomes NaN
+
     return {
         "header": header,
         "time": primitive("replay_time", np.float64),
@@ -282,7 +334,35 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         "boost_pad_cooldown": fixed("boost_pad_cooldown", (count, pads), np.float32),
         "scores": fixed("scores", (count, 2), np.float32),
         "seconds_remaining": primitive("seconds_remaining", np.float32),
+        "scoreboard_period": label("scoreboard_period"),
+        "scoreboard_clock_state": label("scoreboard_clock_state"),
+        "scoreboard_seconds_remaining": clock("scoreboard_seconds_remaining"),
+        "scoreboard_overtime_seconds": clock("scoreboard_overtime_seconds"),
     }
+
+
+def record_table_path(path: str | Path, table: str) -> Path:
+    """``<dir>/<stem>.<table>.parquet`` beside the main file ``<dir>/<stem>.parquet``."""
+    if table not in RECORD_TABLES:
+        raise ValueError(f"unknown record table {table!r}; expected one of {RECORD_TABLES}")
+    path = Path(path)
+    return path.with_name(f"{path.stem}.{table}.parquet")
+
+
+def read_record_tables(path: str | Path) -> dict[str, Any]:
+    """Read the side tables written beside a Rust Parquet export, as ``pyarrow.Table`` values.
+
+    Every table has a ``frame`` column (the frame the record belongs to). A table that was not
+    written (``convert_replay --no-event-tables``, or a file made by ``write_columnar``) is missing
+    from the result; an empty table keeps its schema. The Rust writer is the only one that makes them.
+    """
+    _, _, pq = _arrow_modules()
+    tables = {}
+    for name in RECORD_TABLES:
+        table_path = record_table_path(path, name)
+        if table_path.exists():
+            tables[name] = pq.read_table(str(table_path))
+    return tables
 
 
 def main() -> None:

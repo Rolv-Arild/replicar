@@ -8,6 +8,7 @@ from replay_columnar import (
     iter_columnar_frames,
     load_columnar_numpy,
     read_columnar_header,
+    read_record_tables,
     write_columnar,
 )
 from replay_to_rocketsim import iter_frames, load_numpy, read_header
@@ -55,6 +56,10 @@ class LoaderTest(unittest.TestCase):
                 "team_scores": [{"value": 2, "frame": 0, "source": "replay"}, None],
                 "seconds_remaining": None,
             },
+            "scoreboard": {
+                "period": "regulation", "clock_state": "countdown",
+                "seconds_remaining": 300.0, "overtime_seconds": None,
+            },
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.jsonl"
@@ -76,6 +81,10 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual(arrays["scores"][0, 0], 2)
             self.assertTrue(arrays["car_present"][0, 0])
             self.assertTrue(__import__("numpy").isnan(arrays["scores"][0, 1]))
+            self.assertEqual(arrays["scoreboard_period"].tolist(), ["regulation"])
+            self.assertEqual(arrays["scoreboard_clock_state"].tolist(), ["countdown"])
+            self.assertEqual(arrays["scoreboard_seconds_remaining"].tolist(), [300.0])
+            self.assertTrue(__import__("numpy").isnan(arrays["scoreboard_overtime_seconds"][0]))
             compressed = Path(directory) / "sample.jsonl.gz"
             with gzip.open(compressed, "wt", encoding="utf-8") as output:
                 output.write(path.read_text(encoding="utf-8"))
@@ -104,6 +113,20 @@ class LoaderTest(unittest.TestCase):
                         np.testing.assert_equal(loaded[key], expected)
                     else:
                         self.assertEqual(loaded[key], expected)
+
+    def test_record_tables_beside_the_main_file(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("pyarrow is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            main = Path(directory) / "game.parquet"
+            pq.write_table(pa.table({"frame": pa.array([4, 9], pa.uint32())}), Path(directory) / "game.touches.parquet")
+            tables = read_record_tables(main)
+            self.assertEqual(list(tables), ["touches"])
+            self.assertEqual(tables["touches"]["frame"].to_pylist(), [4, 9])
+            self.assertEqual(read_record_tables(Path(directory) / "other.parquet"), {})
 
     def test_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:

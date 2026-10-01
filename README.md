@@ -79,6 +79,8 @@ events = pq.read_table("target/example.events.parquet").to_pandas()      # kind:
 demolitions = events[(events.kind == "demolish") & (events.repeat == False)]
 ```
 
+`load_columnar_numpy` (and `load_numpy` for JSONL) also return the scoreboard as `scoreboard_period` and `scoreboard_clock_state` (object arrays, `None` where unknown) and `scoreboard_seconds_remaining` and `scoreboard_overtime_seconds` (float32, NaN where unknown); `read_record_tables("target/example.parquet")` returns the side tables that exist as `pyarrow.Table` values keyed by name. The Python `write_columnar` writer writes the scoreboard columns but not the record tables (use `convert_replay` for those).
+
 Rust callers can parse a schema-v1 rich frame and rebuild a detached native soccar `ArenaState` with `restoration::state_from_frame_json` and `restoration::restore_soccar_state`; the car slots come from `restoration::car_slots_from_header_json`. `apply_soccar_state_to_arena` seeds a live Arena and reports its own tick and pad cooldown error. A live Arena cannot adopt the serialized absolute tick, RNG, or private physics caches, so continuing simulation from it is not an exact replay continuation. To verify all rich frames in a Parquet file, run `cargo run --release --bin verify_state_restoration -- target/example.parquet`.
 
 ## Present accuracy limits

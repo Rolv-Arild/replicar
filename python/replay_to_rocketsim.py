@@ -59,6 +59,11 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     finer lifecycle meaning. Score and clock use NaN when missing from replay.
     Control arrays contain the inputs passed to RocketSim, including inferred
     boost; use ``iter_frames`` for original action counters and provenance.
+
+    The ``scoreboard_*`` entries are the reconstructed match clock: ``scoreboard_period``
+    (``regulation``/``overtime``) and ``scoreboard_clock_state`` (``pregame``, ``countdown``,
+    ``kickoff``, ``running``, ``expired``, ``decided``, ``goal_pause``, ``other``) are object arrays
+    with ``None`` where the frame has no scoreboard; the two clock arrays use NaN for unknown.
     """
     import numpy as np
 
@@ -96,6 +101,10 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     boost_pad_cooldown = np.full((count, pad_count), np.nan, dtype=np.float32)
     scores = np.full((count, 2), np.nan, dtype=np.float32)
     seconds_remaining = np.full(count, np.nan, dtype=np.float32)
+    scoreboard_period = np.full(count, None, dtype=object)
+    scoreboard_clock_state = np.full(count, None, dtype=object)
+    scoreboard_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
+    scoreboard_overtime_seconds = np.full(count, np.nan, dtype=np.float32)
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -129,6 +138,14 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         clock = observed["seconds_remaining"]
         if clock is not None:
             seconds_remaining[row] = clock["value"]
+        board = frame.get("scoreboard")
+        if board is not None:
+            scoreboard_period[row] = board["period"]
+            scoreboard_clock_state[row] = board["clock_state"]
+            if board["seconds_remaining"] is not None:
+                scoreboard_seconds_remaining[row] = board["seconds_remaining"]
+            if board["overtime_seconds"] is not None:
+                scoreboard_overtime_seconds[row] = board["overtime_seconds"]
     return {
         "header": header,
         "time": time,
@@ -155,4 +172,8 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "boost_pad_cooldown": boost_pad_cooldown,
         "scores": scores,
         "seconds_remaining": seconds_remaining,
+        "scoreboard_period": scoreboard_period,
+        "scoreboard_clock_state": scoreboard_clock_state,
+        "scoreboard_seconds_remaining": scoreboard_seconds_remaining,
+        "scoreboard_overtime_seconds": scoreboard_overtime_seconds,
     }
