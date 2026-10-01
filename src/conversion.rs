@@ -5427,7 +5427,9 @@ pub fn convert_observations_with(
                         }
                     }
                     if let Some(schedule) = schedule {
-                        let mut jumping = false;
+                        // A press is a rising edge: the button is already down when the car's current
+                        // controls (the previous interval's last) have the jump set.
+                        let mut jumping = arena.get_car_controls(slot).jump;
                         for entry in &schedule.entries {
                             if let Some(jump) = entry.5 {
                                 if jump && !jumping {

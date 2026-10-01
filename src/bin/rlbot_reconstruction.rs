@@ -867,7 +867,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         for (f, converted) in output.frames.iter().enumerate() {
-            for e in &converted.fitted_inputs {
+            for e in converted.fitted_inputs.iter().filter(|e| e.kind != "air") {
                 let Some(name) = slot_name.get(&e.slot) else {
                     continue;
                 };

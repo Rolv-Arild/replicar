@@ -327,6 +327,10 @@ struct FrameLine<'a> {
     /// Inferred packet lags applied to this frame's fresh packets (empty when disabled).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     packet_lag_ticks: &'a [crate::conversion::AppliedPacketLag],
+    /// Jump and dodge presses fitted at this frame's packets (inferred actions: slot, kind, the
+    /// timeline tick they take effect, dodge direction controls and pitch cancel); empty unless fitted.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    fitted_inputs: &'a [crate::conversion::FittedInput],
 }
 
 pub(crate) fn header_json(
@@ -374,6 +378,7 @@ fn frame_line<'a>(
         simulated_events: converted.simulated_events.iter().map(Into::into).collect(),
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
+        fitted_inputs: &converted.fitted_inputs,
     }
 }
 
