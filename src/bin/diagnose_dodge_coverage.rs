@@ -154,7 +154,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }),
                     None => (false, false),
                 };
+                let chain_before = (f.saturating_sub(12)..f)
+                    .filter(|&g| {
+                        fresh_at(g)
+                            && output.frames[g]
+                                .packet_lags
+                                .iter()
+                                .any(|l| l.actor_id == Some(car.actor_id) && l.source == "chain")
+                    })
+                    .count()
+                    .min(2);
+                let state_here = frames[f]
+                    .game_state
+                    .as_ref()
+                    .map_or("none".to_string(), |g| g.value.clone());
                 let classes = [
+                    format!("diagnostic: exact chain packets after {exact_after}, before {chain_before}, game state {state_here}"),
                     "all activations".to_string(),
                     format!(
                         "start: {}",
