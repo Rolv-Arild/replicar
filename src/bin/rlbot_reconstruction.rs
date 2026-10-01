@@ -371,6 +371,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Exported controls against the input the server applied: per control, the absolute errors
         // (frames where it can matter: the air controls only while airborne).
         let control_names = ["throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"];
+        // Air controls against the truth's mean over the frame's interval (the most a constant per interval can match).
+        let mut interval_mean_err: Vec<Vec<f32>> = vec![Vec::new(); 3];
+        let mut interval_within: Vec<Vec<f32>> = vec![Vec::new(); 3];
+        let mut interval_next_err: Vec<Vec<f32>> = vec![Vec::new(); 3];
+        let mut control_err_next: Vec<Vec<f32>> = vec![Vec::new(); 16];
         let mut control_err: Vec<Vec<f32>> = vec![Vec::new(); 16]; // [control][ground] then [control][air] at 8 + control
         let mut boost_err: Vec<f32> = Vec::new();
         let mut boost_err_fresh: Vec<f32> = Vec::new();
@@ -665,6 +670,57 @@ fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                         control_err[i + if t.air_state == 0 { 0 } else { 8 }].push((x - y).abs());
+                        if let Some(next) = truth
+                            .get(&((server_tick + 1).max(0) as u64))
+                            .and_then(|m| m.get(name))
+                        {
+                            control_err_next[i + if t.air_state == 0 { 0 } else { 8 }]
+                                .push((x - next.input[i]).abs());
+                        }
+                        if (2..=4).contains(&i) && t.air_state != 0 && f > 0 {
+                            let previous_tick = (converted.timeline_tick as i64
+                                - output.frames[f - 1].timeline_tick as i64)
+                                .clamp(1, 12);
+                            let mut sum = 0.0;
+                            let mut n = 0;
+                            let mut sq = 0.0;
+                            for d in 0..previous_tick {
+                                if let Some(tt) = truth
+                                    .get(&((server_tick - d).max(0) as u64))
+                                    .and_then(|m| m.get(name))
+                                {
+                                    sum += tt.input[i];
+                                    n += 1;
+                                }
+                            }
+                            if n > 0 {
+                                let mean = sum / n as f32;
+                                for d in 0..previous_tick {
+                                    if let Some(tt) = truth
+                                        .get(&((server_tick - d).max(0) as u64))
+                                        .and_then(|m| m.get(name))
+                                    {
+                                        sq += (tt.input[i] - mean).abs();
+                                    }
+                                }
+                                interval_mean_err[i - 2].push((x - mean).abs());
+                                let mut nsum = 0.0;
+                                let mut nn = 0;
+                                for d in 1..=previous_tick {
+                                    if let Some(tt) = truth
+                                        .get(&((server_tick + d).max(0) as u64))
+                                        .and_then(|m| m.get(name))
+                                    {
+                                        nsum += tt.input[i];
+                                        nn += 1;
+                                    }
+                                }
+                                if nn > 0 {
+                                    interval_next_err[i - 2].push((x - nsum / nn as f32).abs());
+                                }
+                                interval_within[i - 2].push(sq / n as f32);
+                            }
+                        }
                     }
                     let e = (sim.boost - t.boost).abs();
                     boost_err.push(e);
@@ -870,12 +926,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let n = errs.len();
                     let mean = errs.iter().sum::<f32>() / n as f32;
                     let off = errs.iter().filter(|e| **e > 0.1).count();
+                    let nexts = &control_err_next[i + part];
+                    let nm = nexts.iter().sum::<f32>() / nexts.len().max(1) as f32;
+                    let noff = nexts.iter().filter(|e| **e > 0.1).count();
                     println!(
-                        "      {name:<10} {label:<13} n {n:>6} mean |err| {mean:.3}, |err| > 0.1 in {:.2}% (p99 {:.2})",
+                        "      {name:<10} {label:<13} n {n:>6} vs the tick's input: mean |err| {mean:.3}, > 0.1 in {:.2}% | vs the next tick's input (the action taken from this state): {nm:.3}, > 0.1 in {:.2}%",
                         100.0 * off as f64 / n as f64,
-                        quantile(errs, 0.99)
+                        100.0 * noff as f64 / nexts.len().max(1) as f64
                     );
                 }
+            }
+            for (k, name) in ["pitch", "yaw", "roll"].iter().enumerate() {
+                let n = interval_mean_err[k].len().max(1) as f32;
+                println!(
+                    "      {name:<6} airborne: exported vs the truth's mean over the frame interval: mean |err| {:.3} (|err| > 0.1 in {:.1}%); the truth's own spread inside the interval: mean |input - mean| {:.3}; against the NEXT interval's mean: {:.3} (within 0.1 in {:.1}%, median {:.3})",
+                    interval_mean_err[k].iter().sum::<f32>() / n,
+                    100.0 * interval_mean_err[k].iter().filter(|e| **e > 0.1).count() as f32 / n,
+                    interval_within[k].iter().sum::<f32>() / n,
+                    interval_next_err[k].iter().sum::<f32>() / interval_next_err[k].len().max(1) as f32,
+                    100.0 * interval_next_err[k].iter().filter(|e| **e <= 0.1).count() as f32 / interval_next_err[k].len().max(1) as f32,
+                    quantile(&mut interval_next_err[k].clone(), 0.5)
+                );
             }
             println!(
                 "    boost error (units of 0..100) p50/p90/p99 {:.2}/{:.2}/{:.2}; on frames with a fresh packet {:.2}/{:.2}/{:.2}",

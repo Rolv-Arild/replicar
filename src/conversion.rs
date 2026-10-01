@@ -2666,6 +2666,20 @@ fn plan_air_bvp(
     // A solution that cannot reach the end state means the free-flight model does not hold (a
     // contact, a wall, an unseen flip): leave the interval to the other control paths.
     if rot_error > rot_tol_deg.to_radians() || omega_error > omega_tol {
+        if std::env::var_os("AIR_NOSOL").is_some() {
+            eprintln!(
+                "NOSOL frame {index} ticks {total} flip_time {:.3} flipping {} press {} z {:.0} speed {:.0} rot_err {:.1} deg omega_err {:.2} omega_a {:.2} omega_b {:.2}",
+                state.flip_time,
+                state.is_flipping,
+                press.is_some(),
+                state.phys.pos.z,
+                state.phys.vel.length(),
+                rot_error.to_degrees(),
+                omega_error,
+                omega_a.length(),
+                omega_b.length()
+            );
+        }
         return air_refused(10);
     }
     let mut entries = Vec::with_capacity(ticks.len());
