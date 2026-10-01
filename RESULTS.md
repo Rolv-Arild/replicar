@@ -1707,3 +1707,267 @@ The direct Rust Parquet export (`convert_replay x.replay out.parquet`) now expos
 | `pad_pickups` | `frame`, `pad_actor_id` i32, `pad_actor_name` string null, `instigator_car_id` i32 null, `picked_up` u8, `repeat` bool | observed pad records; count only `repeat` false (`picked_up` 255 marks available) |
 
 **Check.** One validation 1v1 replay (8,126 frames, converted in 7 s in release): the table rows (touches 140, ball_contacts 177, boost_pickups 147, fitted_inputs 1,749, packet_lags 9,922, events 12, pad_pickups 1,102) equal the counts in the JSONL of the same conversion, and the scoreboard columns, the event kinds with `repeat`, and the fitted input kinds and ticks match the JSONL record by record (PyArrow 4-column check). Unit tests (`cargo test --lib parquet`) cover the column order, null handling per record kind, row-group bounds and the empty-table schema.
+
+## Benchmark of the RLCarInputSolver heuristics against true inputs (2026-10-01)
+
+**Question.** The supplied `external/RLCarInputSolver` guesses controls from two physical states (no flags, no counters). Earlier sections tested only its aerial orientation formula ('RLCarInputSolver comparison') and its flip-cancel rule on sparse replay packets. Which of its heuristics (the whole of `Solver::Solve`, `SolveAir` and `SolveGround`) recover the player's actual inputs when run on exact consecutive states, and which can therefore be used for inputs the replay does not give us?
+
+**Data and protocol.** `src/bin/benchmark_rlcis.rs` is a Rust port of the solver (differences below). Input: the two RLBot recordings of the LAN games (`replays/2026-09-30T16-56-39Z_lan_remote_4bots_game1` and `..._17-05-59Z_lan_remote_4bots_game2`, 61,744 and 57,682 distinct-frame packets, six cars each, four bots and two humans; the recordings are diagnostics, not a split; the sealed test split is untouched). Every packet is one server tick with each car's location, Euler rotation, velocity, angular velocity, `air_state`, flags, boost and `last_input` (the input applied in the tick that ended at the packet, settled in 'Input alignment'). For every car and every start packet n of an all-Active, consecutive run, the solver gets the states at n and n + d (d = 1, 4 and 8 ticks; start stride 1, 2 and 4 so the d = 4 and 8 samples overlap) with `deltaTime = d / 120` and the C++ default config (deadzone 0.1, inverse deadzone 0.95, deadzones and clamping on, `steerIsYaw`). Truth is the mean of `last_input` of packets n+1 to n+d, so a constant solver output over the span is compared with the average input; booleans are scored against the majority (`>= 0.5`) of the span (the continuous columns' MAE is against the mean); boost counts only when the car had boost to burn. Continuous channels: mean absolute error and the fraction within 0.1; binary channels: accuracy with the confusion counts (positive = pressed). Baselines: all zeros, and the previous tick's true input held (an oracle that needs the true inputs, so it is a persistence ceiling, not an alternative when inputs are unknown). Samples are classed by the true `air_state` over the span: **ground** (OnGround throughout), **air, free flight** (InAir throughout), **air, jump/dodge state** (airborne with Jumping, DoubleJumping or Dodging at some tick) and **mixed** (takeoff or landing inside the span; in the full tables of `target/bench/rlcis_full.md`, not below). The solver's own ground/air dispatch decides which branch runs, so dispatch errors count against the channel scores. Events: flip start and double jump against the rising edges of `has_dodged` / `has_double_jumped` in the span, jump press against the rising edge of the jump input, ground/air dispatch against `air_state == OnGround` at the span end. Sample counts (d = 1, bots / humans): ground 150,689 / 102,074; free flight 91,232 / 27,733; jump/dodge state 47,427 / 17,149; mixed 2,054 / 511 (d = 4: 73,774 / 50,500; 43,564 / 13,185; 24,010 / 8,843; 3,949 / 1,011; d = 8: 36,019 / 24,935; 20,530 / 6,178; 12,285 / 4,570; 3,611 / 989). The two games agree to within about 1.5 points on every headline number (per-game tables: `--per-game`). Reproduce (from a directory with `collision_meshes/`, a few seconds):
+
+```
+cargo build --release --bin benchmark_rlcis
+target/release/benchmark_rlcis --per-game replays/2026-09-30T16-56-39Z_lan_remote_4bots_game1/states.jsonl replays/2026-09-30T17-05-59Z_lan_remote_4bots_game2/states.jsonl > target/bench/rlcis_full.md
+```
+
+**What this is and is not.** The states are exact 120 Hz server states, so these are best-case numbers: replay packets are 4-12 ticks apart at an unknown tick offset (RESULTS 'Replay packets are exact ticks'), and a real replay frame can only get worse. The solver sees the future state (offline inference, never causal prediction). Only two human players are in the data (the host and the remote player), whose play differs from the bots' (the bots use roll for side flips, steer and yaw are mostly full deflections), so the bot/human split is two people, not a population. Contacts with the ball or other cars are not excluded; they act as velocity impulses the solver misreads.
+
+**Differences of the port from the C++.**
+
+1. *Ground steer: the wheel simulation is replaced.* The C++ sets the front wheels' steer angle by hand (`steer * STEER_ANGLE_FROM_SPEED(|forward speed of the FROM state|)`), runs `calcFrictionImpulses(deltaTime)` / `applyFrictionImpulses(deltaTime)` on the car at the **TO** state (as far as the code shows, with the engine force and brake left from `CheckOnGround`'s pre-tick, i.e. throttle 0) and reads the local yaw-rate change over `deltaTime` for steer 0 and 1. The Rust crate has no access to the vehicle, so a scratch `Arena` with one car (the body nearest to the recording's hitbox, see 3; ball parked at z = -500 as in the C++) is set to the TO state (wheel contact flags set, `refresh_car_sticky_gate`), throttle 0, handbrake 0, steer 0 and 1, one `step_tick`, and the change of the local (TO-state axes) yaw rate is divided by **one tick**, whatever `d` is (the C++ divides an impulse of `deltaTime`; a lateral friction impulse that removes the sideways velocity does not scale with `deltaTime`, so for d > 1 the two differ). RocketSim applies its own steer angle for the TO state's speed. The step also contains the suspension and air-control terms that the C++ friction call lacks (none of them has a yaw component on the ground). Check: the steer pair simulated at the **FROM** state instead (`solver, steer simulated at the FROM state` in the variants table) changes ground steer within-0.1 from 84.4% to 86.8% (d = 1), 74.8% to 75.7% (4), 65.7% to 64.7% (8), so the choice of state is not what limits it.
+2. *`CheckOnGround`.* The C++ calls the car's `_PreTickUpdate` and `_PostTickUpdate` without stepping. Here one tick is stepped from a default car state (no controls) and `is_on_ground` read afterwards; RocketSim sets it in the pre-tick from the wheel traces at the position before the step (three or more wheels in contact), so it is the same quantity.
+3. *Car body.* The C++ solver has one Octane. The port uses the preset nearest to the packet's hitbox size (Octane, Dominus, Plank, Breakout, Hybrid, Merc). Running every car as an Octane (`--bodies octane`, the C++ behaviour) gives the same results to the rounding of the tables (ground steer within 0.1 84.9% against 84.4%; ground/air dispatch accuracy 98.4% both, false negatives 524 against 280 at d = 1).
+4. *Constants.* The C++ `BOOST_ACCEL` and `THROTTLE_AIR_FORCE` are in Bullet units (the factor `1 / 2.4 = 50 / 120` turns them into UU/s per tick); the C++ RocketSim headers are not available, so the port takes the pinned Rust RocketSim's UU values (boost 991.67 and air throttle 66.67 UU/s^2, flip, jump, drive, brake, powerslide, coasting-brake and mass constants, the drive-speed curve) and multiplies the two by `UU_TO_BT`. If the C++ boost constant differs from 991.67 the boost window (a factor 2 wide) moves very little.
+5. *Small ones.* `tickDelta` is rounded (the C++ truncates `deltaTime / RL_TICKTIME`, which would turn an exact 4-tick `deltaTime` into 3 when the float quotient falls just below 4); `RS_SGN` is -1, 0, 1; a NaN flip direction becomes 0 and `ClampFix` turns NaN into 0; the rotation matrix is built from the RLBot Euler angles (columns forward, right, up), and `RotMat::LookAt(forward, up)` uses `right = up x forward`. The result carries two extra flags that the C++ result does not (`stall`, `cancel`: the in-flip branch's rule taken) so the rules can be scored. Everything else is the C++ line by line: the aerial inverse with the max-angular-speed scale-up, boost and air-throttle guess from the local velocity delta, flip start and direction from the flat velocity delta with the speed scaling, double jump, in-flip detection (vertical velocity against the damped expectation), stall and flip-cancel rules, continued-jump rule, the ground throttle / brake / boost rules, the handbrake alignment trend and the ground jump rule, then deadzones and clamping. Unit tests (`cargo test --bin benchmark_rlcis`) check the aerial inverse against its own forward model for several inputs, the deadzone and `IsNear` windows, and the boost, flip and free-fall readings of `SolveAir`.
+
+**Per-channel results.** Cells are 'MAE / fraction within 0.1' for continuous channels and 'accuracy (TP, FP, FN)' for binary ones (the binary baselines' TP/FP/FN are in `target/bench/rlcis_full.md`). Pooled over both recordings.
+
+**1-tick spans, ground** (252763 car-spans: 150689 bot, 102074 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| throttle | 0.348 / 49.6% | 0.906 / 6.5% | 0.013 / 98.5% | 0.376 / 50.2% | 0.306 / 48.7% |
+| steer | 0.070 / 84.4% | 0.637 / 33.0% | 0.045 / 94.7% | 0.062 / 88.7% | 0.082 / 78.1% |
+| boost | 95.8% (TP 32984, FP 8203, FN 2516) | 86.0% (TP 0, FP 0, FN 35500) | 99.3% (TP 34604, FP 843, FN 896) | 95.2% (TP 18936, FP 5922, FN 1362) | 96.6% (TP 14048, FP 2281, FN 1154) |
+| handbrake | 91.6% (TP 3149, FP 14798, FN 6534) | 96.2% (TP 0, FP 0, FN 9683) | 99.4% (TP 8906, FP 830, FN 777) | 90.3% (TP 1940, FP 9435, FN 5118) | 93.4% (TP 1209, FP 5363, FN 1416) |
+| jump | 99.7% (TP 0, FP 53, FN 789) | 99.7% (TP 0, FP 0, FN 789) | 99.9% (TP 752, FP 142, FN 37) | 99.6% (TP 0, FP 40, FN 550) | 99.8% (TP 0, FP 13, FN 239) |
+
+**1-tick spans, air, free flight** (118965 car-spans: 91232 bot, 27733 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.231 / 74.7% | 0.535 / 42.4% | 0.074 / 92.9% | 0.208 / 81.5% | 0.308 / 52.4% |
+| yaw | 0.130 / 84.5% | 0.571 / 39.9% | 0.082 / 92.8% | 0.104 / 91.1% | 0.213 / 62.7% |
+| roll | 0.072 / 91.3% | 0.527 / 46.6% | 0.088 / 93.1% | 0.061 / 94.0% | 0.108 / 82.5% |
+| throttle | 0.250 / 72.6% | 0.295 / 68.0% | 0.010 / 98.9% | 0.259 / 74.0% | 0.219 / 68.0% |
+| boost | 97.5% (TP 26282, FP 719, FN 2237) | 76.0% (TP 0, FP 0, FN 28519) | 99.1% (TP 27994, FP 520, FN 525) | 97.2% (TP 21076, FP 616, FN 1943) | 98.6% (TP 5206, FP 103, FN 294) |
+| jump | 97.5% (TP 1, FP 1575, FN 1438) | 98.8% (TP 0, FP 0, FN 1439) | 99.9% (TP 1434, FP 157, FN 5) | 97.8% (TP 1, FP 1212, FN 759) | 96.2% (TP 0, FP 363, FN 679) |
+
+**1-tick spans, air, jump/dodge state** (64576 car-spans: 47427 bot, 17149 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.604 / 40.9% | 0.701 / 24.6% | 0.079 / 92.3% | 0.546 / 45.7% | 0.763 / 27.5% |
+| yaw | 0.164 / 64.2% | 0.451 / 51.6% | 0.073 / 93.1% | 0.173 / 62.6% | 0.138 / 68.7% |
+| roll | 0.483 / 56.8% | 0.646 / 33.0% | 0.075 / 93.7% | 0.519 / 60.5% | 0.386 / 46.4% |
+| throttle | 0.258 / 72.1% | 0.263 / 71.7% | 0.012 / 98.3% | 0.203 / 79.5% | 0.411 / 51.7% |
+| boost | 87.6% (TP 6005, FP 1777, FN 6218) | 81.1% (TP 0, FP 0, FN 12223) | 98.9% (TP 11933, FP 398, FN 290) | 88.9% (TP 3968, FP 1460, FN 3803) | 84.1% (TP 2037, FP 317, FN 2415) |
+| jump | 65.5% (TP 5488, FP 5839, FN 16451) | 66.0% (TP 0, FP 0, FN 21939) | 96.0% (TP 20929, FP 1580, FN 1010) | 67.1% (TP 4055, FP 5462, FN 10161) | 61.1% (TP 1433, FP 377, FN 6290) |
+
+**4-tick spans, ground** (124274 car-spans: 73774 bot, 50500 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| throttle | 0.234 / 65.8% | 0.906 / 5.2% | 0.034 / 95.0% | 0.256 / 66.2% | 0.202 / 65.2% |
+| steer | 0.094 / 74.8% | 0.622 / 30.3% | 0.115 / 82.7% | 0.093 / 76.6% | 0.096 / 72.2% |
+| boost | 95.6% (TP 16569, FP 4296, FN 1214) | 85.7% (TP 0, FP 0, FN 17783) | 98.2% (TP 16408, FP 828, FN 1375) | 94.8% (TP 9547, FP 3156, FN 646) | 96.6% (TP 7022, FP 1140, FN 568) |
+| handbrake | 92.7% (TP 1698, FP 5734, FN 3397) | 95.9% (TP 0, FP 0, FN 5095) | 98.4% (TP 3898, FP 811, FN 1197) | 91.8% (TP 1020, FP 3379, FN 2705) | 94.0% (TP 678, FP 2355, FN 692) |
+| jump | 99.6% (TP 3, FP 117, FN 355) | 99.7% (TP 0, FP 0, FN 358) | 99.9% (TP 311, FP 127, FN 47) | 99.5% (TP 1, FP 88, FN 252) | 99.7% (TP 2, FP 29, FN 103) |
+
+**4-tick spans, air, free flight** (56749 car-spans: 43564 bot, 13185 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.201 / 70.9% | 0.499 / 39.1% | 0.192 / 74.2% | 0.192 / 75.5% | 0.230 / 55.4% |
+| yaw | 0.122 / 77.8% | 0.523 / 37.7% | 0.215 / 73.7% | 0.107 / 82.5% | 0.173 / 62.5% |
+| roll | 0.066 / 90.2% | 0.477 / 43.9% | 0.231 / 73.2% | 0.060 / 92.3% | 0.086 / 83.0% |
+| throttle | 0.247 / 71.7% | 0.290 / 67.3% | 0.024 / 95.8% | 0.256 / 72.8% | 0.216 / 68.0% |
+| boost | 95.8% (TP 11796, FP 390, FN 1984) | 75.7% (TP 0, FP 0, FN 13780) | 97.7% (TP 12983, FP 506, FN 797) | 95.3% (TP 9437, FP 299, FN 1743) | 97.5% (TP 2359, FP 91, FN 241) |
+| jump | 98.2% (TP 0, FP 405, FN 644) | 98.9% (TP 0, FP 0, FN 644) | 99.7% (TP 636, FP 147, FN 8) | 98.5% (TP 0, FP 292, FN 342) | 96.9% (TP 0, FP 113, FN 302) |
+
+**4-tick spans, air, jump/dodge state** (32853 car-spans: 24010 bot, 8843 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.555 / 38.3% | 0.665 / 21.8% | 0.202 / 74.4% | 0.520 / 41.4% | 0.650 / 29.8% |
+| yaw | 0.372 / 41.6% | 0.446 / 44.8% | 0.188 / 74.6% | 0.422 / 37.8% | 0.237 / 51.9% |
+| roll | 0.482 / 50.1% | 0.608 / 30.1% | 0.190 / 76.3% | 0.529 / 51.4% | 0.356 / 46.6% |
+| throttle | 0.255 / 71.0% | 0.266 / 69.9% | 0.031 / 94.0% | 0.183 / 79.8% | 0.450 / 47.3% |
+| boost | 85.1% (TP 2067, FP 395, FN 4502) | 80.0% (TP 0, FP 0, FN 6569) | 97.4% (TP 6114, FP 392, FN 455) | 87.1% (TP 1406, FP 287, FN 2814) | 79.7% (TP 661, FP 108, FN 1688) |
+| jump | 67.5% (TP 3162, FP 3243, FN 7450) | 67.7% (TP 0, FP 0, FN 10612) | 90.9% (TP 9155, FP 1541, FN 1457) | 69.5% (TP 2356, FP 2939, FN 4393) | 62.0% (TP 806, FP 304, FN 3057) |
+
+**8-tick spans, ground** (60954 car-spans: 36019 bot, 24935 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| throttle | 0.291 / 59.9% | 0.906 / 3.9% | 0.058 / 91.3% | 0.320 / 59.0% | 0.250 / 61.3% |
+| steer | 0.128 / 65.7% | 0.606 / 26.5% | 0.194 / 70.1% | 0.134 / 65.0% | 0.118 / 66.7% |
+| boost | 94.3% (TP 8094, FP 2911, FN 576) | 85.8% (TP 0, FP 0, FN 8670) | 96.9% (TP 7547, FP 785, FN 1123) | 93.6% (TP 4624, FP 1982, FN 326) | 95.3% (TP 3470, FP 929, FN 250) |
+| handbrake | 93.5% (TP 910, FP 2369, FN 1605) | 95.9% (TP 0, FP 0, FN 2515) | 97.3% (TP 1578, FP 699, FN 937) | 92.8% (TP 529, FP 1293, FN 1302) | 94.5% (TP 381, FP 1076, FN 303) |
+| jump | 99.6% (TP 0, FP 77, FN 148) | 99.8% (TP 0, FP 0, FN 148) | 99.8% (TP 118, FP 99, FN 30) | 99.6% (TP 0, FP 51, FN 106) | 99.7% (TP 0, FP 26, FN 42) |
+
+**8-tick spans, air, free flight** (26708 car-spans: 20530 bot, 6178 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.198 / 62.8% | 0.458 / 34.0% | 0.342 / 53.0% | 0.198 / 65.0% | 0.200 / 55.7% |
+| yaw | 0.149 / 65.2% | 0.471 / 34.1% | 0.375 / 52.3% | 0.143 / 66.8% | 0.169 / 59.9% |
+| roll | 0.084 / 84.4% | 0.422 / 39.4% | 0.401 / 51.3% | 0.085 / 84.7% | 0.079 / 83.7% |
+| throttle | 0.246 / 70.3% | 0.285 / 66.3% | 0.045 / 92.1% | 0.255 / 71.2% | 0.217 / 67.6% |
+| boost | 90.1% (TP 4071, FP 232, FN 2413) | 75.7% (TP 0, FP 0, FN 6484) | 95.9% (TP 5840, FP 459, FN 644) | 90.1% (TP 3421, FP 160, FN 1873) | 90.1% (TP 650, FP 72, FN 540) |
+| jump | 97.9% (TP 0, FP 299, FN 258) | 99.0% (TP 0, FP 0, FN 258) | 99.5% (TP 251, FP 116, FN 7) | 98.3% (TP 0, FP 216, FN 141) | 96.8% (TP 0, FP 83, FN 117) |
+
+**8-tick spans, air, jump/dodge state** (16855 car-spans: 12285 bot, 4570 human)
+
+| channel | solver | zeros | previous tick held | solver, bots | solver, humans |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pitch | 0.559 / 30.4% | 0.628 / 18.0% | 0.332 / 56.1% | 0.545 / 31.1% | 0.597 / 28.6% |
+| yaw | 0.438 / 33.2% | 0.442 / 36.8% | 0.311 / 56.2% | 0.494 / 29.9% | 0.287 / 42.3% |
+| roll | 0.461 / 43.8% | 0.574 / 25.7% | 0.317 / 58.4% | 0.507 / 43.1% | 0.338 / 45.8% |
+| throttle | 0.264 / 68.3% | 0.267 / 68.0% | 0.055 / 89.3% | 0.188 / 77.1% | 0.468 / 44.7% |
+| boost | 81.5% (TP 499, FP 138, FN 2983) | 79.3% (TP 0, FP 0, FN 3482) | 95.5% (TP 3099, FP 377, FN 383) | 83.9% (TP 366, FP 88, FN 1894) | 75.1% (TP 133, FP 50, FN 1089) |
+| jump | 69.8% (TP 1766, FP 1996, FN 3091) | 71.2% (TP 0, FP 0, FN 4857) | 84.7% (TP 3752, FP 1468, FN 1105) | 72.2% (TP 1332, FP 1728, FN 1685) | 63.4% (TP 434, FP 268, FN 1406) |
+
+(`air, jump/dodge state` also contains the first ticks after the jump press, in which the wheels may still touch the ground: the solver dispatches 7.2% of these d = 1 spans to its ground branch.)
+
+**Events** (pooled over both recordings; `in-flip rule vs damping label` is true when RocketSim's flip vertical-velocity damping acts in the span: `dodge_elapsed` 0.15-0.65 s and falling or below 0.21 s; `vs air_state Dodging` is the broader label (the flip lasts 0.65 s but is only damped from 0.15 s, so a rule built on the damping cannot see the first 18 ticks); the stall rule's truth is an input pattern in a flip frame (last-tick yaw and roll opposite, both above 0.5), the cancel rule's truth is a mean pitch input above 0.5 in the direction of the local pitch rate; both rules are scored over every sample, so false alarms in free flight count).
+
+| event | span | population | truth positives | predicted positives | precision | recall | TP | FP | FN |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| flip start | 1 | all | 824 | 970 | 80.6% | 94.9% | 782 | 188 | 42 |
+| flip start | 1 | bots | 632 | 738 | 80.6% | 94.1% | 595 | 143 | 37 |
+| flip start | 1 | humans | 192 | 232 | 80.6% | 97.4% | 187 | 45 | 5 |
+| flip start | 4 | all | 1627 | 1811 | 81.3% | 90.5% | 1472 | 339 | 155 |
+| flip start | 4 | bots | 1244 | 1359 | 81.7% | 89.2% | 1110 | 249 | 134 |
+| flip start | 4 | humans | 383 | 452 | 80.1% | 94.5% | 362 | 90 | 21 |
+| flip start | 8 | all | 1618 | 1722 | 80.1% | 85.3% | 1380 | 342 | 238 |
+| flip start | 8 | bots | 1238 | 1279 | 80.3% | 83.0% | 1027 | 252 | 211 |
+| flip start | 8 | humans | 380 | 443 | 79.7% | 92.9% | 353 | 90 | 27 |
+| double jump | 1 | all | 162 | 218 | 74.3% | 100.0% | 162 | 56 | 0 |
+| double jump | 1 | bots | 133 | 179 | 74.3% | 100.0% | 133 | 46 | 0 |
+| double jump | 1 | humans | 29 | 39 | 74.4% | 100.0% | 29 | 10 | 0 |
+| double jump | 4 | all | 324 | 446 | 72.6% | 100.0% | 324 | 122 | 0 |
+| double jump | 4 | bots | 266 | 360 | 73.9% | 100.0% | 266 | 94 | 0 |
+| double jump | 4 | humans | 58 | 86 | 67.4% | 100.0% | 58 | 28 | 0 |
+| double jump | 8 | all | 324 | 1210 | 26.7% | 99.7% | 323 | 887 | 1 |
+| double jump | 8 | bots | 266 | 971 | 27.3% | 99.6% | 265 | 706 | 1 |
+| double jump | 8 | humans | 58 | 239 | 24.3% | 100.0% | 58 | 181 | 0 |
+| in-flip rule vs damping label | 1 | all | 33244 | 38276 | 85.3% | 98.2% | 32639 | 5637 | 605 |
+| in-flip rule vs damping label | 1 | bots | 23652 | 27058 | 85.9% | 98.2% | 23233 | 3825 | 419 |
+| in-flip rule vs damping label | 1 | humans | 9592 | 11218 | 83.8% | 98.1% | 9406 | 1812 | 186 |
+| in-flip rule vs damping label | 4 | all | 17667 | 15849 | 96.5% | 86.6% | 15296 | 553 | 2371 |
+| in-flip rule vs damping label | 4 | bots | 12592 | 11374 | 97.0% | 87.6% | 11036 | 338 | 1556 |
+| in-flip rule vs damping label | 4 | humans | 5075 | 4475 | 95.2% | 83.9% | 4260 | 215 | 815 |
+| in-flip rule vs damping label | 8 | all | 9501 | 7454 | 96.6% | 75.7% | 7197 | 257 | 2304 |
+| in-flip rule vs damping label | 8 | bots | 6785 | 5357 | 97.0% | 76.6% | 5197 | 160 | 1588 |
+| in-flip rule vs damping label | 8 | humans | 2716 | 2097 | 95.4% | 73.6% | 2000 | 97 | 716 |
+| in-flip rule vs air_state Dodging | 1 | all | 48458 | 38276 | 87.8% | 69.3% | 33604 | 4672 | 14854 |
+| in-flip rule vs air_state Dodging | 1 | bots | 35253 | 27058 | 88.5% | 67.9% | 23954 | 3104 | 11299 |
+| in-flip rule vs air_state Dodging | 1 | humans | 13205 | 11218 | 86.0% | 73.1% | 9650 | 1568 | 3555 |
+| in-flip rule vs air_state Dodging | 4 | all | 24103 | 15849 | 96.7% | 63.6% | 15319 | 530 | 8784 |
+| in-flip rule vs air_state Dodging | 4 | bots | 17502 | 11374 | 97.2% | 63.2% | 11055 | 319 | 6447 |
+| in-flip rule vs air_state Dodging | 4 | humans | 6601 | 4475 | 95.3% | 64.6% | 4264 | 211 | 2337 |
+| in-flip rule vs air_state Dodging | 8 | all | 11962 | 7454 | 96.8% | 60.3% | 7212 | 242 | 4750 |
+| in-flip rule vs air_state Dodging | 8 | bots | 8664 | 5357 | 97.3% | 60.1% | 5211 | 146 | 3453 |
+| in-flip rule vs air_state Dodging | 8 | humans | 3298 | 2097 | 95.4% | 60.7% | 2001 | 96 | 1297 |
+| stall rule | 1 | all | 11246 | 7317 | 40.9% | 26.6% | 2995 | 4322 | 8251 |
+| stall rule | 1 | bots | 11123 | 6571 | 44.7% | 26.4% | 2938 | 3633 | 8185 |
+| stall rule | 1 | humans | 123 | 746 | 7.6% | 46.3% | 57 | 689 | 66 |
+| stall rule | 4 | all | 5826 | 2915 | 45.2% | 22.6% | 1317 | 1598 | 4509 |
+| stall rule | 4 | bots | 5765 | 2704 | 47.9% | 22.4% | 1294 | 1410 | 4471 |
+| stall rule | 4 | humans | 61 | 211 | 10.9% | 37.7% | 23 | 188 | 38 |
+| stall rule | 8 | all | 2979 | 1439 | 41.4% | 20.0% | 596 | 843 | 2383 |
+| stall rule | 8 | bots | 2946 | 1344 | 43.5% | 19.9% | 585 | 759 | 2361 |
+| stall rule | 8 | humans | 33 | 95 | 11.6% | 33.3% | 11 | 84 | 22 |
+| flip cancel rule | 1 | all | 19374 | 5395 | 60.9% | 17.0% | 3285 | 2110 | 16089 |
+| flip cancel rule | 1 | bots | 13429 | 3907 | 64.4% | 18.8% | 2518 | 1389 | 10911 |
+| flip cancel rule | 1 | humans | 5945 | 1488 | 51.5% | 12.9% | 767 | 721 | 5178 |
+| flip cancel rule | 4 | all | 9022 | 1949 | 64.6% | 14.0% | 1260 | 689 | 7762 |
+| flip cancel rule | 4 | bots | 6001 | 1535 | 63.4% | 16.2% | 973 | 562 | 5028 |
+| flip cancel rule | 4 | humans | 3021 | 414 | 69.3% | 9.5% | 287 | 127 | 2734 |
+| flip cancel rule | 8 | all | 4318 | 822 | 61.8% | 11.8% | 508 | 314 | 3810 |
+| flip cancel rule | 8 | bots | 2785 | 657 | 57.8% | 13.6% | 380 | 277 | 2405 |
+| flip cancel rule | 8 | humans | 1533 | 165 | 77.6% | 8.3% | 128 | 37 | 1405 |
+| jump press (any branch) | 1 | all | 2121 | 13903 | 13.6% | 89.2% | 1891 | 12012 | 230 |
+| jump press (any branch) | 1 | bots | 1648 | 11497 | 12.7% | 88.3% | 1456 | 10041 | 192 |
+| jump press (any branch) | 1 | humans | 473 | 2406 | 18.1% | 92.0% | 435 | 1971 | 38 |
+| jump press (any branch) | 4 | all | 4215 | 8907 | 41.1% | 86.9% | 3661 | 5246 | 554 |
+| jump press (any branch) | 4 | bots | 3270 | 7212 | 38.9% | 85.8% | 2805 | 4407 | 465 |
+| jump press (any branch) | 4 | humans | 945 | 1695 | 50.5% | 90.6% | 856 | 839 | 89 |
+| jump press (any branch) | 8 | all | 4199 | 6166 | 57.8% | 84.9% | 3565 | 2601 | 634 |
+| jump press (any branch) | 8 | bots | 3258 | 4910 | 55.4% | 83.5% | 2720 | 2190 | 538 |
+| jump press (any branch) | 8 | humans | 941 | 1256 | 67.3% | 89.8% | 845 | 411 | 96 |
+| jump press, ground branch | 1 | all | 1105 | 978 | 95.5% | 84.5% | 934 | 44 | 171 |
+| jump press, ground branch | 1 | bots | 880 | 748 | 95.7% | 81.4% | 716 | 32 | 164 |
+| jump press, ground branch | 1 | humans | 225 | 230 | 94.8% | 96.9% | 218 | 12 | 7 |
+| jump press, ground branch | 4 | all | 2249 | 1962 | 93.6% | 81.6% | 1836 | 126 | 413 |
+| jump press, ground branch | 4 | bots | 1791 | 1495 | 93.7% | 78.2% | 1401 | 94 | 390 |
+| jump press, ground branch | 4 | humans | 458 | 467 | 93.1% | 95.0% | 435 | 32 | 23 |
+| jump press, ground branch | 8 | all | 1542 | 1138 | 93.2% | 68.8% | 1061 | 77 | 481 |
+| jump press, ground branch | 8 | bots | 1235 | 835 | 93.8% | 63.4% | 783 | 52 | 452 |
+| jump press, ground branch | 8 | humans | 307 | 303 | 91.7% | 90.6% | 278 | 25 | 29 |
+| ground/air dispatch | 1 | all | 254040 | 260331 | 97.5% | 99.9% | 253760 | 6571 | 280 |
+| ground/air dispatch | 1 | bots | 151712 | 156642 | 96.7% | 99.8% | 151467 | 5175 | 245 |
+| ground/air dispatch | 1 | humans | 102328 | 103689 | 98.7% | 100.0% | 102293 | 1396 | 35 |
+| ground/air dispatch | 4 | all | 126670 | 129758 | 97.5% | 99.9% | 126532 | 3226 | 138 |
+| ground/air dispatch | 4 | bots | 75673 | 78073 | 96.8% | 99.8% | 75546 | 2527 | 127 |
+| ground/air dispatch | 4 | humans | 50997 | 51685 | 98.6% | 100.0% | 50986 | 699 | 11 |
+| ground/air dispatch | 8 | all | 63193 | 64684 | 97.6% | 99.9% | 63126 | 1558 | 67 |
+| ground/air dispatch | 8 | bots | 37769 | 38925 | 96.9% | 99.8% | 37709 | 1216 | 60 |
+| ground/air dispatch | 8 | humans | 25424 | 25759 | 98.7% | 100.0% | 25417 | 342 | 7 |
+
+**Flip direction** (true flip starts that the solver also flagged; angle between the solver's `(-pitch, yaw)` direction and the recorded `dodge_dir`, degrees; always-forward baseline p50 / p90 45.0 / 90.0):
+
+| span | n | p50 | p90 | p99 | within 30 deg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 782 | 0.0 | 11.9 | 51.3 | 93.9% |
+| 4 | 1,472 | 0.7 | 13.9 | 52.9 | 93.4% |
+| 8 | 1,380 | 2.5 | 20.9 | 60.9 | 92.5% |
+
+**Where the rules fire** (d = 1, all spans of the class; the same table for d = 4, 8 is in the full output): the solver dispatches 99.9% of ground spans to the ground branch, 0.7% of free flight spans, 7.2% of jump/dodge-state spans (the car has just left the ground) and 90.3% of the (few) mixed spans; the in-flip rule fires in 0.0% of ground, 3.9% of free-flight (0.9% at d = 4 and 8), 52.1% of jump/dodge-state spans; the stall rule in 1.2% of free-flight spans and 9.1% of jump/dodge spans; the cancel rule in 0.9% and 6.6%; the double-jump rule in 0.0% / 0.3% (d = 1) but 17.0% of mixed spans at d = 8 (the first jump from the ground is also a 292 UU/s impulse along the car's up axis, which the rule cannot tell from a double jump: 784 of the 1,210 d = 8 double-jump calls are in takeoff/landing spans).
+
+**Ground throttle by speed** (all populations; solver output after the deadzone against the true throttle bucket: below -0.5, within 0.5, above 0.5):
+
+| span | forward speed (UU/s) | truth throttle -1: solver agrees | truth 0: solver agrees | truth +1: solver agrees | truth +1 called 0 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | below 1000 | 95.6% (2208) | 94.6% (4359) | 91.3% (27718) | 8.5% |
+| 1 | 1000-1400 | 94.1% (1633) | 94.4% (4887) | 76.4% (68273) | 23.4% |
+| 1 | 1400 and above | 65.4% (3356) | 77.4% (10800) | 55.2% (129529) | 44.6% |
+| 4 | below 1000 | 94.5% (915) | 92.4% (2263) | 93.2% (13678) | 6.6% |
+| 4 | 1000-1400 | 94.1% (700) | 92.1% (2613) | 87.7% (33464) | 12.1% |
+| 4 | 1400 and above | 68.2% (1442) | 69.4% (5711) | 71.7% (63488) | 28.2% |
+
+Throttle only moves the car where the drive force is not small: the drive curve falls from 1 at 0 UU/s to 0.1 at 1,400 and 0 at 1,410 UU/s. Above 1,400 UU/s a held throttle gives no acceleration, so it looks like a coast (and in a hard turn the sideways friction takes the same speed off, 'frame 5037: speed 1383, throttle 1, steer -1, net acceleration -79 UU/s^2'); at 1,000-1,400 UU/s a turn does it too. In windows of true throttle 1 the solver says 0 for 34% of d = 1 spans (23% at 1,000-1,400, 45% above 1,400), the deadzone zeroing a small positive estimate. Brake (throttle -1) is found at 94-96% below 1,400 UU/s.
+
+**Free-flight aerial inverse by angular speed** (angular speed at the end of the span; the formula cannot see a clamped angular velocity, and the C++ scale-up of 1.25 near the cap only partly makes up for it):
+
+| span | angular speed | car-spans | pitch MAE / within 0.1 | yaw | roll |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | below 5.45 rad/s | 103,433 | 0.136 / 82.0% | 0.072 / 89.9% | 0.056 / 93.3% |
+| 1 | at the 5.5 rad/s cap | 15,532 | 0.862 / 26.2% | 0.512 / 48.2% | 0.178 / 78.6% |
+| 4 | below 5.45 rad/s | 49,529 | 0.138 / 78.0% | 0.087 / 82.4% | 0.052 / 91.8% |
+| 4 | at the 5.5 rad/s cap | 7,220 | 0.634 / 21.8% | 0.362 / 46.5% | 0.159 / 78.8% |
+| 8 | below 5.45 rad/s | 23,448 | 0.157 / 68.1% | 0.122 / 68.8% | 0.074 / 85.5% |
+| 8 | at the 5.5 rad/s cap | 3,260 | 0.498 / 25.0% | 0.343 / 39.7% | 0.157 / 76.8% |
+
+**Variants** (the `Solver variants` table of the full output): switching the in-flip rule off leaves free flight unchanged (pitch within 0.1 74.7% both at d = 1) and makes the jump/dodge state worse (pitch 40.9% to 37.2%, yaw 64.2% to 59.2%), so the rule's stall/cancel overrides help more than the false in-flip alarms in free flight cost; with the deadzones and clamps off the aerial channels are about as accurate within 0.1 but the yaw and steer MAE doubles (0.130 to 0.260 free flight; ground steer 0.070 to 0.563 because the unclamped steer is a ratio of small numbers).
+
+**Answer: which heuristics are good enough, and which are not.** What the replay does not give us is the airborne pitch, yaw and roll (and the flip cancel); throttle, steer and handbrake are observed and boost, jump and dodge come from replicated counters. Judged on exact consecutive states (best case; replay frames will be worse):
+
+*Good enough to infer an input the replay lacks:*
+
+- **The aerial orientation inverse (`ReverseAirOrientInputs`) in free flight**, as an estimate of the mean input over the span: within 0.1 for pitch / yaw / roll 74.7% / 84.5% / 91.3% (d = 1), 70.9% / 77.8% / 90.2% (d = 4) and 62.8% / 65.2% / 84.4% (d = 8), against 42% / 40% / 47% for all zeros, and better than holding the previous input for yaw and roll at d = 4 (74% / 74% / 73% for the held input) and for all three at d = 8 (53% / 52% / 51%). Below the angular-speed cap it is 82% / 90% / 93% at d = 1. It fails at the 5.5 rad/s cap (13% of free-flight spans; pitch 26%, yaw 48%, roll 79%), is worse for the human players (pitch 52%, yaw 63%, roll 83% at d = 1), and is unreliable in the jump/dodge states (pitch 41%, roll 57% at d = 1; 38% / 50% at d = 4). It is the same quantity as the converter's own inverse (the earlier table), so it adds nothing there; it is the right kind of estimate to label as an inferred input with provenance, never as the player's input.
+- **Flip start and direction from the velocity delta.** Flip start: recall 94.9% / 90.5% / 85.3% (d = 1 / 4 / 8) at precision 80-81% (the false alarms are impulses from the ball, cars and the ground, not flips; 108 of 188 d = 1 false positives are in free flight). Direction: median error 0.0 / 0.7 / 2.5 degrees and 92-94% within 30 degrees against a forward-flip baseline of 45 degrees. Good enough as a cross-check or fallback where the dodge counters or torque are missing.
+- **Ground steer** as a fallback for a missing steer: right sign in 98% of spans with |steer| above 0.25, within 0.1 of the true mean in 84.4% / 74.8% / 65.7% (d = 1 / 4 / 8) against 33% / 30% / 27% for zeros; bots 88.7% and humans 78.1% at d = 1. Not better than the observed value, and holding the previous true input beats it at every span where inputs exist (94.7% / 82.7% / 70.1%).
+- **Ground jump press** from the vertical velocity: precision 95.5% / 93.6% / 93.2%, recall 84.5% / 81.6% / 68.8% (bots 81% and humans 97% at d = 1).
+- **Ground/air dispatch:** 98.4-98.5% accuracy at every span (recall for ground 99.9%; the errors are cars still in wheel range right after a jump: 4,681 of 6,571 d = 1 false 'on ground' calls are in the Jumping/DoubleJumping/Dodging states).
+- **Boost from velocity:** accuracy 95.8% on the ground and 97.5% in free flight at d = 1 (ground: recall 92.9%, precision 80.1%; free flight recall 92.2%, precision 97.3%); at d = 8 the ground recall stays 93% (precision 73.5%) while the free-flight recall falls to 63%. Redundant where the boost counter exists; a fallback otherwise.
+
+*Not good enough:*
+
+- **Ground throttle**: 49.6% / 65.8% / 59.9% within 0.1; usable only below about 1,000 UU/s (true throttle 1 called 1 in 91% of spans there, 76% at 1,000-1,400, 55% above 1,400 where throttle has no physical effect and cannot be inferred). Throttle is observed in the replay anyway.
+- **Handbrake**: precision 17.5% / 22.8% / 27.8% and recall 32.5% / 33.3% / 36.2%; the accuracy (91.6% at d = 1) is below that of predicting never (96.2%). It is not an identifiable input from alignment alone (powerslides are brief and overlap with ordinary turning); use the observed handbrake.
+- **Air throttle** (72.6% within 0.1 against 68.0% for all zeros) and **boost in the jump/dodge states** (accuracy 87.6% against 81.1% for zeros; recall 49%).
+- **Double-jump detection** as a stand-alone rule: recall 100% but precision 73-74% at d = 1 and 4 and 27% at d = 8 (it cannot tell a ground jump's takeoff impulse from the second jump); only usable with the flags `has_jumped` / `has_double_jumped` that the replay supplies.
+- **The in-flip, stall and flip-cancel rules.** The in-flip rule is a fair detector of the flip's damping window (precision 85% / recall 98% at d = 1, 97% / 87% at d = 4) but misses the first 0.15 s of every flip and fires in 3.9% of free-flight spans at d = 1. The stall rule has precision 41% and recall 27% and fires in 1.2% of free-flight spans; the cancel rule has precision 61% and recall 17% (consistent with the sparse-packet finding that its in-sample use is worse than fitting no cancel). The jump output of the air branch (continued jump after a jump from the ground, double jump, flip, stall) has precision 7.4% at d = 1 (957 true presses among 12,925 outputs), so the air `jump` should be ignored.
+
+For the converter this changes nothing: the aerial inverse is already in place and the flip cancel stays fitted by simulation; the other heuristics duplicate observed channels or are not accurate enough to replace them. Output of this run: `target/bench/rlcis_full.md` (all tables, per-game and by population, ignored).
