@@ -314,6 +314,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         let mut ball_rows: BTreeMap<String, Rows> = BTreeMap::new();
+        // Car-ball consistency: the best single true tick for the exported car and ball of a frame, and the
+        // relative-position error there (zero when both sit on one tick, whatever the absolute offset).
+        let mut rel_err: Vec<f32> = Vec::new();
+        let mut rel_tick: Vec<f32> = Vec::new();
         // Full car state (not only physics): counts of mismatches with the truth, by fresh packet or not.
         let mut flags: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // name -> (n, mismatches)
         let mut boost_err: Vec<f32> = Vec::new();
@@ -331,6 +335,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             let offset = offset_at(f);
             if active {
                 let server_tick = converted.timeline_tick as i64 - offset;
+                // Contact consistency for the car nearest the ball.
+                let ball_sim = &converted.state.ball.phys;
+                if let Some((slot, (_, car_sim))) = converted
+                    .state
+                    .cars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (i, c))
+                    .filter(|(_, c)| (c.1.phys.pos - ball_sim.pos).length() < 350.0)
+                    .min_by(|a, b| (a.1.1.phys.pos - ball_sim.pos).length().total_cmp(&(b.1.1.phys.pos - ball_sim.pos).length()))
+                {
+                    if let Some(name) = slot_name.get(&slot) {
+                        let exported = car_sim.phys.pos - ball_sim.pos;
+                        let mut best = (f32::INFINITY, 0i64);
+                        for tau in server_tick - 20..=server_tick + 20 {
+                            let Some(players) = truth.get(&(tau.max(0) as u64)) else { continue };
+                            let (Some(tc), Some(tb)) = (players.get(name), players.get("BALL#")) else { continue };
+                            let e = (exported - (tc.pos - tb.pos)).length();
+                            if e < best.0 {
+                                best = (e, tau - server_tick);
+                            }
+                        }
+                        if best.0.is_finite() {
+                            rel_err.push(best.0);
+                            rel_tick.push(best.1 as f32);
+                        }
+                    }
+                }
                 if let Some(players) = truth.get(&(server_tick.max(0) as u64)) {
                     if let Some(tb) = players.get("BALL#") {
                         let near = players
@@ -709,6 +741,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quantile(values, 0.9),
                 quantile(&mut abs, 0.5),
                 quantile(&mut abs, 0.9),
+            );
+        }
+        if !rel_err.is_empty() {
+            let mut ticks = rel_tick.clone();
+            println!(
+                "  car-ball consistency over {} frames with a car within 350 UU of the ball: relative position error at the best common true tick p50/p90/p99 {:.1}/{:.1}/{:.1} UU; that tick minus the frame's tick p10/p50/p90 {:.0}/{:.0}/{:.0}",
+                rel_err.len(),
+                quantile(&mut rel_err.clone(), 0.5), quantile(&mut rel_err.clone(), 0.9), quantile(&mut rel_err, 0.99),
+                quantile(&mut ticks.clone(), 0.1), quantile(&mut ticks.clone(), 0.5), quantile(&mut ticks, 0.9)
             );
         }
         if label.starts_with("all fits") {
