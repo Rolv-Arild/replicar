@@ -915,3 +915,43 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         diagnostics: tracker.diagnostics,
     })
 }
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    fn demolish(victim: i32) -> Event {
+        Event::Demolish {
+            source: "extended",
+            attacker_car: Some(1),
+            victim_car: Some(victim),
+            attacker_pri: None,
+            self_demolish: false,
+            attacker_velocity: [0.0; 3],
+            victim_velocity: [0.0; 3],
+            repeat: false,
+        }
+    }
+
+    fn repeat_of(frame: &Frame) -> bool {
+        match &frame.events[0] {
+            Event::Demolish { repeat, .. } => *repeat,
+            _ => unreachable!(),
+        }
+    }
+
+    /// A car cannot be demolished again within the 3 s it spends demolished: a report of the same victim
+    /// 1.7 s later is a repeat, one 4.4 s later a new demolition, and another victim is unaffected.
+    #[test]
+    fn a_demolition_reported_again_within_the_respawn_time_is_a_repeat() {
+        let mut tracker = Tracker::default();
+        let first = tracker.snapshot(0, 10.0, 0.03, vec![demolish(7)], Vec::new());
+        assert!(!repeat_of(&first));
+        let again = tracker.snapshot(1, 11.7, 0.03, vec![demolish(7)], Vec::new());
+        assert!(repeat_of(&again));
+        let other = tracker.snapshot(2, 11.8, 0.03, vec![demolish(8)], Vec::new());
+        assert!(!repeat_of(&other));
+        let later = tracker.snapshot(3, 16.1, 0.03, vec![demolish(7)], Vec::new());
+        assert!(!repeat_of(&later));
+    }
+}

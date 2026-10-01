@@ -323,4 +323,36 @@ mod tests {
         assert_eq!(sb[599].clock_state, "decided");
         assert_eq!(sb.last().unwrap().seconds_remaining, Some(0.0));
     }
+
+    /// Overtime counts up from 0 at its kickoff touch (here t = 2.0 s) and the replay shows the ceiling.
+    #[test]
+    fn the_overtime_clock_counts_up_from_the_touch() {
+        let mut frames = Vec::new();
+        for i in 0..450 {
+            let t = i as f32 / 30.0;
+            let played = f64::from((t - 2.0).max(0.0));
+            let (state, shown) = if t < 0.5 { ("Countdown", 0) } else { ("Active", played.ceil() as i32) };
+            frames.push(frame(i, t, state, shown, true));
+        }
+        let replay = ObservedReplay {
+            header: Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let sb = reconstruct(&replay);
+        assert_eq!(sb[10].clock_state, "countdown");
+        assert_eq!(sb[30].clock_state, "kickoff");
+        for (i, s) in sb.iter().enumerate().skip(30) {
+            let t = i as f32 / 30.0;
+            let truth = (t - 2.0).max(0.0);
+            let x = s.overtime_seconds.expect("overtime clock");
+            assert!((x - truth).abs() < 0.05, "frame {i}: {x} vs {truth}");
+            assert_eq!(s.period, "overtime");
+        }
+        assert_eq!(sb[300].clock_state, "running");
+    }
 }

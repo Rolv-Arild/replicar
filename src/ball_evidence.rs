@@ -169,3 +169,90 @@ pub fn ball_intervals(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observations::{Body, Frame, Header, Source, Value};
+    use rocketsim::Vec3A;
+
+    fn value<T>(value: T, frame: usize) -> Option<Value<T>> {
+        Some(Value {
+            value,
+            frame,
+            source: Source::Replay,
+        })
+    }
+
+    fn ball_frame(index: usize, time: f32, state: &BallState) -> Frame {
+        Frame {
+            index,
+            time,
+            delta: 1.0 / 30.0,
+            ball: Some(Body {
+                position: value(state.phys.pos.to_array(), index),
+                linear_velocity: value(state.phys.vel.to_array(), index),
+                ..Body::default()
+            }),
+            cars: Vec::new(),
+            players: Vec::new(),
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: value("Active".to_string(), index),
+            events: Vec::new(),
+            pad_pickups: Vec::new(),
+        }
+    }
+
+    /// A ball rolled alone for four ticks between packets is a quiet interval; the same ball with a
+    /// kick of 600 UU/s applied half way is a contact.
+    #[test]
+    fn a_kick_between_two_ball_packets_is_a_contact() {
+        let options = ConvertOptions::default();
+        rocketsim::init(Path::new(&options.collision_meshes), true).unwrap();
+        let mut arena = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
+        let mut start = BallState::default();
+        start.phys.pos = Vec3A::new(500.0, 200.0, 900.0);
+        start.phys.vel = Vec3A::new(700.0, -300.0, 200.0);
+        let mut run = |kick: Option<Vec3A>| -> Vec<BallState> {
+            arena.set_ball_state(start);
+            let mut states = vec![*arena.get_ball_state()];
+            for tick in 1..=8 {
+                if tick == 3 {
+                    if let Some(kick) = kick {
+                        let mut b = *arena.get_ball_state();
+                        b.phys.vel += kick;
+                        arena.set_ball_state(b);
+                    }
+                }
+                arena.step_tick();
+                states.push(*arena.get_ball_state());
+            }
+            states
+        };
+        for (kick, expect_contact) in [(None, false), (Some(Vec3A::new(0.0, 600.0, 100.0)), true)] {
+            let states = run(kick);
+            // Packets at ticks 0 and 4 of an 8 tick timeline at 30 fps (4 ticks per frame).
+            let frames = vec![ball_frame(0, 0.0, &states[0]), ball_frame(1, 4.0 / 120.0, &states[4])];
+            let replay = ObservedReplay {
+                header: Header {
+                    game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                    levels: Vec::new(),
+                    final_team_scores: [None, None],
+                },
+                frames,
+                diagnostics: Default::default(),
+            };
+            let lags = PacketLags {
+                ball: vec![Some(0.0), Some(0.0)],
+                cars: vec![None, None],
+                ..PacketLags::default()
+            };
+            let intervals = ball_intervals(&replay, &lags, &options).unwrap();
+            assert_eq!(intervals.len(), 1);
+            let contact = intervals[0].velocity_residual > CONTACT_VELOCITY_THRESHOLD;
+            assert_eq!(contact, expect_contact, "residual {}", intervals[0].velocity_residual);
+        }
+    }
+}
