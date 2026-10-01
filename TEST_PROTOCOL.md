@@ -64,16 +64,17 @@ python scripts/summarize_reference.py target/test-default.json target/test-align
 
 ## 4. Held-out accuracy: development reference and acceptance
 
-Development reference from the train and validation splits at commit `96d1e0a` (reports in
-`target/ref/*.json`, regenerate with the same commands on those splits; the summary is
-`python scripts/summarize_reference.py target/ref/{train,validation}-{default,aligned}.json`).
+Development reference from the train and validation splits at commit `3f91f6d` (behaviourally the tip `3cb1938`; reports in
+`target/ref-new/*.json`, regenerate with `scripts/run_reference.sh`; the summary is
+`python scripts/summarize_reference.py target/ref-new/{train,validation}-{default,aligned}.json`). It matches the earlier
+reference at `96d1e0a` to rounding on every row (60 of 60 validation replays convert; sample counts +0.1%).
 The numbers below are validation unless stated; train differs by at most a few percent.
 
 | Metric (p50 / p90 / p99) | Simulated | Hold baseline | Linear baseline |
 | --- | --- | --- | --- |
-| Car position error before correction, UU (n 1,055,789) | 0.05 / 3.7 / 33 | 112 / 188 / 230 | 17.6 / 44 / 71 |
+| Car position error before correction, UU (n 1,056,574) | 0.05 / 3.7 / 33 | 112 / 188 / 230 | 17.6 / 44 / 71 |
 | Ball position error before correction, UU (n 543,266) | 0.01 / 0.0 / 19 | 47 / 96 / 154 | 9.9 / 35 / 70 |
-| Car one-step velocity residual, UU/s | 1.4 / 48 / 316 | 82 / 327 / 811 | |
+| Car one-step velocity residual, UU/s | 1.4 / 48 / 315 | 82 / 327 / 811 | |
 | Car one-step rotation, deg | 0.25 / 2.4 / 10 | | |
 | Car one-step angular velocity, rad/s | 0.07 / 0.5 / 2 | | |
 | Masked car position, 1 frame ahead, UU (default) | 16.6 / 41 / 76 | 112 / 187 / 230 | 17.7 / 44 / 77 |
@@ -92,7 +93,7 @@ Acceptance, per metric and per game size (1v1, 2v2, 3v3), for the test split aga
 * the ordering simulated < linear < hold of the masked rows holds at every horizon and size;
 * no individual replay has a car p90 above three times the validation p90 of its game size, and any that
   has is listed with its cause when it can be found from its own data;
-* 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 9 s, maximum 24 s per replay with four converting in parallel, 120 replays).
+* 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 9 s, maximum 24 s per replay with four converting in parallel, 120 replays, before the speedups of 2026-10-01; the reference run now takes 271 / 478 s on train and 279 / 486 s on validation, default / aligned, against 395 / 815 and 346 / 625 s; re-measure the per-replay maximum at the freeze).
 A miss is reported as a finding, not as a failure of the assessment.
 
 ## 5. Truth-free consistency checks (reported, not graded against validation)
