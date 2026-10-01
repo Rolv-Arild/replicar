@@ -30,8 +30,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if arg == "--no-inferred-jump" {
             options.infer_jump_from_active = false;
             options.gate_jump_on_observed_impulse = false;
-        } else if arg == "--align-contacts" {
-            options.align_contacts = true;
+        } else if arg == "--no-align-contacts" {
+            options.align_contacts = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
         } else if arg == "--gated-low-air-angular" {

@@ -289,7 +289,7 @@ impl Default for ConvertOptions {
             gate_dodge_on_observed_impulse: true,
             apply_observed_demolitions: true,
             contacts_from_ball_packets: true,
-            align_contacts: false,
+            align_contacts: true,
             disable_simulated_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
@@ -1718,6 +1718,24 @@ pub struct PacketLags {
     /// number of bridged ball hits found.
     pub ball_car_offset: Option<f32>,
     pub bridged_hits: usize,
+    /// The exact-chain runs of the cars: every packet of one run shares one level (its start), which
+    /// may move by whole ticks inside `[lo, hi]` (`contact_alignment` moves whole runs).
+    pub car_runs: Vec<CarRun>,
+    /// The run (index in `car_runs`) of each car packet that belongs to one, by (actor, lifetime, frame).
+    pub car_run_of: HashMap<(i32, usize, usize), usize>,
+}
+
+/// One exact-chain run of a car's packets on the integer timeline.
+#[derive(Debug, Clone)]
+pub struct CarRun {
+    pub actor: i32,
+    pub created: usize,
+    /// (frame, K): the packet's physical tick is `start + K`.
+    pub entries: Vec<(usize, i64)>,
+    /// Feasible integer starts and the chosen one.
+    pub lo: i64,
+    pub hi: i64,
+    pub start: i64,
 }
 
 /// One fresh packet of a chained object: frame index, position, and velocity.
@@ -2437,11 +2455,21 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
         }
     }
     for ((actor, created), run) in &car_runs {
+        let index = lags.car_runs.len();
         for &(frame, k) in &run.entries {
             let lag = (timeline(frame) - (run.start + k)).max(0) as f32;
             per_frame[frame].push(lag);
             lags.car_actor.insert((*actor, *created, frame), lag);
+            lags.car_run_of.insert((*actor, *created, frame), index);
         }
+        lags.car_runs.push(CarRun {
+            actor: *actor,
+            created: *created,
+            entries: run.entries.clone(),
+            lo: run.lo,
+            hi: run.hi,
+            start: run.start,
+        });
     }
     for (frame, values) in per_frame.iter_mut().enumerate() {
         if !values.is_empty() {

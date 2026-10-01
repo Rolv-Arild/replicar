@@ -355,7 +355,7 @@ pub(crate) fn header_json(
         record_type: "header",
         schema_version: SCHEMA_VERSION,
         source_sha256,
-        boxcars_version: "0.11.5",
+        boxcars_version: "0.12.0",
         rocketsim_revision: ROCKETSIM_REVISION,
         conversion_options: options,
         tick_rate_hz: 120,

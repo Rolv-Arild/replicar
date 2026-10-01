@@ -27,8 +27,8 @@ const SHIFTS: std::ops::RangeInclusive<i64> = -3..=3;
 const MIN_IMPROVEMENT: f32 = 30.0;
 /// The best shift must reproduce the ball's velocity this closely (UU/s) to be believed.
 const MAX_RESIDUAL: f32 = 100.0;
-/// The exported frame the short simulation starts from is at most this many ticks before the hit.
-const MAX_LEAD_TICKS: i64 = 12;
+/// The car packet the simulation starts from is at most this many ticks before the hit.
+const MAX_LEAD_TICKS: i64 = 4;
 /// Shifts within this (UU/s) of the best are equivalent; the smallest one wins.
 const TIE: f32 = 10.0;
 
@@ -39,6 +39,8 @@ pub struct AlignmentSummary {
     pub fitted: usize,
     pub shifted: usize,
     pub shifts: HashMap<i64, usize>,
+    /// Car chain runs moved as a whole.
+    pub moved_runs: usize,
 }
 
 fn phys(body: &Body, frame: usize) -> Option<([f32; 3], [f32; 3], glam::Mat3A, [f32; 3])> {
@@ -62,7 +64,7 @@ pub fn aligned_lags(
     let mut lags = infer_packet_lags(observations, options);
     let mut summary = AlignmentSummary::default();
     // A lag-free replay (every lag zero) has nothing to align.
-    if lags.car_actor.values().all(|l| *l == 0.0) {
+    if lags.car_actor.values().all(|l| *l == 0.0) && std::env::var_os("ALIGN_FORCE").is_none() {
         return Ok((lags, summary));
     }
     // First pass: the normal conversion, for its contacts and exported poses.
@@ -81,6 +83,7 @@ pub fn aligned_lags(
     let mut arena = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
     arena.add_car(Team::Blue, rocketsim::CarBodyConfig::OCTANE);
     let mut current_config = "octane".to_string();
+    let mut votes: HashMap<usize, Vec<i64>> = HashMap::new();
     for converted in &frames {
         for contact in &converted.ball_contacts {
             let Some(slot) = contact.car_slot else { continue };
@@ -97,26 +100,48 @@ pub fn aligned_lags(
             else {
                 continue;
             };
-            // The last exported frame before the hit: the converter's own reconstruction of the car
-            // and the ball at that tick (both on its timeline), the closest start for a short
-            // simulation to the hit.
+            // The car packet closest before the hit: its physics are exact (0.01 UU) at its own tick,
+            // so only the tick is uncertain. The ball starts from its packet before the contact.
             let hit_tick = contact.tick as i64;
-            let Some(start_frame) = (fa.saturating_sub(1)..=fb)
-                .rev()
-                .find(|&f| timeline(f) < hit_tick && hit_tick - timeline(f) <= MAX_LEAD_TICKS)
-            else {
+            let mut packet: Option<(usize, i64)> = None;
+            for g in (fa.saturating_sub(3)..=fb).rev() {
+                let Some(car) = frame_data[g].cars.iter().find(|c| {
+                    c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame
+                }) else {
+                    continue;
+                };
+                if phys(&car.body, g).is_none() {
+                    continue;
+                }
+                let Some(&lag) = lags.car_actor.get(&(car.actor_id, car.actor_created_frame, g)) else {
+                    continue;
+                };
+                let tick = timeline(g) - lag.round() as i64;
+                if tick <= hit_tick + 1 {
+                    packet = Some((g, tick));
+                    break;
+                }
+            }
+            let Some((g, car_tick)) = packet else { continue };
+            if hit_tick - car_tick > MAX_LEAD_TICKS {
                 continue;
-            };
-            let (Some(exported), Some(ball_b)) = (
-                frames.get(start_frame).and_then(|f| f.state.cars.get(slot)),
+            }
+            let car_packet = frame_data[g]
+                .cars
+                .iter()
+                .find(|c| c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame)
+                .and_then(|c| phys(&c.body, g))
+                .expect("checked above");
+            let (Some(ball_a), Some(ball_b), Some(exported)) = (
+                frame_data[fa].ball.as_ref().and_then(|b| phys(b, fa)),
                 frame_data[fb].ball.as_ref().and_then(|b| phys(b, fb)),
+                frames.get(g).and_then(|f| f.state.cars.get(slot)),
             ) else {
                 continue;
             };
-            let exported_ball = frames[start_frame].state.ball;
-            let tick_s = timeline(start_frame);
+            let tick_a = contact.tick_from as i64;
             let tick_b = contact.tick_to as i64;
-            if tick_b <= tick_s || tick_b - tick_s > 40 {
+            if tick_b <= tick_a || tick_b - tick_a > 40 {
                 continue;
             }
             if slot_info.hitbox != current_config {
@@ -124,7 +149,37 @@ pub fn aligned_lags(
                 arena.add_car(Team::Blue, hitbox_config(&slot_info.hitbox));
                 current_config = slot_info.hitbox.clone();
             }
-            let controls: CarControls = exported.1.controls;
+            // The state as in the earlier contact study: the packet's physics on a default car, grounded
+            // when low; the observed throttle, steer, handbrake and boost as controls.
+            let _ = exported;
+            let mut car_state = CarState::default();
+            car_state.phys.pos = glam::Vec3A::from(car_packet.0);
+            car_state.phys.vel = glam::Vec3A::from(car_packet.1);
+            car_state.phys.rot_mat = car_packet.2;
+            car_state.phys.ang_vel = glam::Vec3A::from(car_packet.3) * 0.01;
+            let grounded = car_packet.0[2] < 30.0;
+            car_state.is_on_ground = grounded;
+            car_state.wheels_with_contact = [grounded.then(rocketsim::RaycastHitInfo::default); 4];
+            let observed = frame_data[g]
+                .cars
+                .iter()
+                .find(|c| c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame)
+                .expect("checked above");
+            let controls = CarControls {
+                throttle: observed.inputs.throttle.as_ref().map_or(0.0, |v| v.value),
+                steer: observed.inputs.steer.as_ref().map_or(0.0, |v| v.value),
+                handbrake: observed.inputs.handbrake.as_ref().is_some_and(|v| v.value),
+                boost: observed.inputs.boost_active_raw.as_ref().is_some_and(|v| v.value % 2 == 1),
+                ..CarControls::default()
+            };
+            let ball_state = |p: &([f32; 3], [f32; 3], glam::Mat3A, [f32; 3])| {
+                let mut b = BallState::default();
+                b.phys.pos = glam::Vec3A::from(p.0);
+                b.phys.vel = glam::Vec3A::from(p.1);
+                b.phys.rot_mat = p.2;
+                b.phys.ang_vel = glam::Vec3A::from(p.3) * 0.01;
+                b
+            };
             let parked = {
                 let mut b = BallState::default();
                 b.phys.pos = glam::Vec3A::new(0.0, 0.0, 1800.0);
@@ -132,33 +187,48 @@ pub fn aligned_lags(
             };
             let mut residuals: Vec<(i64, f32)> = Vec::new();
             for shift in SHIFTS {
-                // The car state of the frame placed `shift` ticks later; whichever object is placed
-                // earlier runs alone until the other starts.
-                if shift >= tick_b - tick_s {
+                let tick_c = car_tick + shift;
+                if tick_c >= tick_b {
                     continue;
                 }
                 arena.set_car_controls(0, controls);
-                if shift >= 0 {
-                    ball_arena.set_ball_state(exported_ball);
-                    for _ in 0..shift {
+                // The earlier object runs alone until the later one starts.
+                let t1 = tick_a.max(tick_c);
+                if tick_a <= tick_c {
+                    ball_arena.set_ball_state(ball_state(&ball_a));
+                    for _ in tick_a..tick_c {
                         ball_arena.step_tick();
                     }
                     arena.set_ball_state(*ball_arena.get_ball_state());
-                    arena.set_car_state(0, exported.1);
+                    arena.set_car_state(0, car_state);
                 } else {
                     arena.set_ball_state(parked);
-                    arena.set_car_state(0, exported.1);
-                    for _ in 0..(-shift) {
+                    arena.set_car_state(0, car_state);
+                    for _ in tick_c..tick_a {
                         arena.step_tick();
                     }
-                    arena.set_ball_state(exported_ball);
+                    arena.set_ball_state(ball_state(&ball_a));
                 }
-                for _ in (tick_s + shift.max(0))..tick_b {
-                    step_tick_with_hit_impulse(&mut arena, options.apply_hit_extra_impulse);
+                if shift == 0 && std::env::var_os("ALIGN_DEBUG").is_some() {
+                    let local = arena.get_car_state(0).phys.rot_mat.transpose()
+                        * (arena.get_ball_state().phys.pos - arena.get_car_state(0).phys.pos)
+                        - hitbox_config(&slot_info.hitbox).hitbox_pos_offset;
+                    let q = local.abs() - hitbox_config(&slot_info.hitbox).hitbox_size * 0.5;
+                    let gap = q.max(glam::Vec3A::ZERO).length() + q.max_element().min(0.0) - 91.25;
+                    eprintln!("START gap at the car packet {gap:.1} UU; car speed {:.0}, ball {:.0}; ticks from start to b {}", arena.get_car_state(0).phys.vel.length(), arena.get_ball_state().phys.vel.length(), tick_b - t1);
+                }
+                let mut hit = false;
+                for _ in t1..tick_b {
+                    let events = step_tick_with_hit_impulse(&mut arena, options.apply_hit_extra_impulse);
+                    hit |= events.iter().any(|e| matches!(e, rocketsim::ArenaEvent::CarHitBall(_)));
+                }
+                if shift == 0 && std::env::var_os("ALIGN_DEBUG").is_some() {
+                    eprintln!("   sim hit {hit}");
                 }
                 let v = arena.get_ball_state().phys.vel;
                 residuals.push((shift, (v - glam::Vec3A::from(ball_b.1)).length()));
             }
+            let lead = hit_tick - car_tick;
             let Some(&(_, r0)) = residuals.iter().find(|(s, _)| *s == 0) else { continue };
             let best = residuals.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
             summary.fitted += 1;
@@ -166,15 +236,23 @@ pub fn aligned_lags(
                 eprintln!(
                     "CONTACT car_key={} lead={} residuals={:?}",
                     slot_info.player_key,
-                    hit_tick - tick_s,
+                    lead,
                     residuals.iter().map(|r| (r.0, r.1.round())).collect::<Vec<_>>()
                 );
             }
-            // Only a shift that reproduces the ball's velocity is believed.
+            // Only a shift that reproduces the ball's velocity is believed; a fit that needs none
+            // votes for no shift.
             if best > MAX_RESIDUAL {
                 continue;
             }
+            let run = lags
+                .car_run_of
+                .get(&(car_actor.actor_id, car_actor.actor_created_frame, g))
+                .copied();
             if r0 - best < MIN_IMPROVEMENT {
+                if let Some(run) = run {
+                    votes.entry(run).or_default().push(0);
+                }
                 continue;
             }
             let chosen = residuals
@@ -183,34 +261,45 @@ pub fn aligned_lags(
                 .min_by_key(|(s, _)| s.abs())
                 .map(|(s, _)| *s)
                 .unwrap_or(0);
-            if chosen == 0 {
-                continue;
+            if std::env::var_os("ALIGN_DEBUG").is_some() {
+                let lag_ball = lags.ball[fa];
+                eprintln!(
+                    "CHOSEN shift={chosen} car_key={} car_frame={g} car_tick={car_tick} car_pos={:.2},{:.2},{:.2} ball_frame={fa} ball_tick={tick_a} ball_pos={:.2},{:.2},{:.2} ball_lag={:?}",
+                    slot_info.player_key, car_packet.0[0], car_packet.0[1], car_packet.0[2],
+                    ball_a.0[0], ball_a.0[1], ball_a.0[2], lag_ball
+                );
             }
-            summary.shifted += 1;
-            *summary.shifts.entry(chosen).or_default() += 1;
-            // The car packets that ended before the hit moved with it: the last fresh one is
-            // `chosen` ticks later than its lag said (a smaller lag).
-            let packet_frame = (fa.saturating_sub(3)..=fb).rev().find(|&g| {
-                let Some(car) = frame_data[g].cars.iter().find(|c| {
-                    c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame
-                }) else {
-                    return false;
-                };
-                car.body.position.as_ref().is_some_and(|p| p.frame == g)
-                    && lags.car_actor.get(&(car.actor_id, car.actor_created_frame, g)).is_some_and(|l| {
-                        timeline(g) - l.round() as i64 <= hit_tick
-                    })
-            });
-            if let Some(g) = packet_frame {
-                if let Some(entry) = lags
-                    .car_actor
-                    .get_mut(&(car_actor.actor_id, car_actor.actor_created_frame, g))
-                {
-                    *entry = (*entry - chosen as f32).max(0.0);
-                }
+            if let Some(run) = run {
+                votes.entry(run).or_default().push(chosen);
+            }
+            if chosen != 0 {
+                summary.shifted += 1;
+                *summary.shifts.entry(chosen).or_default() += 1;
             }
         }
     }
+    // A run's packets share one level: it moves by the median of its contacts' shifts when they agree
+    // (within one tick), as far as its feasible range allows.
+    let mut moved_runs = 0usize;
+    for (run_index, mut v) in votes {
+        v.sort_unstable();
+        let median = v[v.len() / 2];
+        if median == 0 || v.iter().any(|x| (x - median).abs() > 1) {
+            continue;
+        }
+        let run = lags.car_runs[run_index].clone();
+        let start = (run.start + median).clamp(run.lo, run.hi);
+        if start == run.start {
+            continue;
+        }
+        moved_runs += 1;
+        for &(frame, k) in &run.entries {
+            let lag = (timeline(frame) - (start + k)).max(0) as f32;
+            lags.car_actor.insert((run.actor, run.created, frame), lag);
+        }
+        lags.car_runs[run_index].start = start;
+    }
+    summary.moved_runs = moved_runs;
     if std::env::var_os("ALIGN_DEBUG").is_some() {
         eprintln!("contact alignment: {summary:?}");
     }
