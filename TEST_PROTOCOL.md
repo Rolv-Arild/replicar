@@ -93,9 +93,9 @@ All 120 train and validation replays convert. The pooled numbers in the table ar
 within a few percent everywhere (the default masked car position at horizon 1 is 17.1 / 44.6 / 76 UU on train against
 16.6 / 41.0 / 75, p90 +9%; the aligned masked ball 0.00 / 14.5 / 31 against 0.00 / 13.3 / 29, p90 +9%), which is why the
 acceptance below is not a fixed percentage.
-The table was regenerated at the merged tip `2f5a37b` (after the second review pass and the dodge-refresh correction;
-reports in `target/ref-merge/`): every row above is unchanged to the printed precision (the one-step ball velocity
-p99 moves 406 to 402 UU/s).
+(History: the validation table was first made at `2e32781`, reports `target/ref-fix/`, and regenerated at the merged
+tip `2f5a37b`, `target/ref-merge/`, with every row unchanged to the printed precision except the one-step ball velocity
+p99, 406 to 402 UU/s. The table below is the `8acdb70` reference.)
 
 | Metric (p50 / p90 / p99) | Simulated | Hold baseline | Linear baseline |
 | --- | --- | --- | --- |
