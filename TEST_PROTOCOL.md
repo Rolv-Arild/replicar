@@ -34,13 +34,25 @@ Defaults that matter (so a reader does not have to read the code): packet lags i
 ground fits against later packets (`air_bvp`, `fit_on_next_packet` off in the held-out evaluators),
 ground timing shifts -8..+40 with the per-car median shift, observed demolitions applied and RocketSim's
 own demo rule off, ball contacts from ball packets on, `align_contacts` on (car chain runs moved by the contacts' timing votes; two conversion passes), pads blocked in the offline
-simulation (the replay's pickups are used), dodge and jump fits on. `evaluate_corpus` and `error_budget`
-force the causal or held-out variant of each fit that would otherwise use the packet being scored.
+simulation (the replay's pickups are used, blocked from the first tick of every interval), dodge and jump fits on.
+
+What the evaluators hold out (an independent review found the earlier text overstated it): `evaluate_corpus`
+scores its one-step residuals from a conversion with the fits that choose a value using the packet being scored
+switched off (`flip_cancel_holdout`, no air-control lookahead, no dodge first-packet tick, no contact alignment;
+`air_bvp` and `fit_on_next_packet` are off as before); `--offline-fits` gives the full offline conversion, whose
+rotation and angular velocity residuals are partly in-sample (section 4, both are reported). The masked
+prediction is a separate conversion with the withheld frames refused by every fit. Its `--aligned-targets`
+variant scores a predictor that infers packet lags against targets from the full offline conversion;
+`--aligned-targets-raw-predictor` scores the default predictor against the same targets. `error_budget` is an
+offline diagnostic breakdown (full fits, in-sample for rotation); its numbers are not held-out.
 
 ## 3. Rules for the run
 
-* Run once, in this order: `evaluate_corpus replays/test target/test-default.json` and
-  `evaluate_corpus replays/test target/test-aligned.json --aligned-targets`, `error_budget replays/test`,
+* Run once, in this order: `evaluate_corpus replays/test target/test-default.json`,
+  `evaluate_corpus replays/test target/test-aligned.json --aligned-targets`,
+  `evaluate_corpus replays/test target/test-aligned-raw.json --aligned-targets-raw-predictor`,
+  `evaluate_corpus replays/test target/test-offline.json --offline-fits`,
+  `error_budget replays/test --final-assessment` (the flag lifts its guard against paths containing "test"),
   `check_scoreboard replays/test`, `count_demolitions replays/test`, and the pad and touch consistency
   counts of section 5. No parameter, threshold, option or code change is made after seeing any result.
 * Every result is reported, including failures and unfavourable splits, with counts and per-size and
@@ -56,43 +68,64 @@ force the causal or held-out variant of each fit that would otherwise use the pa
 cargo build --release --bins
 ./target/release/evaluate_corpus.exe replays/test target/test-default.json
 ./target/release/evaluate_corpus.exe replays/test target/test-aligned.json --aligned-targets
-./target/release/error_budget.exe replays/test
+./target/release/evaluate_corpus.exe replays/test target/test-aligned-raw.json --aligned-targets-raw-predictor
+./target/release/evaluate_corpus.exe replays/test target/test-offline.json --offline-fits
+./target/release/error_budget.exe replays/test --final-assessment
 ./target/release/check_scoreboard.exe replays/test
 ./target/release/count_demolitions.exe replays/test
-python scripts/summarize_reference.py target/test-default.json target/test-aligned.json
+python scripts/summarize_reference.py target/test-default.json target/test-aligned.json target/test-aligned-raw.json target/test-offline.json
 ```
 
 ## 4. Held-out accuracy: development reference and acceptance
 
-Development reference from the train and validation splits at commit `3f91f6d` (behaviourally the tip `3cb1938`; reports in
-`target/ref-new/*.json`, regenerate with `scripts/run_reference.sh`; the summary is
-`python scripts/summarize_reference.py target/ref-new/{train,validation}-{default,aligned}.json`). It matches the earlier
-reference at `96d1e0a` to rounding on every row (60 of 60 validation replays convert; sample counts +0.1%).
-The numbers below are validation unless stated; train differs by at most a few percent.
+Development reference from the validation split at commit `2e32781` (reports in `target/ref-fix/*.json`; a
+run is `evaluate_corpus replays/validation <report> [flag]`, summarised by `python scripts/summarize_reference.py`).
+It is the commit after the independent review of 2026-10-02 (RESULTS.md, "Independent review of the evaluators"),
+which changed the evaluators: the one-step rows are now held out by default and the linear baseline of the aligned
+variant is lag-corrected, so the earlier reference (`96d1e0a`, `3f91f6d`) is not comparable on the rows marked *.
+All 60 validation replays convert. The train split was not re-run for these variants.
 
 | Metric (p50 / p90 / p99) | Simulated | Hold baseline | Linear baseline |
 | --- | --- | --- | --- |
-| Car position error before correction, UU (n 1,056,574) | 0.05 / 3.7 / 33 | 112 / 188 / 230 | 17.6 / 44 / 71 |
-| Ball position error before correction, UU (n 543,266) | 0.01 / 0.0 / 19 | 47 / 96 / 154 | 9.9 / 35 / 70 |
-| Car one-step velocity residual, UU/s | 1.4 / 48 / 315 | 82 / 327 / 811 | |
-| Car one-step rotation, deg | 0.25 / 2.4 / 10 | | |
-| Car one-step angular velocity, rad/s | 0.07 / 0.5 / 2 | | |
-| Masked car position, 1 frame ahead, UU (default) | 16.6 / 41 / 76 | 112 / 187 / 230 | 17.7 / 44 / 77 |
-| Masked car position, 1 frame ahead, UU (`--aligned-targets`) | 0.56 / 16.5 / 55 | 131 / 219 / 268 | 22 / 56 / 91 |
-| Masked ball position, 1 frame ahead, UU (`--aligned-targets`) | 0.00 / 13.3 / 29 | 69 / 128 / 188 | 17 / 49 / 91 |
+| Car position error before correction, UU (n 1,056,574) * | 0.05 / 3.9 / 38 | 112 / 188 / 230 | 17.6 / 44 / 71 |
+| Ball position error before correction, UU (n 543,266) * | 0.01 / 0.0 / 20 | 47 / 96 / 154 | 9.9 / 35 / 70 |
+| Car one-step velocity residual, UU/s * | 1.4 / 49 / 347 | 82 / 327 / 811 | |
+| Car one-step rotation, deg * | 0.29 / 3.1 / 11 | | |
+| Car one-step angular velocity, rad/s * | 0.09 / 0.9 / 3 | | |
+| Masked car position, 1 frame ahead, UU (default) | 16.6 / 41 / 75 | 112 / 187 / 230 | 17.7 / 44 / 77 |
+| Masked ball position, 1 frame ahead, UU (default) | 10.7 / 33 / 66 | 48 / 96 / 159 | 9.8 / 35 / 70 |
+| Masked car position, 1 frame ahead, UU (`--aligned-targets`) * | 0.56 / 16.5 / 54 | 131 / 219 / 268 | 7.1 / 24 / 72 |
+| Masked ball position, 1 frame ahead, UU (`--aligned-targets`) * | 0.00 / 13.3 / 29 | 69 / 128 / 188 | 1.0 / 16 / 76 |
+| Masked car position, 1 frame ahead, UU (`--aligned-targets-raw-predictor`) | 19.1 / 55.5 / 85 | 131 / 219 / 268 | 22 / 56 / 91 |
+| Masked ball position, 1 frame ahead, UU (`--aligned-targets-raw-predictor`) | 16.7 / 47 / 84 | 69 / 128 / 188 | 16.7 / 49 / 91 |
 
-Read the first rows with the caveat of `PLAN.md`: the pre-correction residuals use offline fits against
-later packets (they are reconstruction quality, with the packet being scored held out wherever the code
-says so), while the masked rows are the causal-style prediction. Without the aligned targets the masked
-prediction is no better than a linear extrapolation (16.6 against 17.7 UU at p50): packet timing noise,
-not physics, dominates; the aligned variant removes it.
+Offline-fit values of the starred one-step rows (`--offline-fits`, partly in-sample, the earlier reference): car
+position 0.05 / 3.7 / 33, ball 0.01 / 0.0 / 19, velocity 1.4 / 48 / 315, rotation 0.25 / 2.4 / 10, angular
+velocity 0.07 / 0.5 / 2. The held-out rotation p90 is 29% and the angular velocity p90 80% larger: those two
+rows had been flattered by fits that choose their value from the packet being scored (flip cancel, air
+control lookahead, dodge first-packet tick, contact alignment).
+
+How to read the masked rows. The default masked predictor does not infer packet lags, so it starts from
+stale packets placed at frame time: no better than a linear extrapolation (16.6 against 17.7 UU at p50).
+Scoring it against the aligned (lag-corrected, offline) targets does not help (19.1 against 22.3): the cleaner
+target alone is not what lowers the error. The aligned variant's 0.56 UU comes from the predictor that infers
+lags and uses the lag-dependent ground and jump fits, scored against aligned targets. The linear baseline of
+that variant is extrapolated over the time from the stale packet's tick, using the lags that same masked
+conversion inferred (the earlier table's 22 UU extrapolated over the raw frame time and so kept the timing
+error the simulation had removed). With that baseline the simulation's lead for the car is 7.1 to 0.56 UU at
+p50 and 24 to 16.5 at p90; for the ball the linear baseline is within 1 UU at p50 and 15.6 against 13.3 UU
+at p90 at horizon 1.
 
 Acceptance, per metric and per game size (1v1, 2v2, 3v3), for the test split against validation:
-* the p90 and p99 of every row above are within +10% of the validation values (the p50 within +0.5 UU
+* the p90 and p99 of every row above (starred rows against their held-out values) are within +10% of the validation values (the p50 within +0.5 UU
   or +10%, whichever is larger);
-* the ordering simulated < linear < hold of the masked rows holds at every horizon and size;
+* the ordering simulated < linear < hold of the masked rows holds at every horizon and size (for the aligned
+  ball at horizon 1 the margin to linear at p90 is under 15%; a test-split reversal there is within the
+  expected noise and is reported, not counted as a failure);
 * no individual replay has a car p90 above three times the validation p90 of its game size, and any that
-  has is listed with its cause when it can be found from its own data;
+  has is listed with its cause when it can be found from its own data (checkable from the per-replay report
+  for the one-step position and the masked kinematics rows; the per-replay report has no masked position
+  quantiles, so the masked position rows are checked per game size only);
 * 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 9 s, maximum 24 s per replay with four converting in parallel, 120 replays, before the speedups of 2026-10-01; the reference run now takes 271 / 478 s on train and 279 / 486 s on validation, default / aligned, against 395 / 815 and 346 / 625 s; re-measure the per-replay maximum at the freeze).
 A miss is reported as a finding, not as a failure of the assessment.
 
@@ -124,3 +157,9 @@ itself.
 * Air pitch, yaw and roll are per-interval model controls, not per-tick inputs; held buttons without a
   physical effect are not identifiable.
 * The five-second kickoff fallback of the match clock never occurred in the data and is unverified.
+* The masked conversions of the aligned variants use replay-wide quantities fitted on all frames of the replay,
+  including after the withheld ones: the ball-car lag offset (from all of a replay's hits), the lag-free
+  detection, and in every mode the pad-name votes. They are global constants rather than per-target values,
+  but the masked rows are causal-style, not causal.
+* The one-step rows and the full offline conversion still use the frame's own packet for the correction at
+  that frame (by design: the residual is measured before it). Only the fits listed in section 2 are held out.
