@@ -349,6 +349,10 @@ struct FrameLine<'a> {
     /// (inferred: the packet omits the velocities).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     sleeping_velocity_inferred: &'a [Option<i32>],
+    /// Car actors marked demolished by the dead-shell rule in this frame (inferred; a sleeping packet of a
+    /// car with no active player link).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    demolition_inferred: &'a [i32],
 }
 
 pub(crate) fn header_json(
@@ -402,6 +406,7 @@ fn frame_line<'a>(
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,
         sleeping_velocity_inferred: &converted.sleeping_velocity_inferred,
+        demolition_inferred: &converted.demolition_inferred,
     }
 }
 

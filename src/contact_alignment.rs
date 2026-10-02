@@ -222,10 +222,12 @@ pub fn aligned_lags(
                     }
                     arena.set_ball_state(*ball_arena.get_ball_state());
                     arena.set_car_state(0, car_state);
+                    arena.refresh_car_sticky_gate(0);
                     arena.set_car_controls(0, controls);
                 } else {
                     arena.set_ball_state(parked);
                     arena.set_car_state(0, car_state);
+                    arena.refresh_car_sticky_gate(0);
                     arena.set_car_controls(0, controls);
                     for _ in tick_c..tick_a {
                         arena.step_tick();

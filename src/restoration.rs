@@ -289,6 +289,7 @@ pub fn apply_soccar_state_to_arena(
     arena.set_ball_state(ball);
     for (index, (_, car)) in snapshot.cars.iter().enumerate() {
         arena.set_car_state(index, crate::conversion::rebase_car_ticks(*car, source_tick, arena_tick));
+        arena.refresh_car_sticky_gate(index);
     }
     let mut max_pad_error = 0.0f32;
     for (index, (_, pad)) in snapshot.boost_pads.iter().enumerate() {
