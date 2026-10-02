@@ -14,53 +14,58 @@ from replay_columnar import (
 from replay_to_rocketsim import iter_frames, load_numpy, read_header
 
 
+SAMPLE_HEADER = {
+    "record_type": "header",
+    "schema_version": 1,
+    "source_sha256": "ab" * 32,
+    "car_slots": [{"slot": 3, "player_key": "player", "team": 0}],
+}
+SAMPLE_FRAME = {
+    "record_type": "frame",
+    "frame": 0,
+    "replay_time": 1.5,
+    "timeline_tick": 10,
+    "state": {
+        "arena_tick": 8,
+        "ball": {"physics": {
+            "position": [1, 2, 3],
+            "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            "linear_velocity": [4, 5, 6],
+            "angular_velocity": [0, 0, 1],
+        }},
+        "cars": [{
+            "slot": 3,
+            "physics": {
+                "position": [7, 8, 9],
+                "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                "linear_velocity": [1, 0, 0],
+                "angular_velocity": [0, 0, 2],
+            },
+            "controls": {
+                "throttle": 1.0, "steer": -0.5, "pitch": 0.0,
+                "yaw": 0.0, "roll": 0.0,
+                "jump": False, "boost": True, "handbrake": False,
+            },
+            "boost": 33.3,
+            "is_demoed": False,
+        }],
+        "boost_pads": [{"position": [10, 20, 0], "is_big": True, "is_active": False, "cooldown": 2.0}],
+    },
+    "observations": {
+        "team_scores": [{"value": 2, "frame": 0, "source": "replay"}, None],
+        "seconds_remaining": None,
+    },
+    "scoreboard": {
+        "period": "regulation", "clock_state": "countdown",
+        "seconds_remaining": 300.0, "overtime_seconds": None,
+    },
+}
+
+
 class LoaderTest(unittest.TestCase):
     def test_stream_and_dense_arrays(self):
-        header = {
-            "record_type": "header",
-            "schema_version": 1,
-            "car_slots": [{"slot": 3, "player_key": "player", "team": 0}],
-        }
-        frame = {
-            "record_type": "frame",
-            "frame": 0,
-            "replay_time": 1.5,
-            "timeline_tick": 10,
-            "state": {
-                "arena_tick": 8,
-                "ball": {"physics": {
-                    "position": [1, 2, 3],
-                    "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-                    "linear_velocity": [4, 5, 6],
-                    "angular_velocity": [0, 0, 1],
-                }},
-                "cars": [{
-                    "slot": 3,
-                    "physics": {
-                        "position": [7, 8, 9],
-                        "rotation_columns": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-                        "linear_velocity": [1, 0, 0],
-                        "angular_velocity": [0, 0, 2],
-                    },
-                    "controls": {
-                        "throttle": 1.0, "steer": -0.5, "pitch": 0.0,
-                        "yaw": 0.0, "roll": 0.0,
-                        "jump": False, "boost": True, "handbrake": False,
-                    },
-                    "boost": 33.3,
-                    "is_demoed": False,
-                }],
-                "boost_pads": [{"position": [10, 20, 0], "is_big": True, "is_active": False, "cooldown": 2.0}],
-            },
-            "observations": {
-                "team_scores": [{"value": 2, "frame": 0, "source": "replay"}, None],
-                "seconds_remaining": None,
-            },
-            "scoreboard": {
-                "period": "regulation", "clock_state": "countdown",
-                "seconds_remaining": 300.0, "overtime_seconds": None,
-            },
-        }
+        header = SAMPLE_HEADER
+        frame = SAMPLE_FRAME
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.jsonl"
             path.write_text("\n".join(map(json.dumps, (header, frame))) + "\n", encoding="utf-8")
@@ -120,13 +125,32 @@ class LoaderTest(unittest.TestCase):
             import pyarrow.parquet as pq
         except ImportError:
             self.skipTest("pyarrow is not installed")
+
+        def table(rows, **metadata):
+            return pa.table({"frame": pa.array(rows, pa.uint32())}).replace_schema_metadata(metadata or None)
+
         with tempfile.TemporaryDirectory() as directory:
-            main = Path(directory) / "game.parquet"
-            pq.write_table(pa.table({"frame": pa.array([4, 9], pa.uint32())}), Path(directory) / "game.touches.parquet")
+            directory = Path(directory)
+            jsonl = directory / "game.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, SAMPLE_FRAME))) + "\n", encoding="utf-8")
+            main = directory / "game.parquet"
+            write_columnar(jsonl, main, batch_size=1)
+            sha = SAMPLE_HEADER["source_sha256"]
+            pq.write_table(table([0, 0], source_sha256=sha, frames="1"), directory / "game.touches.parquet")
             tables = read_record_tables(main)
             self.assertEqual(list(tables), ["touches"])
-            self.assertEqual(tables["touches"]["frame"].to_pylist(), [4, 9])
-            self.assertEqual(read_record_tables(Path(directory) / "other.parquet"), {})
+            self.assertEqual(tables["touches"]["frame"].to_pylist(), [0, 0])
+            self.assertEqual(read_record_tables(directory / "other.parquet", verify=False), {})
+            # Tables from another replay, with another frame count, or without provenance are skipped
+            # with a warning, unless verification is off.
+            pq.write_table(table([1], source_sha256="cd" * 32, frames="1"), directory / "game.events.parquet")
+            pq.write_table(table([2], source_sha256=sha, frames="7"), directory / "game.pad_pickups.parquet")
+            pq.write_table(table([3]), directory / "game.packet_lags.parquet")
+            with self.assertWarnsRegex(UserWarning, "stale record table") as caught:
+                tables = read_record_tables(main)
+            self.assertEqual(list(tables), ["touches"])
+            self.assertEqual(len(caught.warnings), 3)
+            self.assertEqual(sorted(read_record_tables(main, verify=False)), ["events", "packet_lags", "pad_pickups", "touches"])
 
     def test_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:

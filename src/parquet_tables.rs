@@ -19,6 +19,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
 use crate::conversion::{
@@ -109,6 +110,23 @@ pub fn table_path(main: &Path, table: &str) -> PathBuf {
 }
 
 type Rows<'a, T> = &'a [(u32, T)];
+
+/// A record with the car slots its actor ids resolve to in its frame (`ConvertedFrame::car_actor_slots`;
+/// `None` when an actor id is absent or is not a linked car). `events` uses `[victim, attacker, car]`,
+/// `packet_lags` `[car]` and `pad_pickups` `[instigator]`.
+#[derive(Debug, Clone)]
+pub(crate) struct Slotted<T> {
+    pub value: T,
+    pub slots: [Option<usize>; 3],
+}
+
+fn slot_column<T>(rows: &[(u32, Slotted<T>)], index: usize) -> io::Result<ArrayRef> {
+    Ok(Arc::new(UInt32Array::from(
+        rows.iter()
+            .map(|r| slot(r.1.slots[index]))
+            .collect::<io::Result<Vec<_>>>()?,
+    )))
+}
 
 pub(crate) fn touches_fields() -> Vec<Field> {
     vec![
@@ -267,22 +285,25 @@ pub(crate) fn packet_lags_fields() -> Vec<Field> {
         nullable("actor_id", DataType::Int32),
         required("ticks", DataType::UInt64),
         required("source", dict_type()),
+        // The car slot of `actor_id` (null for the ball and for a car that is not a linked player's).
+        nullable("car_slot", DataType::UInt32),
     ]
 }
 
 pub(crate) fn packet_lags_batch(
-    rows: Rows<AppliedPacketLag>,
+    rows: Rows<Slotted<AppliedPacketLag>>,
     schema: &SchemaRef,
 ) -> io::Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         frames(rows),
         Arc::new(Int32Array::from(
-            rows.iter().map(|r| r.1.actor_id).collect::<Vec<_>>(),
+            rows.iter().map(|r| r.1.value.actor_id).collect::<Vec<_>>(),
         )),
         Arc::new(UInt64Array::from_iter_values(
-            rows.iter().map(|r| r.1.ticks),
+            rows.iter().map(|r| r.1.value.ticks),
         )),
-        dict(rows.iter().map(|r| Some(r.1.source)))?,
+        dict(rows.iter().map(|r| Some(r.1.value.source)))?,
+        slot_column(rows, 0)?,
     ];
     RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)
 }
@@ -307,15 +328,19 @@ pub(crate) fn events_fields() -> Vec<Field> {
         // `dodge_refreshed` only: the replay car actor id and its new DodgesRefreshedCounter total.
         nullable("car", DataType::Int32),
         nullable("refreshed_count", DataType::Int32),
+        // The car slots (the main file's car columns) of `victim_car`, `attacker_car` and `car`.
+        nullable("victim_slot", DataType::UInt32),
+        nullable("attacker_slot", DataType::UInt32),
+        nullable("car_slot", DataType::UInt32),
     ]
 }
 
-pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<RecordBatch> {
+pub(crate) fn events_batch(rows: Rows<Slotted<Event>>, schema: &SchemaRef) -> io::Result<RecordBatch> {
     // A goal row has no demolition fields and a demolition row has no `team`: those are null.
     let columns: Vec<ArrayRef> = vec![
         frames(rows),
         dict(rows.iter().map(|r| {
-            Some(match r.1 {
+            Some(match r.1.value {
                 Event::GoalScoredOn { .. } => "goal_scored_on",
                 Event::Demolish { .. } => "demolish",
                 Event::DodgeRefreshed { .. } => "dodge_refreshed",
@@ -323,19 +348,19 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         }))?,
         Arc::new(UInt8Array::from(
             rows.iter()
-                .map(|r| match r.1 {
+                .map(|r| match r.1.value {
                     Event::GoalScoredOn { team } => Some(team),
                     Event::Demolish { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
-        dict(rows.iter().map(|r| match &r.1 {
+        dict(rows.iter().map(|r| match &r.1.value {
             Event::Demolish { source, .. } => Some(*source),
             Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
         }))?,
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish { attacker_car, .. } => *attacker_car,
                     Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
@@ -343,7 +368,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish { victim_car, .. } => *victim_car,
                     Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
@@ -351,7 +376,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish { attacker_pri, .. } => *attacker_pri,
                     Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
@@ -359,7 +384,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(BooleanArray::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish { self_demolish, .. } => Some(*self_demolish),
                     Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
@@ -367,7 +392,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[0]),
@@ -377,7 +402,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[1]),
@@ -387,7 +412,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[2]),
@@ -397,7 +422,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[0]),
@@ -407,7 +432,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[1]),
@@ -417,7 +442,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Float32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[2]),
@@ -427,7 +452,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(BooleanArray::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::Demolish { repeat, .. } => Some(*repeat),
                     Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
@@ -435,7 +460,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::DodgeRefreshed { car, .. } => Some(*car),
                     _ => None,
                 })
@@ -443,12 +468,15 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
         )),
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| match &r.1 {
+                .map(|r| match &r.1.value {
                     Event::DodgeRefreshed { count, .. } => Some(*count),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
         )),
+        slot_column(rows, 0)?,
+        slot_column(rows, 1)?,
+        slot_column(rows, 2)?,
     ];
     RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)
 }
@@ -461,34 +489,37 @@ pub(crate) fn pad_pickups_fields() -> Vec<Field> {
         nullable("instigator_car_id", DataType::Int32),
         required("picked_up", DataType::UInt8),
         required("repeat", DataType::Boolean),
+        // The car slot of `instigator_car_id`.
+        nullable("instigator_slot", DataType::UInt32),
     ]
 }
 
 pub(crate) fn pad_pickups_batch(
-    rows: Rows<PadPickup>,
+    rows: Rows<Slotted<PadPickup>>,
     schema: &SchemaRef,
 ) -> io::Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         frames(rows),
         Arc::new(Int32Array::from_iter_values(
-            rows.iter().map(|r| r.1.pad_actor_id),
+            rows.iter().map(|r| r.1.value.pad_actor_id),
         )),
         Arc::new(StringArray::from(
             rows.iter()
-                .map(|r| r.1.pad_actor_name.as_deref())
+                .map(|r| r.1.value.pad_actor_name.as_deref())
                 .collect::<Vec<_>>(),
         )),
         Arc::new(Int32Array::from(
             rows.iter()
-                .map(|r| r.1.instigator_car_id)
+                .map(|r| r.1.value.instigator_car_id)
                 .collect::<Vec<_>>(),
         )),
         Arc::new(UInt8Array::from_iter_values(
-            rows.iter().map(|r| r.1.picked_up),
+            rows.iter().map(|r| r.1.value.picked_up),
         )),
         Arc::new(BooleanArray::from(
-            rows.iter().map(|r| r.1.repeat).collect::<Vec<_>>(),
+            rows.iter().map(|r| r.1.value.repeat).collect::<Vec<_>>(),
         )),
+        slot_column(rows, 0)?,
     ];
     RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)
 }
@@ -545,8 +576,15 @@ impl<T> Sink<T> {
         Ok(())
     }
 
-    fn finish(mut self) -> io::Result<usize> {
+    /// Flush and close. `provenance` (the source replay's `source_sha256` and the main file's frame
+    /// count) goes into the file's key-value metadata, where Arrow readers merge it into the schema
+    /// metadata, so a table left over from another export can be told from this one's.
+    fn finish(mut self, provenance: &[(&str, String)]) -> io::Result<usize> {
         self.flush()?;
+        for (key, value) in provenance {
+            self.writer
+                .append_key_value_metadata(KeyValue::new((*key).to_owned(), value.clone()));
+        }
         self.writer.close().map_err(io::Error::other)?;
         Ok(self.total)
     }
@@ -558,9 +596,9 @@ pub(crate) struct Tables {
     ball_contacts: Sink<BallContact>,
     boost_pickups: Sink<BoostPickup>,
     fitted_inputs: Sink<FittedInput>,
-    packet_lags: Sink<AppliedPacketLag>,
-    events: Sink<Event>,
-    pad_pickups: Sink<PadPickup>,
+    packet_lags: Sink<Slotted<AppliedPacketLag>>,
+    events: Sink<Slotted<Event>>,
+    pad_pickups: Sink<Slotted<PadPickup>>,
 }
 
 impl Tables {
@@ -627,28 +665,70 @@ impl Tables {
         for v in &converted.fitted_inputs {
             self.fitted_inputs.push(frame, v.clone())?;
         }
-        for v in &converted.packet_lags {
-            self.packet_lags.push(frame, v.clone())?;
+        self.add_slotted(
+            frame,
+            &converted.packet_lags,
+            &converted.car_actor_slots,
+            observed,
+        )
+    }
+
+    /// The tables that name cars by replay actor id: each actor id resolves through
+    /// `car_actor_slots` (null when absent).
+    fn add_slotted(
+        &mut self,
+        frame: u32,
+        packet_lags: &[AppliedPacketLag],
+        car_actor_slots: &[(i32, usize)],
+        observed: &observations::Frame,
+    ) -> io::Result<()> {
+        let resolve = |actor: Option<i32>| {
+            let actor = actor?;
+            car_actor_slots
+                .iter()
+                .find(|(id, _)| *id == actor)
+                .map(|&(_, slot)| slot)
+        };
+        for v in packet_lags {
+            let slots = [resolve(v.actor_id), None, None];
+            self.packet_lags.push(frame, Slotted { value: v.clone(), slots })?;
         }
         for v in &observed.events {
-            self.events.push(frame, v.clone())?;
+            let slots = match v {
+                Event::GoalScoredOn { .. } => [None; 3],
+                Event::Demolish { victim_car, attacker_car, .. } => {
+                    [resolve(*victim_car), resolve(*attacker_car), None]
+                }
+                Event::DodgeRefreshed { car, .. } => [None, None, resolve(Some(*car))],
+            };
+            self.events.push(frame, Slotted { value: v.clone(), slots })?;
         }
         for v in &observed.pad_pickups {
-            self.pad_pickups.push(frame, v.clone())?;
+            let slots = [resolve(v.instigator_car_id), None, None];
+            self.pad_pickups.push(frame, Slotted { value: v.clone(), slots })?;
         }
         Ok(())
     }
 
-    /// Close every file; returns the row count of each table in `TABLE_NAMES` order.
-    pub(crate) fn finish(self) -> io::Result<Vec<(&'static str, usize)>> {
+    /// Close every file; returns the row count of each table in `TABLE_NAMES` order. Each file's
+    /// metadata records the source replay's SHA-256 and the main file's frame count.
+    pub(crate) fn finish(
+        self,
+        source_sha256: &str,
+        frames: usize,
+    ) -> io::Result<Vec<(&'static str, usize)>> {
+        let provenance = [
+            ("source_sha256", source_sha256.to_owned()),
+            ("frames", frames.to_string()),
+        ];
         Ok(vec![
-            (TABLE_NAMES[0], self.touches.finish()?),
-            (TABLE_NAMES[1], self.ball_contacts.finish()?),
-            (TABLE_NAMES[2], self.boost_pickups.finish()?),
-            (TABLE_NAMES[3], self.fitted_inputs.finish()?),
-            (TABLE_NAMES[4], self.packet_lags.finish()?),
-            (TABLE_NAMES[5], self.events.finish()?),
-            (TABLE_NAMES[6], self.pad_pickups.finish()?),
+            (TABLE_NAMES[0], self.touches.finish(&provenance)?),
+            (TABLE_NAMES[1], self.ball_contacts.finish(&provenance)?),
+            (TABLE_NAMES[2], self.boost_pickups.finish(&provenance)?),
+            (TABLE_NAMES[3], self.fitted_inputs.finish(&provenance)?),
+            (TABLE_NAMES[4], self.packet_lags.finish(&provenance)?),
+            (TABLE_NAMES[5], self.events.finish(&provenance)?),
+            (TABLE_NAMES[6], self.pad_pickups.finish(&provenance)?),
         ])
     }
 }
@@ -730,22 +810,26 @@ mod tests {
             &properties(),
         )
         .unwrap();
-        sink.push(7, Event::GoalScoredOn { team: 1 }).unwrap();
+        let unslotted = |value| Slotted { value, slots: [None; 3] };
+        sink.push(7, unslotted(Event::GoalScoredOn { team: 1 })).unwrap();
         sink.push(
             9,
-            Event::Demolish {
-                source: "extended",
-                attacker_car: Some(4),
-                victim_car: None,
-                attacker_pri: Some(2),
-                self_demolish: false,
-                attacker_velocity: [1.0, 2.0, 3.0],
-                victim_velocity: [4.0, 5.0, 6.0],
-                repeat: true,
+            Slotted {
+                value: Event::Demolish {
+                    source: "extended",
+                    attacker_car: Some(4),
+                    victim_car: None,
+                    attacker_pri: Some(2),
+                    self_demolish: false,
+                    attacker_velocity: [1.0, 2.0, 3.0],
+                    victim_velocity: [4.0, 5.0, 6.0],
+                    repeat: true,
+                },
+                slots: [None, Some(2), None],
             },
         )
         .unwrap();
-        assert_eq!(sink.finish().unwrap(), 2);
+        assert_eq!(sink.finish(&[]).unwrap(), 2);
         let (schema, _, batches) = read(&table_path(&main, "events"));
         assert_eq!(schema.metadata()["table"], "events");
         assert_eq!(batches.len(), 1);
@@ -767,6 +851,89 @@ mod tests {
         assert!(vx.is_null(0) && vx.value(1) == 1.0);
         let repeat = b.column(14).as_boolean();
         assert!(repeat.is_null(0) && repeat.value(1));
+        // The appended slot columns: the attacker resolved to slot 2, the unresolved victim is null.
+        assert_eq!(schema.field(17).name(), "victim_slot");
+        assert!(b.column(17).is_null(0) && b.column(17).is_null(1));
+        let attacker_slot = b.column(18).as_primitive::<UInt32Type>();
+        assert!(attacker_slot.is_null(0) && attacker_slot.value(1) == 2);
+        assert!(b.column(19).is_null(1));
+        fs::remove_dir_all(main.parent().unwrap()).ok();
+    }
+
+    /// Tables resolve replay car actor ids to the slot of the car's linked player in their frame, leave
+    /// the others null, and carry the source hash and frame count in their metadata.
+    #[test]
+    fn actor_ids_resolve_to_car_slots_and_tables_carry_their_provenance() {
+        let main = main_path("slots");
+        let mut tables = Tables::create(&main, &properties()).unwrap();
+        let packet_lags = vec![
+            AppliedPacketLag { actor_id: Some(30), ticks: 2, source: "chain" },
+            AppliedPacketLag { actor_id: None, ticks: 1, source: "chain" },
+            AppliedPacketLag { actor_id: Some(99), ticks: 3, source: "chain" },
+        ];
+        // Car actor 30 belongs to slot 1 and the shadowed older car 12 to slot 0.
+        let car_actor_slots = [(30, 1), (12, 0)];
+        let observed = observations::Frame {
+            index: 4,
+            time: 0.0,
+            delta: 0.033,
+            ball: None,
+            cars: Vec::new(),
+            players: Vec::new(),
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: None,
+            events: vec![
+                Event::Demolish {
+                    source: "extended",
+                    attacker_car: Some(30),
+                    victim_car: Some(12),
+                    attacker_pri: None,
+                    self_demolish: false,
+                    attacker_velocity: [0.0; 3],
+                    victim_velocity: [0.0; 3],
+                    repeat: false,
+                },
+                Event::DodgeRefreshed { car: 30, count: 2 },
+                Event::DodgeRefreshed { car: 77, count: 1 },
+                Event::GoalScoredOn { team: 0 },
+            ],
+            pad_pickups: vec![PadPickup {
+                pad_actor_id: 5,
+                pad_actor_name: None,
+                instigator_car_id: Some(12),
+                picked_up: 1,
+                repeat: false,
+            }],
+        };
+        tables.add_slotted(4, &packet_lags, &car_actor_slots, &observed).unwrap();
+        let counts = tables.finish("abc123", 9).unwrap();
+        assert_eq!(counts[5], ("events", 4));
+
+        let slot_values = |array: &ArrayRef| -> Vec<Option<u32>> {
+            let values = array.as_primitive::<UInt32Type>();
+            (0..values.len()).map(|i| values.is_valid(i).then(|| values.value(i))).collect()
+        };
+        let (schema, _, batches) = read(&table_path(&main, "events"));
+        assert_eq!(schema.metadata()["source_sha256"], "abc123");
+        assert_eq!(schema.metadata()["frames"], "9");
+        let b = &batches[0];
+        let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(&names[17..], ["victim_slot", "attacker_slot", "car_slot"]);
+        assert_eq!(slot_values(b.column(17)), [Some(0), None, None, None]);
+        assert_eq!(slot_values(b.column(18)), [Some(1), None, None, None]);
+        // An unknown actor (77) and a goal have no slot.
+        assert_eq!(slot_values(b.column(19)), [None, Some(1), None, None]);
+
+        let (schema, _, batches) = read(&table_path(&main, "packet_lags"));
+        assert_eq!(schema.metadata()["source_sha256"], "abc123");
+        assert_eq!(schema.field(4).name(), "car_slot");
+        assert_eq!(slot_values(batches[0].column(4)), [Some(1), None, None]);
+
+        let (schema, _, batches) = read(&table_path(&main, "pad_pickups"));
+        assert_eq!(schema.field(6).name(), "instigator_slot");
+        assert_eq!(slot_values(batches[0].column(6)), [Some(0)]);
         fs::remove_dir_all(main.parent().unwrap()).ok();
     }
 
@@ -801,7 +968,7 @@ mod tests {
             },
         )
         .unwrap();
-        sink.finish().unwrap();
+        sink.finish(&[]).unwrap();
         let (_, _, batches) = read(&table_path(&main, "fitted_inputs"));
         let b = &batches[0];
         assert_eq!(
@@ -844,7 +1011,7 @@ mod tests {
                 },
             )
             .unwrap();
-        contacts.finish().unwrap();
+        contacts.finish(&[]).unwrap();
         let (_, _, batches) = read(&table_path(&main, "ball_contacts"));
         let b = &batches[0];
         assert!(b.column(5).is_null(0) && b.column(6).is_null(0));
@@ -873,7 +1040,7 @@ mod tests {
                 },
             )
             .unwrap();
-        pickups.finish().unwrap();
+        pickups.finish(&[]).unwrap();
         let (_, _, batches) = read(&table_path(&main, "boost_pickups"));
         let b = &batches[0];
         assert!(b.column(1).is_null(0) && b.column(3).is_null(0) && b.column(6).is_null(0));
@@ -906,7 +1073,7 @@ mod tests {
             .unwrap();
             assert!(sink.rows.len() <= BATCH_SIZE);
         }
-        assert_eq!(sink.finish().unwrap(), count);
+        assert_eq!(sink.finish(&[]).unwrap(), count);
         let (schema, groups, batches) = read(&table_path(&main, "touches"));
         assert_eq!(groups, 3);
         assert_eq!(
@@ -926,7 +1093,7 @@ mod tests {
             &properties(),
         )
         .unwrap();
-        assert_eq!(empty.finish().unwrap(), 0);
+        assert_eq!(empty.finish(&[]).unwrap(), 0);
         let (schema, groups, batches) = read(&table_path(&main, "pad_pickups"));
         assert_eq!((groups, batches.len()), (0, 0));
         assert_eq!(
@@ -941,7 +1108,8 @@ mod tests {
                 "pad_actor_name",
                 "instigator_car_id",
                 "picked_up",
-                "repeat"
+                "repeat",
+                "instigator_slot"
             ]
         );
         fs::remove_dir_all(main.parent().unwrap()).ok();

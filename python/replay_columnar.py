@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import warnings
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -355,19 +356,43 @@ def record_table_path(path: str | Path, table: str) -> Path:
     return path.with_name(f"{path.stem}.{table}.parquet")
 
 
-def read_record_tables(path: str | Path) -> dict[str, Any]:
+def read_record_tables(path: str | Path, verify: bool = True) -> dict[str, Any]:
     """Read the side tables written beside a Rust Parquet export, as ``pyarrow.Table`` values.
 
     Every table has a ``frame`` column (the frame the record belongs to). A table that was not
     written (``convert_replay --no-event-tables``, or a file made by ``write_columnar``) is missing
     from the result; an empty table keeps its schema. The Rust writer is the only one that makes them.
+
+    Each table's metadata holds the ``source_sha256`` of its replay and the main file's ``frames``
+    count. With ``verify`` (the default) a table whose hash or frame count differs from the main
+    file's, or that has none (written before the metadata existed), is skipped with a warning: it
+    belongs to another export that left it beside this file. ``verify=False`` reads whatever is there.
     """
     _, _, pq = _arrow_modules()
+    expected_sha = expected_frames = None
+    if verify:
+        expected_sha = read_columnar_header(path).get("source_sha256")
+        expected_frames = pq.ParquetFile(str(path)).metadata.num_rows
     tables = {}
     for name in RECORD_TABLES:
         table_path = record_table_path(path, name)
-        if table_path.exists():
-            tables[name] = pq.read_table(str(table_path))
+        if not table_path.exists():
+            continue
+        if verify:
+            metadata = pq.ParquetFile(str(table_path)).metadata.metadata or {}
+            sha = metadata.get(b"source_sha256", b"").decode() or None
+            frames = metadata.get(b"frames", b"").decode() or None
+            problem = None
+            if sha is None or expected_sha is None:
+                problem = "its source hash cannot be checked (no source_sha256 in the table or the main file)"
+            elif sha != expected_sha:
+                problem = f"it is from another replay or export (source_sha256 {sha[:12]}, main file {expected_sha[:12]})"
+            elif frames != str(expected_frames):
+                problem = f"it has {frames} frames, the main file {expected_frames}"
+            if problem is not None:
+                warnings.warn(f"skipping stale record table {table_path}: {problem}", stacklevel=2)
+                continue
+        tables[name] = pq.read_table(str(table_path))
     return tables
 
 

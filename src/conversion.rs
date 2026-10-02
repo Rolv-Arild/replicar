@@ -501,6 +501,10 @@ pub struct ConvertedFrame {
     pub packet_lags: Vec<AppliedPacketLag>,
     /// Jump and dodge inputs fitted at this frame's packets (arena ticks converted to the timeline).
     pub fitted_inputs: Vec<FittedInput>,
+    /// The car slot of each replay car actor linked to a player in this frame (actor id, slot), the
+    /// same slot as the car's column in the main export. Shadowed older cars of a player map to the
+    /// player's slot too; a car actor without a linked player or without a slot is absent.
+    pub car_actor_slots: Vec<(i32, usize)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -2366,7 +2370,7 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
     let bridge_ok = |a: usize, b: usize| {
-        b > a && (a..=b).all(&active) && (a + 1..b).all(|f| !withheld(f)) && !withheld(b)
+        b > a && (a..=b).all(&active) && !withheld(a) && (a + 1..b).all(|f| !withheld(f)) && !withheld(b)
     };
     let fresh = |body: &Body, frame: usize| -> Option<ChainPacket> {
         let position = body.position.as_ref().filter(|v| v.frame == frame)?;
@@ -6060,12 +6064,14 @@ pub fn convert_observations_with(
                 let Some(&(slot, created)) = actor_slots.get(victim) else {
                     continue;
                 };
-                // The slot belongs to this car actor's lifetime, not to an earlier owner of the id.
-                if !frame
-                    .cars
-                    .iter()
-                    .any(|c| c.actor_id == *victim && c.actor_created_frame == created)
-                {
+                // The slot belongs to this car actor's lifetime, not to an earlier owner of the id,
+                // and the car must still be its player's primary car (a shadowed older car of the
+                // same player does not own the slot).
+                if !frame_cars.iter().any(|c| {
+                    c.actor_id == *victim
+                        && c.actor_created_frame == created
+                        && c.player_key.is_some()
+                }) {
                     continue;
                 }
                 let mut state = *arena.get_car_state(slot);
@@ -6085,11 +6091,11 @@ pub fn convert_observations_with(
                 let Some(&(slot, created)) = actor_slots.get(car) else {
                     continue;
                 };
-                if !frame
-                    .cars
-                    .iter()
-                    .any(|c| c.actor_id == *car && c.actor_created_frame == created)
-                {
+                if !frame_cars.iter().any(|c| {
+                    c.actor_id == *car
+                        && c.actor_created_frame == created
+                        && c.player_key.is_some()
+                }) {
                     continue;
                 }
                 diagnostics.dodge_refreshes_observed += 1;
@@ -6435,6 +6441,14 @@ pub fn convert_observations_with(
             }
             sb
     });
+        let car_actor_slots: Vec<(i32, usize)> = frame
+            .cars
+            .iter()
+            .filter_map(|car| {
+                let slot = *slots.get(car.player_key.as_ref()?)?;
+                Some((car.actor_id, slot))
+            })
+            .collect();
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -6464,6 +6478,7 @@ pub fn convert_observations_with(
                     },
                 )
                 .collect(),
+            car_actor_slots,
         };
         on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }

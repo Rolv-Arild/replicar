@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
 use replay_to_rocketsim::parquet_export::write_parquet_with_tables;
-use replay_to_rocketsim::parquet_tables::table_path;
+use replay_to_rocketsim::parquet_tables::{TABLE_NAMES, table_path};
 use replay_to_rocketsim::serialization::write_jsonl;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -55,11 +55,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = mesh_path {
         options.collision_meshes = path;
     }
-    let bytes = fs::read(&input)?;
-    let count = if output_path
+    let extension = output_path
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("parquet"))
-    {
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    let parquet = match extension.as_deref() {
+        Some("parquet") => true,
+        Some("jsonl") => false,
+        _ => {
+            return Err(format!(
+                "unsupported output extension for {}: use .jsonl (JSON Lines) or .parquet (gzip output such as .jsonl.gz is not written: compress the .jsonl file afterwards)",
+                output_path.display()
+            )
+            .into());
+        }
+    };
+    if parquet && !event_tables {
+        // Tables left beside this output by an earlier export would be read next to the new main file.
+        for table in TABLE_NAMES {
+            match fs::remove_file(table_path(&output_path, table)) {
+                Ok(()) => println!("removed stale {}", table_path(&output_path, table).display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let bytes = fs::read(&input)?;
+    let count = if parquet {
         let summary = write_parquet_with_tables(
             &bytes,
             &options,

@@ -398,7 +398,7 @@ pub fn write_parquet_with_tables(
     ));
     writer.close()?;
     let table_rows = match tables {
-        Some(tables) => tables.finish()?,
+        Some(tables) => tables.finish(&format!("{:x}", Sha256::digest(bytes)), count)?,
         None => Vec::new(),
     };
     Ok(ExportSummary {
