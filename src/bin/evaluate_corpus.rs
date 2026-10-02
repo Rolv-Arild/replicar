@@ -1403,7 +1403,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .to_string_lossy()
                 .into_owned();
             options.lag_boundary = replay_to_rocketsim::conversion::LagBoundary::from_name(&name)
-                .ok_or("--lag-boundary: later, earlier or longer")?;
+                .ok_or("--lag-boundary: later or earlier")?;
         } else if arg == "--align-contacts" {
             options.align_contacts = true;
         } else if arg == "--no-align-contacts" {
@@ -1506,7 +1506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--lag-boundary later|earlier|longer] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--lag-boundary later|earlier] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
         }
     }
     if replay_to_rocketsim::sealed_path_refused(&root, final_assessment) {
@@ -2032,11 +2032,12 @@ mod tests {
 
     /// The exported physics and boost of the default masked conversion must not depend on anything after a
     /// window: the replay truncated right after a window gives the same states in the window and before
-    /// it. A negative control feeds a packet from after the window into a window frame on purpose; the
-    /// states then differ, so the test can tell. Pads differ (the replay-wide pad-name votes, RESULTS
-    /// 'Audit, part 4', finding 2) and are only reported. The aligned (lag-inferring) predictor is not
-    /// asserted: it uses the replay-wide ball-car offset estimate, so the largest position difference is
-    /// printed instead (accepted: the evaluation measures the reconstruction, not a causal predictor).
+    /// it. A positive control on the truncation itself: the aligned predictor depends on later packets
+    /// (the replay-wide ball-car offset), so the same truncation must change its states; a secondary
+    /// check feeds a packet from after the window into a window frame on purpose. Pads differ (the replay-wide pad-name votes, RESULTS
+    /// 'Audit, part 4', finding 2) and are only reported. The aligned predictor's dependence is by design
+    /// (accepted: the evaluation measures the reconstruction, not a causal predictor); its largest position
+    /// difference is printed.
     /// 1v1 `00a0da63` has a defined offset; skipped when that train replay or the collision meshes are
     /// absent.
     #[test]
@@ -2093,7 +2094,8 @@ mod tests {
         };
         let truncated_at = |end: usize| {
             let mut truncated = original.clone();
-            truncated.frames.truncate(end + 3);
+            // Right after the window: frame `end` is its last frame.
+            truncated.frames.truncate(end + 1);
             truncated
         };
         // Default predictor: a reference replay of the first 1,200 frames against the same replay truncated
@@ -2113,15 +2115,16 @@ mod tests {
             eprintln!("default predictor, window at {}: {physics} of {} frames differ in physics or boost, {pad_frames} in pads", window * 100 + 1, end + 1);
             assert_eq!(physics, 0, "truncating the replay after the window at {} changes the exported states", window * 100 + 1);
         }
-        // Negative control: a ball packet from 40 frames after the window, fed into its first frame in the
-        // longer replay only, changes the states of the window and after it.
+        // Secondary signature check: a ball packet from 40 frames after the window, fed into its first frame
+        // in the longer replay only, changes the states of the window.
         let end = 4 * 100 + 4;
         let leaked = convert(&reference_replay, false, Some((end + 40, 401)));
         let cut = convert(&truncated_at(end), false, None);
         let differing = (0..=end).filter(|&frame| signature(&leaked, frame) != signature(&cut, frame)).count();
-        eprintln!("negative control (a post-window ball packet fed into frame 401): {differing} frames differ");
-        assert!(differing > 0, "the negative control found no dependence: the test cannot tell");
-        // Aligned predictor: not asserted; the largest position difference is printed.
+        eprintln!("signature check (a post-window ball packet fed into frame 401): {differing} frames differ");
+        assert!(differing > 0, "the injected packet found no dependence: the test cannot tell");
+        // Aligned predictor: its known future dependence (the replay-wide ball-car offset) is the positive
+        // control of the truncation path itself: the same truncation must change the states here.
         let full = convert(&original, true, None);
         let cut = convert(&truncated_at(904), true, None);
         let mut worst = 0.0f32;
@@ -2132,7 +2135,8 @@ mod tests {
             }
         }
         let differing = (0..=904).filter(|&frame| signature(&full, frame) != signature(&cut, frame)).count();
-        eprintln!("aligned predictor (not asserted), window at 901: {differing} of 905 frames differ, largest ball or car position difference {worst:.2} UU");
+        eprintln!("aligned predictor, window at 901: {differing} of 905 frames differ, largest ball or car position difference {worst:.2} UU");
+        assert!(differing > 0, "the aligned predictor must depend on the later packets (positive control of the truncation)");
     }
 
     #[test]
@@ -2189,6 +2193,7 @@ mod tests {
                         },
                         boost: None,
                         boost_raw: None,
+                        spawn_pose: None,
                         inputs: Inputs::default(),
                     }],
                     players: Vec::new(),
@@ -2251,6 +2256,7 @@ mod tests {
                         frame: index,
                         source: Source::Replay,
                     }),
+                    spawn_pose: None,
                     boost_raw: Some(Value {
                         value: (100 + index) as u8,
                         frame: index,

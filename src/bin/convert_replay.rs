@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let name = args.next().ok_or("--lag-boundary requires a name")?;
             options.lag_boundary =
                 replay_to_rocketsim::conversion::LagBoundary::from_name(&name.to_string_lossy())
-                    .ok_or("--lag-boundary: later, earlier or longer")?;
+                    .ok_or("--lag-boundary: later or earlier")?;
         } else if arg == "--no-event-tables" {
             event_tables = false;
         } else if arg == "--octane-hitbox" {
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier|longer] [--no-event-tables]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables]".into());
         }
     }
     if let Some(path) = mesh_path {

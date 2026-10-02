@@ -13,11 +13,11 @@
 
 use std::collections::HashMap;
 
-use rocketsim::{Arena, ArenaConfig, BallState, CarControls, CarState, GameMode, Team};
+use rocketsim::{Arena, ArenaConfig, BallState, CarControls, GameMode, Team};
 
 use crate::conversion::{
     ConvertError, ConvertOptions, PacketLags, convert_observations_with, hitbox_config, infer_packet_lags,
-    quaternion, step_tick_with_hit_impulse,
+    quaternion, rebase_car_ticks, step_tick_with_hit_impulse,
 };
 use crate::observations::{Body, ObservedReplay};
 
@@ -109,9 +109,9 @@ pub fn aligned_lags(
             let Some(slot_info) = summary_pass.car_slots.iter().find(|s| s.slot == slot) else {
                 continue;
             };
-            let Some(car_actor) = frame_data[fb]
-                .cars
-                .iter()
+            // The player's primary car (a shadowed older car of the same player is not the one simulated).
+            let Some(car_actor) = crate::observations::primary_linked_cars(&frame_data[fb])
+                .into_iter()
                 .find(|c| c.player_key.as_deref() == Some(slot_info.player_key.as_str()))
             else {
                 continue;
@@ -165,17 +165,18 @@ pub fn aligned_lags(
                 arena.add_car(Team::Blue, hitbox_config(&slot_info.hitbox));
                 current_config = slot_info.hitbox.clone();
             }
-            // The state as in the earlier contact study: the packet's physics on a default car, grounded
-            // when low; the observed throttle, steer, handbrake and boost as controls.
-            let _ = exported;
-            let mut car_state = CarState::default();
+            // The first pass's exported car (wheel contacts, ground state, boost, jump and flip flags, hit
+            // tick rebased to this arena) with the packet's exact physics; the observed throttle, steer,
+            // handbrake and boost as controls. A demolished car makes no contact.
+            if exported.1.is_demoed {
+                continue;
+            }
+            let source_tick = frames.get(g).map_or(0, |f| f.state.tick_count);
+            let mut car_state = rebase_car_ticks(exported.1, source_tick, arena.tick_count());
             car_state.phys.pos = glam::Vec3A::from(car_packet.0);
             car_state.phys.vel = glam::Vec3A::from(car_packet.1);
             car_state.phys.rot_mat = car_packet.2;
             car_state.phys.ang_vel = glam::Vec3A::from(car_packet.3) * 0.01;
-            let grounded = car_packet.0[2] < 30.0;
-            car_state.is_on_ground = grounded;
-            car_state.wheels_with_contact = [grounded.then(rocketsim::RaycastHitInfo::default); 4];
             let observed = frame_data[g]
                 .cars
                 .iter()

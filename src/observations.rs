@@ -65,6 +65,37 @@ fn vector(v: Vector3f) -> [f32; 3] {
     [v.x, v.y, v.z]
 }
 
+/// Boxcars' spawn trajectory of a car actor: where the replay creates it. Carried by a car only until its
+/// first rigid-body packet (the first packet follows within 0-3 frames; against it the spawn location is
+/// within 3 UU at p90 and 10 UU at most on train), so a car that is simulated before that does not sit at
+/// RocketSim's default pose. Inferred, not observed.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpawnPose {
+    pub position: [f32; 3],
+    /// The heading about the vertical axis from the trajectory's compressed angle (the field boxcars
+    /// calls `pitch`, in 1/256 turns); `None` when the trajectory also tilts the car (not decoded).
+    pub rotation_xyzw: Option<[f32; 4]>,
+    pub frame: usize,
+}
+
+impl SpawnPose {
+    fn from_trajectory(trajectory: &boxcars::Trajectory, frame: usize) -> Option<Self> {
+        let location = trajectory.location?;
+        let rotation = trajectory.rotation.as_ref().and_then(|r| {
+            let tilt = |v: Option<i8>| v.is_none_or(|v| v.abs() <= 1);
+            (tilt(r.yaw) && tilt(r.roll)).then(|| {
+                let angle = f32::from(r.pitch.unwrap_or(0)) * std::f32::consts::PI / 128.0;
+                [0.0, 0.0, (angle / 2.0).sin(), (angle / 2.0).cos()]
+            })
+        });
+        Some(Self {
+            position: [location.x as f32, location.y as f32, location.z as f32],
+            rotation_xyzw: rotation,
+            frame,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Inputs {
     pub throttle: Option<Value<f32>>,
@@ -95,6 +126,9 @@ pub struct Car {
     pub boost: Option<Value<f32>>,
     pub boost_raw: Option<Value<u8>>,
     pub inputs: Inputs,
+    /// The spawn trajectory, present only while the car has no rigid-body packet yet (`SpawnPose`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_pose: Option<SpawnPose>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -266,6 +300,7 @@ struct Actor {
 #[derive(Clone, Default)]
 struct TrackedCar {
     created_frame: usize,
+    spawn: Option<SpawnPose>,
     body: Body,
     player_actor: Option<ActorId>,
     player_link_active: bool,
@@ -403,7 +438,7 @@ impl Tracker {
         }
     }
 
-    fn announce(&mut self, id: ActorId, class: &str, frame: usize) {
+    fn announce(&mut self, id: ActorId, class: &str, frame: usize, trajectory: &boxcars::Trajectory) {
         if let Some(existing) = self.actors.get(&id) {
             if existing.class == class {
                 self.diagnostics.repeated_actor_announcements += 1;
@@ -419,6 +454,7 @@ impl Tracker {
                     id,
                     TrackedCar {
                         created_frame: frame,
+                        spawn: SpawnPose::from_trajectory(trajectory, frame),
                         ..TrackedCar::default()
                     },
                 );
@@ -858,6 +894,10 @@ impl Tracker {
                     boost: tracked.boost.clone(),
                     boost_raw: tracked.boost_raw.clone(),
                     inputs: tracked.inputs.clone(),
+                    spawn_pose: tracked
+                        .spawn
+                        .clone()
+                        .filter(|_| tracked.body.position.is_none()),
                 }
             })
             .collect();
@@ -905,7 +945,7 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         }
         for actor in &frame.new_actors {
             if let Some(class) = prop_name(replay, actor.object_id.0) {
-                tracker.announce(actor.actor_id, class, index);
+                tracker.announce(actor.actor_id, class, index, &actor.initial_trajectory);
             }
         }
         for update in &frame.updated_actors {
@@ -995,6 +1035,24 @@ mod event_tests {
         );
         tracker.delete(ActorId(5));
         assert!(observe(&mut tracker, 5, 1).is_empty());
+    }
+
+    /// The spawn trajectory gives the car's location and, when it only turns the car about the vertical axis
+    /// (the field boxcars calls `pitch`, 1/256 turns), a heading: 64 is a quarter turn (kickoff data of
+    /// train replays); a trajectory that also tilts the car keeps its location only.
+    #[test]
+    fn a_spawn_trajectory_gives_a_location_and_a_heading() {
+        let trajectory = |yaw, pitch, roll| boxcars::Trajectory {
+            location: Some(boxcars::Vector3i { x: 256, y: -3840, z: 36 }),
+            rotation: Some(boxcars::Rotation { yaw, pitch, roll }),
+        };
+        let spawn = SpawnPose::from_trajectory(&trajectory(Some(-1), Some(64), None), 7).unwrap();
+        assert_eq!(spawn.position, [256.0, -3840.0, 36.0]);
+        let [x, y, z, w] = spawn.rotation_xyzw.unwrap();
+        assert!(x == 0.0 && y == 0.0 && (z - 0.707_106_8).abs() < 1e-5 && (w - 0.707_106_8).abs() < 1e-5);
+        assert!(SpawnPose::from_trajectory(&trajectory(Some(13), Some(90), Some(75)), 7).unwrap().rotation_xyzw.is_none());
+        let no_location = boxcars::Trajectory { location: None, rotation: None };
+        assert!(SpawnPose::from_trajectory(&no_location, 7).is_none());
     }
 
     fn repeat_of(frame: &Frame) -> bool {

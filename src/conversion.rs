@@ -67,14 +67,14 @@ pub enum FlipCancelSource {
 /// both runs with two different lags (1-4 ticks apart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum LagBoundary {
-    /// The later run's lag (the later run overwrites the earlier one); a car's per-frame median
-    /// counts both lags. The original behaviour.
+    /// The run that ended at the packet keeps it, counted once; the later run only uses it as its start
+    /// constraint. Measured closer to the LAN server truth and better on train and validation
+    /// (RESULTS.md, 'Packet shared by two lag runs'); the default.
     #[default]
-    Later,
-    /// The run that ended at the packet keeps it; the later run only uses it as its start constraint.
     Earlier,
-    /// The run with more packets keeps it (a tie goes to the later run).
-    Longer,
+    /// The later run's lag (the later run overwrites the earlier one); a car's per-frame median
+    /// counts both lags. The behaviour before 2026-10-02, kept as an ablation.
+    Later,
 }
 
 impl LagBoundary {
@@ -82,7 +82,6 @@ impl LagBoundary {
         Some(match name {
             "later" => Self::Later,
             "earlier" => Self::Earlier,
-            "longer" => Self::Longer,
             _ => return None,
         })
     }
@@ -348,7 +347,7 @@ impl Default for ConvertOptions {
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
             exact_tick_lag_chains: true,
-            lag_boundary: LagBoundary::Later,
+            lag_boundary: LagBoundary::Earlier,
             ball_hit_chains: true,
             ball_car_lag_offset: None,
             estimate_ball_car_lag_offset: true,
@@ -505,6 +504,9 @@ pub struct ConvertedFrame {
     /// same slot as the car's column in the main export. Shadowed older cars of a player map to the
     /// player's slot too; a car actor without a linked player or without a slot is absent.
     pub car_actor_slots: Vec<(i32, usize)>,
+    /// Bodies (replay car actor id; `None`: the ball) that had a fresh sleeping packet in this frame: their
+    /// simulated linear and angular velocity were set to zero (inferred; the packet omits the velocities).
+    pub sleeping_velocity_inferred: Vec<Option<i32>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -517,6 +519,12 @@ pub struct Diagnostics {
     /// simulation had not reproduced the reset, so it was applied).
     pub dodge_refreshes_observed: usize,
     pub dodge_refreshes_applied: usize,
+    /// Fresh sleeping rigid-body packets whose velocity was set to zero in the simulation (cars, ball).
+    pub sleeping_car_packets: usize,
+    /// Car lifetimes whose first simulated state came from the spawn trajectory because no rigid-body
+    /// packet had arrived yet.
+    pub cars_started_from_spawn_trajectory: usize,
+    pub sleeping_ball_packets: usize,
     pub shadowed_car_frames: usize,
     /// Simulated frames with an inferred ball packet lag (`infer_packet_lag`).
     pub ball_lag_frames: usize,
@@ -1612,6 +1620,35 @@ fn apply_body(state: &mut PhysState, body: &Body, index: usize, new_entity: bool
     applied
 }
 
+/// A fresh rigid-body packet with `sleeping` set omits the velocities: the body is at rest. The stale
+/// velocity of an earlier packet would carry the body away in the simulation, so the simulated linear
+/// and angular velocity are zeroed (inferred: the replay says only that the body sleeps, the omitted
+/// velocity stays unknown in the observations). A velocity that is fresh in the same packet wins.
+/// Returns whether anything changed.
+fn zero_sleeping_velocity(state: &mut PhysState, body: &Body, index: usize) -> bool {
+    let sleeping_now = body
+        .sleeping
+        .as_ref()
+        .is_some_and(|v| v.frame == index && v.value);
+    if !sleeping_now {
+        return false;
+    }
+    let mut changed = false;
+    if !body.linear_velocity.as_ref().is_some_and(|v| v.frame == index) {
+        changed |= state.vel != Vec3A::ZERO;
+        state.vel = Vec3A::ZERO;
+    }
+    if !body
+        .angular_velocity_replay_units
+        .as_ref()
+        .is_some_and(|v| v.frame == index)
+    {
+        changed |= state.ang_vel != Vec3A::ZERO;
+        state.ang_vel = Vec3A::ZERO;
+    }
+    changed
+}
+
 pub fn controls_from_observation(car: &observations::Car, options: &ConvertOptions) -> CarControls {
     CarControls {
         throttle: car.inputs.throttle.as_ref().map_or(0.0, |v| v.value),
@@ -1734,6 +1771,7 @@ pub fn rebase_tick(tick: Option<u64>, source_tick: u64, target_tick: u64) -> Opt
 pub(crate) fn seed_scratch_car(scratch: &mut Arena, state: CarState, source_tick: u64) {
     let target_tick = scratch.tick_count();
     scratch.set_car_state(0, rebase_car_ticks(state, source_tick, target_tick));
+    scratch.refresh_car_sticky_gate(0);
 }
 
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
@@ -1933,9 +1971,9 @@ struct RawRun {
 }
 
 /// Per run and entry: whether the run owns that packet's lag. Two consecutive runs of one actor can
-/// share a packet (the last of the first and the first of the second); `rule` picks one owner. All
-/// entries are owned under `Later`, which keeps the original behaviour (the later run overwrites the
-/// earlier and both lags enter a car's per-frame median).
+/// share a packet (the last of the first and the first of the second); `rule` picks one owner (the
+/// earlier run under `Earlier`). All entries are owned under `Later`, the old behaviour (the later run
+/// overwrites the earlier and both lags enter a car's per-frame median).
 fn owned_entries(runs: &[RawRun], rule: LagBoundary) -> Vec<Vec<bool>> {
     let mut owned: Vec<Vec<bool>> = runs.iter().map(|run| vec![true; run.entries.len()]).collect();
     if rule == LagBoundary::Later {
@@ -1949,19 +1987,17 @@ fn owned_entries(runs: &[RawRun], rule: LagBoundary) -> Vec<Vec<bool>> {
         if last.0 != first.0 {
             continue;
         }
-        let keep_earlier = match rule {
-            LagBoundary::Earlier => true,
-            LagBoundary::Longer => previous.entries.len() > next.entries.len(),
-            LagBoundary::Later => false,
-        };
-        if keep_earlier {
-            owned[i][0] = false;
-        } else {
-            let end = owned[i - 1].len() - 1;
-            owned[i - 1][end] = false;
-        }
+        owned[i][0] = false;
     }
     owned
+}
+
+/// A copy of `run` with only the entries it owns (`owned_entries`).
+fn keep_owned(run: &RawRun, owned: &[bool]) -> RawRun {
+    let mut run = run.clone();
+    let mut flags = owned.iter();
+    run.entries.retain(|_| flags.next().copied().unwrap_or(true));
+    run
 }
 
 /// Places the ball runs relative to the car runs. A car's physical tick in a frame is
@@ -2568,11 +2604,24 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
             return zero;
         }
     }
+    // The offset is estimated on the packets it is applied to: a packet shared by two runs counts once
+    // (all entries are owned under `LagBoundary::Later`).
+    let ball_owned = owned_entries(&ball_runs, options.lag_boundary);
+    let owned_ball_runs: Vec<RawRun> = ball_runs
+        .iter()
+        .zip(&ball_owned)
+        .map(|(run, owned)| keep_owned(run, owned))
+        .collect();
+    let owned_car_runs: Vec<((i32, usize), RawRun)> = car_runs
+        .iter()
+        .zip(&car_owned)
+        .map(|((key, run), owned)| (*key, keep_owned(run, owned)))
+        .collect();
     let offset = options.ball_car_lag_offset.or_else(|| {
         options
             .estimate_ball_car_lag_offset
             .then(|| {
-                estimate_ball_car_offset(&ball_hits.borrow(), &ball_runs, &car_runs, &samples, &hitboxes)
+                estimate_ball_car_offset(&ball_hits.borrow(), &owned_ball_runs, &owned_car_runs, &samples, &hitboxes)
             })
             .flatten()
     });
@@ -2582,27 +2631,11 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     lags.ball_car_offset = offset;
     lags.bridged_hits = ball_hits.borrow().len();
     if let Some(offset) = offset {
-        if options.lag_boundary == LagBoundary::Later {
-            place_ball_runs(&mut ball_runs, &car_runs, offset);
-        } else {
-            // A packet shared by two runs counts once in the frame's car ticks.
-            let owned_car_runs: Vec<((i32, usize), RawRun)> = car_runs
-                .iter()
-                .zip(&car_owned)
-                .map(|((key, run), owned)| {
-                    let mut run = run.clone();
-                    let mut flags = owned.iter();
-                    run.entries.retain(|_| flags.next().copied().unwrap_or(true));
-                    (*key, run)
-                })
-                .collect();
-            place_ball_runs(&mut ball_runs, &owned_car_runs, offset);
-        }
+        place_ball_runs(&mut ball_runs, &owned_car_runs, offset);
     }
     // Exact runs: the lag of an entry is the frame's tick minus its physical tick.
     let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
     let timeline = |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
-    let ball_owned = owned_entries(&ball_runs, options.lag_boundary);
     for (run, owned) in ball_runs.iter().zip(&ball_owned) {
         for (&(frame, k), &own) in run.entries.iter().zip(owned) {
             if own {
@@ -2858,6 +2891,8 @@ fn plan_air_bvp(
             return air_refused(5);
         }
         if let Some((rot_b, omega_b, z_b)) = fresh_rotation(other, g) {
+            // The lag as the main loop applies it (`car_lag`): at most the frame gap.
+            let gap = (timeline(g) - timeline(g - 1)).max(0);
             let lag = match lag_overrides.get(&(car.actor_id, car.actor_created_frame, g)) {
                 Some(&fitted) => fitted as i64,
                 None => lags
@@ -2865,10 +2900,9 @@ fn plan_air_bvp(
                     .get(&(car.actor_id, car.actor_created_frame, g))
                     .copied()
                     .or(lags.cars[g])
-                    .map_or((timeline(g) - timeline(g - 1)).max(0) / 2, |lag| {
-                        lag.round().max(0.0) as i64
-                    }),
-            };
+                    .map_or(gap / 2, |lag| lag.round().max(0.0) as i64),
+            }
+            .min(gap);
             end = Some((g, rot_b, omega_b, z_b, timeline(g) - lag));
             break;
         }
@@ -4374,13 +4408,16 @@ fn fit_flip_cancel(
     for step in 0..=4 {
         let cancel = step as f32 * 0.25;
         let mut start = *state;
+        // The tick counter `start` belongs to: the main arena's at the first target, the scratch arena's
+        // after the steps for the next ones (`last_extra_hit_tick` is an absolute tick).
+        let mut start_tick = now_tick;
         let mut previous_ticks = 0;
         let mut total = 0.0f32;
         // Every candidate starts from the main arena's ball at this packet's tick (as the dodge start fit
         // does), not from wherever an earlier fit left the shared scratch arena's ball.
         scratch.set_ball_state(*ball);
         for (j, target) in targets.iter().enumerate() {
-            seed_scratch_car(scratch, start, now_tick);
+            seed_scratch_car(scratch, start, start_tick);
             let mut controls = *base_controls;
             controls.jump = false;
             controls.pitch = cancel * sign;
@@ -4402,6 +4439,7 @@ fn fit_flip_cancel(
             end.phys.rot_mat = target.3;
             end.phys.ang_vel = target.4;
             start = end;
+            start_tick = scratch.tick_count();
             previous_ticks = target.0;
         }
         if best.is_none_or(|(_, e)| total < e - 1e-4) {
@@ -4858,6 +4896,8 @@ pub fn convert_observations_with(
     let mut slots: HashMap<String, usize> = HashMap::new();
     let mut car_slots = Vec::new();
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
+    // Car lifetimes already started from their spawn trajectory (`observations::SpawnPose`).
+    let mut spawn_started: HashSet<(i32, usize)> = HashSet::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
     let mut last_double_raw: HashMap<(i32, usize), u8> = HashMap::new();
@@ -4955,7 +4995,9 @@ pub fn convert_observations_with(
     } else {
         HashMap::new()
     };
-    let mut recent_poses: std::collections::VecDeque<(u64, Vec<(usize, Vec3A, Mat3A, bool)>)> =
+    // Per recent frame: (timeline tick, [(slot, position, rotation, demolished, lifetime)]), the lifetime
+    // being the creation frame of the slot's car actor (poses of two lifetimes are never interpolated).
+    let mut recent_poses: std::collections::VecDeque<(u64, Vec<(usize, Vec3A, Mat3A, bool, usize)>)> =
         std::collections::VecDeque::new();
     let mut recent_touch_ticks: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
     // The match clock and its lifecycle from the replay's integer clock (offline).
@@ -4983,6 +5025,8 @@ pub fn convert_observations_with(
 
     for (frame_idx, frame) in observations.frames.iter().enumerate() {
         let mut frame_residuals = Vec::new();
+        // Bodies (None: the ball) whose simulated velocity was set to zero by a sleeping packet.
+        let mut sleeping_inferred: Vec<Option<i32>> = Vec::new();
         if !frame.time.is_finite() || frame.time < first_time {
             return Err(ConvertError::InvalidTime {
                 frame: frame.index,
@@ -5324,7 +5368,13 @@ pub fn convert_observations_with(
                         }
                     }
                     let mut ball = *arena.get_ball_state();
-                    if apply_body(&mut ball.phys, body, frame.index, !ball_initialized) {
+                    let mut applied = apply_body(&mut ball.phys, body, frame.index, !ball_initialized);
+                    if zero_sleeping_velocity(&mut ball.phys, body, frame.index) {
+                        applied = true;
+                        sleeping_inferred.push(None);
+                        diagnostics.sleeping_ball_packets += 1;
+                    }
+                    if applied {
                         arena.set_ball_state(ball);
                     }
                     ball_initialized = true;
@@ -5426,6 +5476,27 @@ pub fn convert_observations_with(
                 };
                 let mut dirty = apply_body(&mut state.phys, &car.body, frame.index, new_lifetime)
                     || new_lifetime;
+                // Before its first rigid-body packet a car starts from the replay's spawn trajectory (inferred),
+                // not from RocketSim's default pose or from the previous car of its player.
+                if car.body.position.is_none() {
+                    if let Some(spawn) = &car.spawn_pose {
+                        if spawn_started.insert((car.actor_id, car.actor_created_frame)) {
+                            state.phys.pos = vec3(spawn.position);
+                            if let Some([x, y, z, w]) = spawn.rotation_xyzw {
+                                state.phys.rot_mat = Mat3A::from_quat(Quat::from_xyzw(x, y, z, w));
+                            }
+                            state.phys.vel = Vec3A::ZERO;
+                            state.phys.ang_vel = Vec3A::ZERO;
+                            dirty = true;
+                            diagnostics.cars_started_from_spawn_trajectory += 1;
+                        }
+                    }
+                }
+                if zero_sleeping_velocity(&mut state.phys, &car.body, frame.index) {
+                    dirty = true;
+                    sleeping_inferred.push(Some(car.actor_id));
+                    diagnostics.sleeping_car_packets += 1;
+                }
                 if car.player_link_active
                     && state.is_demoed
                     && demo_hold_until.get(&slot).is_none_or(|&until| timeline_tick >= until)
@@ -5612,6 +5683,8 @@ pub fn convert_observations_with(
 
                 if dirty {
                     arena.set_car_state(slot, state);
+                    // RocketSim asks for this after teleporting a car mid-drive (`arena/base.rs`).
+                    arena.refresh_car_sticky_gate(slot);
                 }
                 let mut controls = controls_from_observation(car, options);
                 if options.gate_jump_on_observed_impulse {
@@ -6307,13 +6380,23 @@ pub fn convert_observations_with(
         let mut ball_contacts = Vec::new();
         {
             let state_now = arena.get_arena_state();
+            let slot_life: HashMap<usize, usize> = frame_cars
+                .iter()
+                .filter_map(|car| match actor_slots.get(&car.actor_id) {
+                    Some(&(slot, created)) if created == car.actor_created_frame => Some((slot, created)),
+                    _ => None,
+                })
+                .collect();
             recent_poses.push_back((
                 timeline_tick,
                 state_now
                     .cars
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| (i, c.1.phys.pos, c.1.phys.rot_mat, c.1.is_demoed))
+                    .map(|(i, c)| {
+                        let life = slot_life.get(&i).copied().unwrap_or(usize::MAX);
+                        (i, c.1.phys.pos, c.1.phys.rot_mat, c.1.is_demoed, life)
+                    })
                     .collect(),
             ));
             while recent_poses.len() > 8 {
@@ -6331,17 +6414,23 @@ pub fn convert_observations_with(
                     let at = |k: usize| {
                         recent_poses
                             .get(k)
-                            .and_then(|(t, cars)| cars.iter().find(|c| c.0 == slot).map(|c| (*t, c.1, c.2, c.3)))
+                            .and_then(|(t, cars)| cars.iter().find(|c| c.0 == slot).map(|c| (*t, c.1, c.2, c.3, c.4)))
                     };
                     let n = recent_poses.len();
                     let after = (0..n).find(|&k| recent_poses[k].0 >= tick)?;
-                    let (t1, p1, r1, d1) = at(after)?;
+                    let (t1, p1, r1, d1, life1) = at(after)?;
                     if after == 0 || t1 == tick {
                         return Some((p1, r1, d1));
                     }
-                    let (t0, p0, _, _) = at(after - 1)?;
+                    let (t0, p0, r0, _, life0) = at(after - 1)?;
+                    // A pose between two lifetimes of the slot's car (a respawn) is unknown.
+                    if life0 != life1 {
+                        return None;
+                    }
                     let f = (tick - t0) as f32 / (t1 - t0).max(1) as f32;
-                    Some((p0 + (p1 - p0) * f, r1, d1))
+                    // The rotation is interpolated along the shortest arc (a flipping car turns a lot in a frame).
+                    let rotation = Mat3A::from_quat(Quat::from_mat3a(&r0).slerp(Quat::from_mat3a(&r1), f));
+                    Some((p0 + (p1 - p0) * f, rotation, d1))
                 };
                 let mut best: Option<(u64, usize, f32)> = None; // tick, slot, gap
                 'ticks: for (k, ball_pos) in interval.path.iter().enumerate() {
@@ -6412,7 +6501,7 @@ pub fn convert_observations_with(
                 let mut best: Option<(f32, u64)> = None;
                 let mut previous: Option<(u64, Vec3A)> = None;
                 for (tick, cars) in recent_poses.iter() {
-                    let Some(&(_, pos, _, demoed)) = cars.iter().find(|c| c.0 == slot) else {
+                    let Some(&(_, pos, _, demoed, _)) = cars.iter().find(|c| c.0 == slot) else {
                         previous = None;
                         continue;
                     };
@@ -6533,6 +6622,7 @@ pub fn convert_observations_with(
                 )
                 .collect(),
             car_actor_slots,
+            sleeping_velocity_inferred: sleeping_inferred,
         };
         on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }
@@ -6606,6 +6696,7 @@ mod tests {
             body: Body::default(),
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs {
                 jump_active_raw: Some(Value {
                     value: 1,
@@ -6654,6 +6745,7 @@ mod tests {
             body: Body::default(),
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs::default(),
         };
         let mut sim_state = CarState::default();
@@ -6705,8 +6797,8 @@ mod tests {
         }
     }
 
-    /// Two runs share frame 5: the first has three packets, the second two. Each rule picks one owner of
-    /// the shared packet; `Later` keeps every entry (the second run overwrites the first).
+    /// Two runs share frame 5: the first has three packets, the second two. `Earlier` gives the shared
+    /// packet to the first run; `Later` keeps every entry (the second run overwrites the first).
     #[test]
     fn a_packet_shared_by_two_runs_has_one_owner() {
         let run = |frames: &[usize]| RawRun {
@@ -6724,24 +6816,40 @@ mod tests {
             owned_entries(&runs, LagBoundary::Earlier),
             vec![vec![true; 3], vec![false, true], vec![true; 2]]
         );
-        assert_eq!(
-            owned_entries(&runs, LagBoundary::Longer),
-            vec![vec![true; 3], vec![false, true], vec![true; 2]]
-        );
+        // A short run that follows a long one still loses its first packet.
         let runs = [run(&[3, 4]), run(&[4, 5, 6])];
         assert_eq!(
-            owned_entries(&runs, LagBoundary::Longer),
-            vec![vec![true, false], vec![true; 3]]
+            owned_entries(&runs, LagBoundary::Earlier),
+            vec![vec![true; 2], vec![false, true, true]]
         );
-        let tied = [run(&[3, 4]), run(&[4, 5])];
-        assert_eq!(
-            owned_entries(&tied, LagBoundary::Longer),
-            vec![vec![true, false], vec![true; 2]]
-        );
+        assert_eq!(LagBoundary::default(), LagBoundary::Earlier);
+        assert_eq!(LagBoundary::from_name("longer"), None);
     }
 
     /// A hit tick moved between arenas keeps its age before the destination's tick; a hit from the future of
     /// its source, or older than the destination's clock reaches back, is dropped.
+    #[test]
+    fn a_fresh_sleeping_packet_zeroes_the_simulated_velocity_unless_a_velocity_is_fresh() {
+        let sleeping = |frame: usize, linear_frame: Option<usize>| Body {
+            sleeping: Some(Value { value: true, frame, source: Source::Replay }),
+            linear_velocity: linear_frame.map(|frame| Value { value: [1.0, 2.0, 3.0], frame, source: Source::Replay }),
+            ..Body::default()
+        };
+        let mut state = CarState::default().phys;
+        state.vel = Vec3A::new(500.0, 0.0, 0.0);
+        state.ang_vel = Vec3A::new(0.0, 2.0, 0.0);
+        // A stale sleeping flag does nothing.
+        assert!(!zero_sleeping_velocity(&mut state, &sleeping(3, None), 4));
+        assert_eq!(state.vel, Vec3A::new(500.0, 0.0, 0.0));
+        // A fresh one zeroes both (the omitted velocities are not observed).
+        assert!(zero_sleeping_velocity(&mut state, &sleeping(4, None), 4));
+        assert_eq!((state.vel, state.ang_vel), (Vec3A::ZERO, Vec3A::ZERO));
+        // A velocity that is fresh in the same packet is kept.
+        state.vel = Vec3A::new(7.0, 0.0, 0.0);
+        zero_sleeping_velocity(&mut state, &sleeping(4, Some(4)), 4);
+        assert_eq!(state.vel, Vec3A::new(7.0, 0.0, 0.0));
+    }
+
     #[test]
     fn a_hit_tick_keeps_its_age_when_the_tick_counter_changes() {
         assert_eq!(rebase_tick(Some(5000), 5000, 0), Some(0));
@@ -6838,6 +6946,7 @@ mod tests {
                     source: Source::Replay,
                 }),
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs::default(),
             }],
             players: Vec::new(),
@@ -6902,6 +7011,7 @@ mod tests {
             },
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs {
                 steer: Some(Value {
                     value: 0.75,
@@ -7020,6 +7130,7 @@ mod tests {
             },
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs {
                 throttle: stamp(if frame == 2 { 1.0 } else { 0.0 }, frame),
                 steer: stamp(0.0, frame),
@@ -7153,6 +7264,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     throttle: value(if frame >= 2 { 1.0 } else { 0.0 }, frame),
                     steer: value(0.0, frame),
@@ -7324,6 +7436,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     throttle: Some(Value {
                         value: 0.0,
@@ -7516,6 +7629,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     dodge_active_raw: Some(Value {
                         value: u8::from(frame >= 2),
@@ -7684,6 +7798,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     dodge_active_raw: Some(Value {
                         value: 1,
@@ -7779,6 +7894,7 @@ mod tests {
             body: Body::default(),
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs {
                 dodge_torque_replay_units: torque.map(|(x, frame)| Value {
                     value: [x, 0.0, 0.0],
@@ -7889,6 +8005,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     // A car that has not dodged yet has no dodge counter.
                     dodge_active_raw: (frame >= 2).then_some(Value {
@@ -8039,6 +8156,7 @@ mod tests {
                 },
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs {
                     jump_active_raw: counter(match frame {
                         0 => 0,
@@ -8287,6 +8405,7 @@ mod tests {
             },
             boost: None,
             boost_raw: None,
+            spawn_pose: None,
             inputs: observations::Inputs::default(),
         };
 
@@ -8411,6 +8530,7 @@ mod tests {
                 body: Body::default(),
                 boost: None,
                 boost_raw: None,
+                spawn_pose: None,
                 inputs: observations::Inputs::default(),
             };
             let value = |value: [f32; 3]| Value {

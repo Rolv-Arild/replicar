@@ -536,6 +536,8 @@ struct Sink<T> {
 }
 
 impl<T> Sink<T> {
+    /// Without provenance metadata; the exports always pass it (`create_with`), so this is for the tests.
+    #[cfg(test)]
     fn create(
         main: &Path,
         name: &str,

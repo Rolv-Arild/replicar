@@ -345,6 +345,10 @@ struct FrameLine<'a> {
     /// fitted.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     fitted_inputs: &'a [crate::conversion::FittedInput],
+    /// Bodies (car actor id; null: the ball) whose simulated velocity was zeroed by a sleeping packet
+    /// (inferred: the packet omits the velocities).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    sleeping_velocity_inferred: &'a [Option<i32>],
 }
 
 pub(crate) fn header_json(
@@ -397,6 +401,7 @@ fn frame_line<'a>(
         position_residuals: residuals,
         packet_lag_ticks: &converted.packet_lags,
         fitted_inputs: &converted.fitted_inputs,
+        sleeping_velocity_inferred: &converted.sleeping_velocity_inferred,
     }
 }
 

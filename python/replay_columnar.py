@@ -364,8 +364,8 @@ def read_record_tables(path: str | Path, verify: bool = True) -> dict[str, Any]:
     from the result; an empty table keeps its schema. The Rust writer is the only one that makes them.
 
     Each table's schema metadata holds the ``source_sha256`` of its replay and the ``options_sha256`` of
-    the conversion options (the main file has the same two), and its footer the main file's ``frames``
-    count. With ``verify`` (the default) a table whose hashes or frame count differ from the main file's,
+    the conversion options, and its footer the main file's ``frames`` count; the main file has the same
+    hashes (the replay hash in its header, the options hash in its footer). With ``verify`` (the default) a table whose hashes or frame count differ from the main file's,
     that has none (written before the metadata existed), or that cannot be read (truncated), is skipped
     with a warning: it belongs to another export that left it beside this file, or to an export that did
     not finish. ``verify=False`` reads whatever is there (an unreadable table still raises).

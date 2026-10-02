@@ -275,6 +275,8 @@ def empirical_null(dev, a_per_size, partitions=NULL_PARTITIONS, pseudo_splits=NU
     return {
         "mean_b_itself": float(np.mean(direct)) if direct else None,
         "p95_b_itself": float(np.percentile(direct, 95)) if direct else None,
+        "p99_b_itself": float(np.percentile(direct, 99)) if direct else None,
+        "max_b_itself": int(max(direct)) if direct else None,
         "a_per_size": a_per_size,
         "b_per_size": len(dev) // 3 - a_per_size,
         "partitions": partitions,
@@ -298,7 +300,8 @@ def print_null(null):
     """`null`: a list of nulls at decreasing A size (the first is the one the verdict uses)."""
     for n in null:
         extra = (
-            f"; B itself (no resampling) mean {n['mean_b_itself']:.1f}, p95 {n['p95_b_itself']:.0f}"
+            f"; B itself (no resampling) mean {n['mean_b_itself']:.1f}, p95 {n['p95_b_itself']:.0f}, "
+            f"p99 {n['p99_b_itself']:.0f}, max {n['max_b_itself']}"
             if n.get("mean_b_itself") is not None
             else ""
         )
@@ -342,14 +345,14 @@ def report_check(label, bands, test, rules, test_reports, null=None, verbose=Tru
     print(f"  {total} comparisons ({len(skipped)} skipped), {outside} outside their band; the split has {len(test)} replays")
     if null is not None:
         print_null(null)
-        verdict = "within" if outside <= null[0]["p95"] else ("above the p95 of" if outside <= null[0]["p99"] else "above the p99 of")
-        print(f"  the count outside, {outside}, is {verdict} the empirical null (pseudo-splits of B)")
-        if null[0].get("p95_b_itself") is not None:
-            print(
-                f"  against B itself (a fresh 60-replay split, no resampling; resampling B doubles the variance of a "
-                f"split's statistics, so the pseudo-split null above is the wider one): "
-                f"{'within' if outside <= null[0]['p95_b_itself'] else 'above'} its p95 {null[0]['p95_b_itself']:.0f}"
-            )
+        first = null[0]
+        if first.get("p95_b_itself") is not None:
+            # The primary verdict: B itself is a fresh 60-replay split disjoint from the bands, like the test split.
+            verdict = "within" if outside <= first["p95_b_itself"] else (
+                "above the p95 of" if outside <= first["p99_b_itself"] else "above the p99 of")
+            print(f"  the count outside, {outside}, is {verdict} the null of B itself (p95 {first['p95_b_itself']:.0f}, p99 {first['p99_b_itself']:.0f})")
+        wide = "within" if outside <= first["p95"] else ("above the p95 of" if outside <= first["p99"] else "above the p99 of")
+        print(f"  secondary: {wide} the pseudo-split null (resampling B doubles the variance of a split's statistics, so it is the wider one)")
     else:
         print(f"  (the binomial expectation {0.05 * total:.1f} understates the spread: rows are correlated)")
     broken = []
@@ -382,9 +385,14 @@ def main():
         print_null(null)
     elif mode == "check":
         spec = json.load(open(sys.argv[2]))
+        null_spec = spec.get("null_outside")
+        if not (isinstance(null_spec, list) and null_spec and null_spec[0].get("p99_b_itself") is not None):
+            print("note: the bands file predates the null of disjoint partitions (no 'B itself' null stored); "
+                  "rebuild it with `bands` to get the empirical null. Checking the bands only.")
+            null_spec = None
         test, d, a = load_split(sys.argv[3], sys.argv[4])
         report_check(f"{sys.argv[3]} against {sys.argv[2]}", {k: tuple(v) for k, v in spec["bands"].items()},
-                     test, [tuple(r) for r in spec["ordering"]], (d, a), spec.get("null_outside"))
+                     test, [tuple(r) for r in spec["ordering"]], (d, a), null_spec)
         outliers = outlier_replays(spec["outlier_limits"], (d, a))
         print(f"  replays above every development replay of their game size (car p90 rows): {len(outliers)}")
         for o in outliers:

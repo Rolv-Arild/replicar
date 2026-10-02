@@ -157,6 +157,33 @@ class LoaderTest(unittest.TestCase):
             with self.assertWarnsRegex(UserWarning, "unreadable record table"):
                 self.assertNotIn("touches", read_record_tables(main))
 
+    def test_record_tables_of_other_conversion_options_are_skipped(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            self.skipTest("pyarrow is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            header = json.dumps({"schema_version": 1, "source_sha256": "ab" * 32})
+            main_metadata = {"columnar_version": "1", "replay_header_json": header, "options_sha256": "11" * 32}
+            main = directory / "game.parquet"
+            pq.write_table(pa.table({"frame": pa.array([0], pa.uint32())}).replace_schema_metadata(main_metadata), main)
+
+            def table(options):
+                metadata = {"source_sha256": "ab" * 32, "frames": "1"}
+                if options is not None:
+                    metadata["options_sha256"] = options
+                return pa.table({"frame": pa.array([0], pa.uint32())}).replace_schema_metadata(metadata)
+
+            pq.write_table(table("11" * 32), directory / "game.touches.parquet")
+            pq.write_table(table("22" * 32), directory / "game.events.parquet")
+            pq.write_table(table(None), directory / "game.pad_pickups.parquet")
+            with self.assertWarnsRegex(UserWarning, "other options") as caught:
+                tables = read_record_tables(main)
+            self.assertEqual(list(tables), ["touches"])
+            self.assertEqual(len(caught.warnings), 2)
+
     def test_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.jsonl"
