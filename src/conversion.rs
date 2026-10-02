@@ -3783,6 +3783,7 @@ fn fit_ground_flip_timing(
         }
         let (frame_b, _, pos_b, vel_b, _) = first_fresh;
         let frame_tick = timeline(frame_b) - t_a;
+        // Floored at 4 ticks like the dodge-start fit's window (see `fit_dodge_start`).
         let gap = (timeline(frame_b) - timeline(frame_b.saturating_sub(1))).max(4);
         let (lo, hi) = ((frame_tick - gap).max(1), frame_tick.min(ticks_ac - 1));
         let mut best_tick: Option<(i64, f32)> = None;
@@ -3876,8 +3877,10 @@ fn step_ticks(
             if let Some(entry) = schedule.entries.iter().rev().find(|e| e.0 <= arena_tick) {
                 let mut controls = *arena.get_car_controls(schedule.slot);
                 // A jump press in the air is a double jump or a flip, whose kind RocketSim takes from
-                // the direction of the same controls: leave those ticks to the press itself.
-                if controls.jump && !arena.get_car_state(schedule.slot).is_on_ground {
+                // the direction of the same controls: leave those ticks to the press itself. A held
+                // jump (no new press) is not one, and keeps the solved controls.
+                let state = arena.get_car_state(schedule.slot);
+                if controls.jump && !state.prev_controls.jump && !state.is_on_ground {
                     continue;
                 }
                 controls.pitch = entry.1.pitch;
@@ -4559,7 +4562,11 @@ fn fit_dodge_start(
     let final_cancel = best_cancel?.0;
     if options.infer_dodge_first_packet_tick {
         let frame_tick = timeline(first_frame) - origin_tick;
-        // A packet was generated within its frame window: the lag is at most the frame gap.
+        // A packet was generated within its frame window: the lag is at most the frame gap. The gap is
+        // floored at 4 ticks (30 fps; a replay with 3-tick gaps occurs on 0.1% of frames in the corpus, and
+        // none is faster), so for a faster replay (60 fps: 2 ticks) the search window is wider than the
+        // gap allows and may pick a lag above it; the fitted path is exact there, so that is only a
+        // risk with noisy packets. Untested on such a replay.
         let gap = (timeline(first_frame) - timeline(first_frame.saturating_sub(1))).max(4);
         let (lo, hi) = (
             (frame_tick - gap).max(1),
