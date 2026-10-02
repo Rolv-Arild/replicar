@@ -276,7 +276,9 @@ pub fn aligned_lags(
             let chosen = residuals
                 .iter()
                 .filter(|(_, r)| *r <= best + TIE)
-                .min_by_key(|(s, _)| s.abs())
+                // The smallest shift; between -k and +k the better residual (not the first in scan order,
+                // which would always lean negative).
+                .min_by(|a, b| a.0.abs().cmp(&b.0.abs()).then(a.1.total_cmp(&b.1)))
                 .map(|(s, _)| *s)
                 .unwrap_or(0);
             if std::env::var_os("ALIGN_DEBUG").is_some() {

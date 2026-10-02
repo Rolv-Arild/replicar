@@ -4015,8 +4015,8 @@ fn fit_flip_cancel(
                     .get(&(car.actor_id, car.actor_created_frame, candidate))
                     .copied()
                     .or(lags.cars[candidate])
-                    .map_or(
-                        (timeline(candidate) - timeline(candidate - 1)).max(0) / 2,
+                    .map_or_else(
+                        || (timeline(candidate) - timeline(candidate.saturating_sub(1))).max(0) / 2,
                         |lag| lag.round().max(0.0) as i64,
                     ),
                 None => 0,
@@ -5073,6 +5073,15 @@ pub fn convert_observations_with(
                 }
             }};
         }
+        if options.block_sim_pad_pickups {
+            // Held on cooldown from the first tick of the interval: the arena carries the true
+            // cooldowns written back at the end of the previous frame (for the export), and the
+            // ticks before the last lag phase would otherwise let a car pick up an available pad
+            // that the replay has not reported.
+            for idx in 0..arena.num_boost_pads() {
+                arena.set_boost_pad_state(idx, BoostPadState { cooldown: 20.0 });
+            }
+        }
         for lag in phase_lags {
             // Advance to this group's packet time (`lag` ticks before the frame time).
             advance_to!(span - lag.min(remaining));
@@ -5831,11 +5840,6 @@ pub fn convert_observations_with(
                         ground_schedules.push(schedule);
                     }
                 }
-            }
-        }
-        if options.block_sim_pad_pickups {
-            for idx in 0..arena.num_boost_pads() {
-                arena.set_boost_pad_state(idx, BoostPadState { cooldown: 20.0 });
             }
         }
         advance_to!(span);
