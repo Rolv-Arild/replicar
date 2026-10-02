@@ -376,6 +376,8 @@ impl Tracker {
                     self.components.retain(|_, car| *car != id);
                     // A recycled actor id must not inherit the previous car's counter.
                     self.dodges_refreshed.remove(&id.0);
+                    // Nor a demolition report of the previous car, which would mark a new one as a repeat.
+                    self.demolished_at.remove(&id.0);
                 }
                 ActorKind::Ball => {
                     if self
@@ -1015,5 +1017,48 @@ mod event_tests {
         assert!(!repeat_of(&other));
         let later = tracker.snapshot(3, 16.1, 0.03, vec![demolish(7)], Vec::new());
         assert!(!repeat_of(&later));
+    }
+
+    /// A new car on a recycled actor id is not the victim of the previous car's demolition: a report
+    /// 1.7 s after the old car's, with the actor deleted in between, is a new demolition.
+    #[test]
+    fn a_recycled_car_actor_id_does_not_inherit_the_demolition_window() {
+        let mut tracker = Tracker::default();
+        let first = tracker.snapshot(0, 10.0, 0.03, vec![demolish(7)], Vec::new());
+        assert!(!repeat_of(&first));
+        tracker.actors.insert(
+            ActorId(7),
+            Actor { class: "Car".to_owned(), kind: ActorKind::Car },
+        );
+        tracker.delete(ActorId(7));
+        let recycled = tracker.snapshot(1, 11.7, 0.03, vec![demolish(7)], Vec::new());
+        assert!(!repeat_of(&recycled));
+    }
+
+    /// A pad actor id that is deleted and recycled starts without the previous pad's pickup counter.
+    #[test]
+    fn a_recycled_pad_actor_id_does_not_inherit_the_pickup_counter() {
+        let mut tracker = Tracker::default();
+        let pickup = |tracker: &mut Tracker| {
+            let mut pickups = Vec::new();
+            tracker.observe(
+                ActorId(9),
+                "TAGame.VehiclePickup_TA:NewReplicatedPickupData",
+                &Attribute::PickupNew(boxcars::PickupNew { instigator: Some(ActorId(3)), picked_up: 1 }),
+                &[],
+                0,
+                &mut Vec::new(),
+                &mut pickups,
+            );
+            pickups[0].repeat
+        };
+        assert!(!pickup(&mut tracker));
+        assert!(pickup(&mut tracker));
+        tracker.actors.insert(
+            ActorId(9),
+            Actor { class: "Pad".to_owned(), kind: ActorKind::Pad("Pad".to_owned()) },
+        );
+        tracker.delete(ActorId(9));
+        assert!(!pickup(&mut tracker));
     }
 }

@@ -2604,6 +2604,23 @@ struct GroundSchedule {
     shift: Option<i64>,
 }
 
+/// The arena ticks at which a ground schedule presses jump. A press is a rising edge: the button is
+/// already down when `previous_jump`, the jump control of the previous interval's last tick (not of
+/// the current frame, which may already show the press), is set.
+fn jump_press_ticks(previous_jump: bool, schedule: &GroundSchedule) -> Vec<u64> {
+    let mut jumping = previous_jump;
+    let mut ticks = Vec::new();
+    for entry in &schedule.entries {
+        if let Some(jump) = entry.5 {
+            if jump && !jumping {
+                ticks.push(entry.0);
+            }
+            jumping = jump;
+        }
+    }
+    ticks
+}
+
 /// Per-tick air controls for one car over the interval to its next fresh packet (`plan_air_bvp`):
 /// (first arena tick, controls), in order.
 struct AirSchedule {
@@ -5719,6 +5736,9 @@ pub fn convert_observations_with(
                         }
                     }
                 }
+                // The jump control the car had at the end of the previous interval (the frame's own
+                // controls replace it next).
+                let previous_jump = arena.get_car_controls(slot).jump;
                 arena.set_car_controls(slot, controls);
                 if options.air_bvp
                     && simulated
@@ -5915,16 +5935,8 @@ pub fn convert_observations_with(
                         }
                     }
                     if let Some(schedule) = schedule {
-                        // A press is a rising edge: the button is already down when the car's current
-                        // controls (the previous interval's last) have the jump set.
-                        let mut jumping = arena.get_car_controls(slot).jump;
-                        for entry in &schedule.entries {
-                            if let Some(jump) = entry.5 {
-                                if jump && !jumping {
-                                    fitted_arena.push((slot, "jump", entry.0, 0.0, 0.0, 0.0, 0));
-                                }
-                                jumping = jump;
-                            }
+                        for tick in jump_press_ticks(previous_jump, &schedule) {
+                            fitted_arena.push((slot, "jump", tick, 0.0, 0.0, 0.0, 0));
                         }
                         ground_schedules.push(schedule);
                     }
@@ -6382,6 +6394,26 @@ mod tests {
 
     use super::*;
     use crate::observations::Source;
+
+    /// A jump held since the previous interval continues across a schedule's first entry; only a rising
+    /// edge after a release is a press.
+    #[test]
+    fn a_jump_press_is_a_rising_edge_from_the_previous_interval() {
+        let entry = |tick: u64, jump: Option<bool>| (tick, 1.0, 0.0, false, false, jump);
+        let schedule = GroundSchedule {
+            slot: 0,
+            end_tick: 20,
+            entries: vec![
+                entry(11, Some(true)),
+                entry(13, None),
+                entry(15, Some(false)),
+                entry(18, Some(true)),
+            ],
+            shift: None,
+        };
+        assert_eq!(jump_press_ticks(false, &schedule), vec![11, 18]);
+        assert_eq!(jump_press_ticks(true, &schedule), vec![18]);
+    }
 
     #[test]
     fn stale_replay_fields_do_not_overwrite_simulated_physics() {
