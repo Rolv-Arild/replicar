@@ -21,6 +21,20 @@ struct Samples {
     hold: Vec<f32>,
     linear: Vec<f32>,
     offline_projection_fit: Vec<f32>,
+    /// Seconds from the packet the prediction starts from to the target frame, parallel to
+    /// `simulated` and `hold`, and parallel to `linear` (`linear_age`).
+    age: Vec<f32>,
+    linear_age: Vec<f32>,
+}
+
+/// Age buckets (seconds from the start packet to the target frame) for the masked rows.
+const AGE_BUCKETS: [(&str, f32); 4] = [("<=0.04", 0.04), ("<=0.08", 0.08), ("<=0.12", 0.12), ("<=0.20", 0.20)];
+
+fn age_bucket(age: f32) -> &'static str {
+    AGE_BUCKETS
+        .iter()
+        .find(|(_, limit)| age <= *limit)
+        .map_or(">0.20", |(name, _)| name)
 }
 
 impl Samples {
@@ -28,12 +42,14 @@ impl Samples {
         if residual.simulated_error_uu.is_finite() && residual.hold_error_uu.is_finite() {
             self.simulated.push(residual.simulated_error_uu);
             self.hold.push(residual.hold_error_uu);
+            self.age.push(residual.seconds_since_previous_position);
         }
         if let Some(value) = residual
             .linear_extrapolation_error_uu
             .filter(|v| v.is_finite())
         {
             self.linear.push(value);
+            self.linear_age.push(residual.seconds_since_previous_position);
         }
         if let Some(value) = residual
             .offline_projection_fit_error_uu
@@ -50,7 +66,33 @@ impl Samples {
             linear: quantiles(&self.linear),
             offline_projection_fit: (!self.offline_projection_fit.is_empty())
                 .then(|| quantiles(&self.offline_projection_fit)),
+            start_packet_age_seconds: None,
         }
+    }
+
+    /// `summary` plus the age quantiles of the start packet (masked rows).
+    fn summary_with_age(&self) -> ErrorSummary {
+        ErrorSummary {
+            start_packet_age_seconds: Some(age_quantiles(&self.age)),
+            ..self.summary()
+        }
+    }
+
+    /// The samples split by the age of their start packet (`age_bucket`).
+    fn by_age_bucket(&self) -> BTreeMap<&'static str, Samples> {
+        let mut result: BTreeMap<&'static str, Samples> = BTreeMap::new();
+        for ((&simulated, &hold), &age) in self.simulated.iter().zip(&self.hold).zip(&self.age) {
+            let bucket = result.entry(age_bucket(age)).or_default();
+            bucket.simulated.push(simulated);
+            bucket.hold.push(hold);
+            bucket.age.push(age);
+        }
+        for (&linear, &age) in self.linear.iter().zip(&self.linear_age) {
+            let bucket = result.entry(age_bucket(age)).or_default();
+            bucket.linear.push(linear);
+            bucket.linear_age.push(age);
+        }
+        result
     }
 
     fn extend(&mut self, other: &Self) {
@@ -59,6 +101,8 @@ impl Samples {
         self.linear.extend_from_slice(&other.linear);
         self.offline_projection_fit
             .extend_from_slice(&other.offline_projection_fit);
+        self.age.extend_from_slice(&other.age);
+        self.linear_age.extend_from_slice(&other.linear_age);
     }
 }
 
@@ -87,6 +131,31 @@ fn quantiles(values: &[f32]) -> Quantiles {
     }
 }
 
+/// Quantiles of the seconds from the packet a masked prediction starts from to its target frame
+/// (the horizon label counts frames from the mask window's start; a car's last fresh packet is
+/// often older than the frame before the window).
+#[derive(Serialize)]
+struct AgeQuantiles {
+    count: usize,
+    p10: Option<f32>,
+    p50: Option<f32>,
+    p90: Option<f32>,
+}
+
+fn age_quantiles(values: &[f32]) -> AgeQuantiles {
+    let mut values: Vec<_> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    values.sort_by(f32::total_cmp);
+    let at = |fraction: f64| {
+        (!values.is_empty()).then(|| values[((values.len() - 1) as f64 * fraction).round() as usize])
+    };
+    AgeQuantiles {
+        count: values.len(),
+        p10: at(0.1),
+        p50: at(0.5),
+        p90: at(0.9),
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorSummary {
     simulated: Quantiles,
@@ -94,6 +163,9 @@ struct ErrorSummary {
     linear: Quantiles,
     #[serde(skip_serializing_if = "Option::is_none")]
     offline_projection_fit: Option<Quantiles>,
+    /// Masked rows only: the age of the start packet (`seconds_since_previous_position`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_packet_age_seconds: Option<AgeQuantiles>,
 }
 
 #[derive(Default)]
@@ -116,6 +188,13 @@ impl ByBody {
         BodySummary {
             ball: self.ball.summary(),
             car: self.car.summary(),
+        }
+    }
+
+    fn summary_with_age(&self) -> BodySummary {
+        BodySummary {
+            ball: self.ball.summary_with_age(),
+            car: self.car.summary_with_age(),
         }
     }
 
@@ -461,6 +540,9 @@ struct Report {
     one_step_transition_angular_by_context: BTreeMap<String, FieldSummary>,
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
     masked_by_game_size: BTreeMap<String, BTreeMap<usize, BodySummary>>,
+    /// All masked position samples pooled over horizons, split by the age of the start packet
+    /// (`<=0.04`, `<=0.08`, `<=0.12`, `<=0.20`, `>0.20` seconds), so car and ball compare at equal age.
+    masked_position_uu_by_start_packet_age_bucket: BTreeMap<String, BodySummary>,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
     masked_kinematics_by_game_size: BTreeMap<String, BTreeMap<usize, KinematicsByBodySummary>>,
     masked_boost_by_horizon_frames: BTreeMap<usize, FieldSummary>,
@@ -1418,6 +1500,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         one_step_transition_angular_by_context: BTreeMap::new(),
         masked_position_uu_by_horizon_frames: BTreeMap::new(),
         masked_by_game_size: BTreeMap::new(),
+        masked_position_uu_by_start_packet_age_bucket: BTreeMap::new(),
         masked_kinematics_by_horizon_frames: BTreeMap::new(),
         masked_kinematics_by_game_size: BTreeMap::new(),
         masked_boost_by_horizon_frames: BTreeMap::new(),
@@ -1434,6 +1517,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut masked_by_horizon: BTreeMap<usize, ByBody> = BTreeMap::new();
     let mut masked_by_size: BTreeMap<String, BTreeMap<usize, ByBody>> = BTreeMap::new();
+    let mut masked_by_age: BTreeMap<&'static str, ByBody> = BTreeMap::new();
     let mut kinematics_by_horizon: BTreeMap<usize, KinematicsByBody> = BTreeMap::new();
     let mut kinematics_by_size: BTreeMap<String, BTreeMap<usize, KinematicsByBody>> =
         BTreeMap::new();
@@ -1601,9 +1685,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         own_masked_position_report = own_masked
                             .iter()
-                            .map(|(&horizon, samples)| (horizon, samples.summary()))
+                            .map(|(&horizon, samples)| (horizon, samples.summary_with_age()))
                             .collect();
                         for (horizon, samples) in own_masked {
+                            for (bucket, part) in samples.ball.by_age_bucket() {
+                                masked_by_age.entry(bucket).or_default().ball.extend(&part);
+                            }
+                            for (bucket, part) in samples.car.by_age_bucket() {
+                                masked_by_age.entry(bucket).or_default().car.extend(&part);
+                            }
                             masked_by_horizon
                                 .entry(horizon)
                                 .or_default()
@@ -1693,7 +1783,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect();
     report.masked_position_uu_by_horizon_frames = masked_by_horizon
         .into_iter()
-        .map(|(horizon, samples)| (horizon, samples.summary()))
+        .map(|(horizon, samples)| (horizon, samples.summary_with_age()))
+        .collect();
+    report.masked_position_uu_by_start_packet_age_bucket = masked_by_age
+        .into_iter()
+        .map(|(bucket, samples)| (bucket.to_owned(), samples.summary_with_age()))
         .collect();
     report.masked_by_game_size = masked_by_size
         .into_iter()
@@ -1702,7 +1796,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 size,
                 by_horizon
                     .into_iter()
-                    .map(|(horizon, samples)| (horizon, samples.summary()))
+                    .map(|(horizon, samples)| (horizon, samples.summary_with_age()))
                     .collect(),
             )
         })

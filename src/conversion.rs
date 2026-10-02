@@ -1790,6 +1790,9 @@ pub struct PacketLags {
     /// number of bridged ball hits found.
     pub ball_car_offset: Option<f32>,
     pub bridged_hits: usize,
+    /// The replay was detected as lag-free (`detect_lag_free_replays`: a server-saved replay whose packets
+    /// all sit at their frame's own tick) and every fresh packet got a lag of zero.
+    pub lag_free: bool,
     /// The exact-chain runs of the cars: every packet of one run shares one level (its start), which
     /// may move by whole ticks inside `[lo, hi]` (`contact_alignment` moves whole runs).
     pub car_runs: Vec<CarRun>,
@@ -2536,7 +2539,9 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
             }
         }
         if total >= 200 && equal as f64 >= 0.9 * total as f64 {
-            return zero_packet_lags(observations);
+            let mut zero = zero_packet_lags(observations);
+            zero.lag_free = true;
+            return zero;
         }
     }
     let offset = options.ball_car_lag_offset.or_else(|| {

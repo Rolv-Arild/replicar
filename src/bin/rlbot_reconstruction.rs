@@ -334,6 +334,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{label}: too few matched packets ({})", matched.len());
             return Ok(());
         }
+        // The variant's label comes before everything it scores (the press lines below belong to it).
+        println!("\n{label}: {} matched fresh packets", matched.len());
         // Running mode of the offset over +-100 matched packets.
         let offset_at = |f: usize| -> i64 {
             let i = matched.partition_point(|m| m.0 < f).min(matched.len() - 1);
@@ -866,13 +868,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        // Every fitted press (kind, car) on the server timeline, and the server tick of each replay frame,
+        // to tell which true presses fall in Active play.
+        let mut fitted_ticks: HashMap<(String, bool), Vec<i64>> = HashMap::new();
+        let mut frame_ticks: Vec<(i64, bool)> = Vec::with_capacity(output.frames.len());
         for (f, converted) in output.frames.iter().enumerate() {
+            let offset = offset_at(f);
+            frame_ticks.push((
+                converted.timeline_tick as i64 - offset,
+                frames[f].game_state.as_ref().is_some_and(|g| g.value == "Active"),
+            ));
             for e in converted.fitted_inputs.iter().filter(|e| e.kind != "air") {
                 let Some(name) = slot_name.get(&e.slot) else {
                     continue;
                 };
-                let server = e.tick as i64 - offset_at(f);
+                let server = e.tick as i64 - offset;
                 let dodge = e.kind == "dodge";
+                fitted_ticks.entry((name.clone(), dodge)).or_default().push(server);
                 let Some(list) = events.get(&(name.clone(), dodge)) else {
                     continue;
                 };
@@ -885,6 +897,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+        }
+        // Press counts, so the error quantiles below (on the matched subset) can be read against them:
+        // fitted presses, those with no true press of that car within 30 ticks, the true presses inside
+        // Active play, and those with no fitted press of that car within 30 ticks.
+        for (dodge, kind) in [(false, "jump"), (true, "dodge")] {
+            let (mut fitted, mut fitted_unmatched, mut true_active, mut true_unmatched) = (0usize, 0usize, 0usize, 0usize);
+            for ((name, d), ticks) in &fitted_ticks {
+                if *d != dodge {
+                    continue;
+                }
+                let truth_list = events.get(&(name.clone(), dodge));
+                for &server in ticks {
+                    fitted += 1;
+                    if !truth_list.is_some_and(|l| l.iter().any(|&t| (t as i64 - server).abs() <= 30)) {
+                        fitted_unmatched += 1;
+                    }
+                }
+            }
+            let first = frame_ticks.first().map_or(i64::MAX, |t| t.0);
+            let last = frame_ticks.last().map_or(i64::MIN, |t| t.0);
+            for ((name, d), list) in &events {
+                if *d != dodge {
+                    continue;
+                }
+                let fitted_list = fitted_ticks.get(&(name.clone(), dodge));
+                for &t in list {
+                    let t = t as i64;
+                    let index = frame_ticks.partition_point(|&(tick, _)| tick <= t);
+                    let active = t >= first && t <= last && index > 0 && frame_ticks[index - 1].1;
+                    if !active {
+                        continue;
+                    }
+                    true_active += 1;
+                    if !fitted_list.is_some_and(|l| l.iter().any(|&server| (t - server).abs() <= 30)) {
+                        true_unmatched += 1;
+                    }
+                }
+            }
+            println!(
+                "  {kind} presses: fitted {fitted} (no true press within 30 ticks: {fitted_unmatched}); true presses in Active play {true_active} (no fitted press within 30 ticks: {true_unmatched})"
+            );
         }
         for (kind, values) in press.iter_mut() {
             let mut abs: Vec<f32> = values.iter().map(|v| v.abs()).collect();
@@ -982,10 +1035,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quantile(&mut r.vel, 0.9),
             );
         }
-        println!(
-            "\n{label}: {} matched fresh packets, {scored} scored car frames",
-            matched.len()
-        );
+        println!("\n{label}: {scored} scored car frames ({} matched fresh packets)", matched.len());
         println!(
             "{:<44} {:>6} | {:>17} | {:>15} | {:>13} | {:>13}",
             "group",

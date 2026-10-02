@@ -59,12 +59,6 @@ fn odd(value: &Option<Value<u8>>) -> bool {
     value.as_ref().is_some_and(|v| v.value % 2 == 1)
 }
 
-/// The test split is sealed until the frozen assessment: a path containing "test" is refused unless the
-/// run is the final one.
-fn sealed_path_refused(path: &Path, final_assessment: bool) -> bool {
-    path.to_string_lossy().contains("test") && !final_assessment
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(
         env::args_os()
@@ -72,7 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--no-infer-flip-cancel] [--final-assessment]")?,
     );
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
+    if replay_to_rocketsim::sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
         return Err("refusing to inspect a path containing 'test' (pass --final-assessment for the frozen run)".into());
     }
     let mut options = ConvertOptions::default();
@@ -353,18 +347,4 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_sealed_test_split_needs_the_final_assessment_flag() {
-        assert!(sealed_path_refused(Path::new("replays/test"), false));
-        assert!(sealed_path_refused(Path::new("replays/test/1v1/a.replay"), false));
-        assert!(!sealed_path_refused(Path::new("replays/test"), true));
-        assert!(!sealed_path_refused(Path::new("replays/validation"), false));
-        assert!(!sealed_path_refused(Path::new("replays/train/3v3"), false));
-    }
 }

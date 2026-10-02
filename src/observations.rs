@@ -119,7 +119,7 @@ pub struct Player {
 }
 
 /// Seconds within which a second report of one victim is a repeat.
-const DEMOLITION_REPEAT_WINDOW: f32 = 5.0;
+pub const DEMOLITION_REPEAT_WINDOW: f32 = 5.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

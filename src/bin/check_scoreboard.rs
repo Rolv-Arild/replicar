@@ -2,7 +2,7 @@
 //! the integer the replay shows differs from the ceiling of the reconstructed clock in running
 //! frames (a frame right at a change may differ by one), and counts of the clock states.
 //!
-//! usage: check_scoreboard <dir or replay>
+//! usage: check_scoreboard <dir or replay> [--final-assessment]
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -29,9 +29,10 @@ fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(env::args().nth(1).ok_or("usage: check_scoreboard <dir or replay>")?);
-    if path.to_string_lossy().contains("test") {
-        return Err("refusing to inspect a path containing 'test'".into());
+    let path = PathBuf::from(env::args().nth(1).ok_or("usage: check_scoreboard <dir or replay> [--final-assessment]")?);
+    // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
+    if replay_to_rocketsim::sealed_path_refused(&path, env::args().any(|arg| arg == "--final-assessment")) {
+        return Err("refusing to inspect a path containing 'test' (pass --final-assessment for the frozen run)".into());
     }
     let (mut running, mut off_by_one, mut off_more, mut missing) = (0usize, 0usize, 0usize, 0usize);
     let mut states: BTreeMap<&'static str, usize> = BTreeMap::new();
