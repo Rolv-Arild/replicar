@@ -419,22 +419,27 @@ pub struct AppliedPacketLag {
     pub source: &'static str,
 }
 
-/// An input the converter inferred by fitting a later packet (not observed): a jump press, or a dodge
-/// press with its direction and pitch cancel. `tick` is on the replay timeline (120 Hz, like
-/// `ConvertedFrame::timeline_tick`) and is the first tick the input takes effect.
+/// An input the converter inferred by fitting a later packet (not observed): a jump press, a dodge
+/// press with its direction and pitch cancel, or an airborne interval whose pitch, yaw and roll were
+/// solved by the boundary-value fit (`air_bvp`; the controls themselves are on the exported car
+/// states). `tick` is on the replay timeline (120 Hz, like `ConvertedFrame::timeline_tick`) and is
+/// the first tick the input takes effect.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FittedInput {
     pub slot: usize,
-    /// Dodge only: the replay frame where the dodge counter turned odd (0 for a jump).
+    /// Dodge only: the replay frame where the dodge counter turned odd (0 otherwise).
     pub activation_frame: usize,
-    /// `"jump"` or `"dodge"`.
+    /// `"jump"`, `"dodge"` or `"air"`.
     pub kind: &'static str,
     pub tick: u64,
     /// Dodge only: RocketSim pitch and yaw controls of the press and the fitted cancel (0..1 of the
-    /// flip's pitch torque removed).
+    /// flip's pitch torque removed); 0 for the other kinds.
     pub pitch: f32,
     pub yaw: f32,
     pub cancel: f32,
+    /// Air only: the length in ticks of the interval the air controls were solved for (from `tick`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_ticks: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -5746,7 +5751,7 @@ pub fn convert_observations_with(
                             }
                         }
                         // Provenance: the interval this car's air controls were solved for (the span in
-                        // ticks is in `cancel`).
+                        // ticks rides in the cancel slot of this tuple and becomes `span_ticks`).
                         fitted_arena.push((
                             slot,
                             "air",
@@ -6274,14 +6279,18 @@ pub fn convert_observations_with(
             fitted_inputs: fitted_arena
                 .into_iter()
                 .map(
-                    |(slot, kind, tick, pitch, yaw, cancel, activation_frame)| FittedInput {
-                        slot,
-                        activation_frame,
-                        kind,
-                        tick: (tick as i64 + timeline_offset).max(0) as u64,
-                        pitch,
-                        yaw,
-                        cancel,
+                    |(slot, kind, tick, pitch, yaw, cancel, activation_frame)| {
+                        let air = kind == "air";
+                        FittedInput {
+                            slot,
+                            activation_frame,
+                            kind,
+                            tick: (tick as i64 + timeline_offset).max(0) as u64,
+                            pitch,
+                            yaw,
+                            cancel: if air { 0.0 } else { cancel },
+                            span_ticks: air.then_some(cancel as u64),
+                        }
                     },
                 )
                 .collect(),

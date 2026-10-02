@@ -221,6 +221,8 @@ pub(crate) fn fitted_inputs_fields() -> Vec<Field> {
         nullable("pitch", DataType::Float32),
         nullable("yaw", DataType::Float32),
         nullable("cancel", DataType::Float32),
+        // Appended last so the earlier columns keep their positions.
+        nullable("span_ticks", DataType::UInt64),
     ]
 }
 
@@ -228,7 +230,8 @@ pub(crate) fn fitted_inputs_batch(
     rows: Rows<FittedInput>,
     schema: &SchemaRef,
 ) -> io::Result<RecordBatch> {
-    // The dodge-only fields are null for a jump (they do not apply; the JSON record carries 0).
+    // The dodge-only fields are null for a jump or an air interval (they do not apply; the JSON record
+    // carries 0), and `span_ticks` is null except for an air interval.
     let dodge = |v: &FittedInput| v.kind == "dodge";
     let columns: Vec<ArrayRef> = vec![
         frames(rows),
@@ -250,6 +253,9 @@ pub(crate) fn fitted_inputs_batch(
             rows.iter()
                 .map(|r| dodge(&r.1).then_some(r.1.cancel))
                 .collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            rows.iter().map(|r| r.1.span_ticks).collect::<Vec<_>>(),
         )),
     ];
     RecordBatch::try_new(schema.clone(), columns).map_err(io::Error::other)
@@ -639,7 +645,7 @@ mod tests {
     use std::fs;
 
     use arrow_array::cast::AsArray;
-    use arrow_array::types::{Float32Type, Int32Type, UInt32Type};
+    use arrow_array::types::{Float32Type, Int32Type, UInt32Type, UInt64Type};
     use arrow_array::{Array, DictionaryArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -745,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_has_no_dodge_fields() {
+    fn a_jump_or_air_interval_has_no_dodge_fields_and_only_air_has_a_span() {
         let main = main_path("fitted");
         let mut sink = Sink::create(
             &main,
@@ -763,21 +769,32 @@ mod tests {
             pitch: -0.5,
             yaw: 0.25,
             cancel: 0.0,
+            span_ticks: None,
         };
         sink.push(3, input("jump", 0)).unwrap();
         sink.push(3, input("dodge", 5)).unwrap();
+        sink.push(
+            3,
+            FittedInput {
+                span_ticks: Some(12),
+                ..input("air", 0)
+            },
+        )
+        .unwrap();
         sink.finish().unwrap();
         let (_, _, batches) = read(&table_path(&main, "fitted_inputs"));
         let b = &batches[0];
         assert_eq!(
             strings(b.column(2)),
-            [Some("jump".into()), Some("dodge".into())]
+            [Some("jump".into()), Some("dodge".into()), Some("air".into())]
         );
         assert!(b.column(4).is_null(0) && !b.column(4).is_null(1));
         let pitch = b.column(5).as_primitive::<Float32Type>();
         assert!(pitch.is_null(0) && pitch.value(1) == -0.5);
         let cancel = b.column(7).as_primitive::<Float32Type>();
-        assert!(cancel.is_null(0) && cancel.value(1) == 0.0);
+        assert!(cancel.is_null(0) && cancel.value(1) == 0.0 && cancel.is_null(2));
+        let span = b.column(8).as_primitive::<UInt64Type>();
+        assert!(span.is_null(0) && span.is_null(1) && span.value(2) == 12);
         fs::remove_dir_all(main.parent().unwrap()).ok();
     }
 
