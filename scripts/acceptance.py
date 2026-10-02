@@ -21,10 +21,16 @@ splits at that horizon, object and quantile (it does not for the default masked 
 extrapolation is as good as the simulation), and the test split must show the same order.
 
 The row statistics are strongly correlated (they come from the same replays), so the number of rows outside is
-judged against an empirical null, not the binomial: bands are built from the first development split, 300 pseudo-
-splits are drawn from that split's replays (20 per game size, with replacement, fixed seed), and the rows outside
-their bands are counted on each; the p95 and p99 of that count are printed with every `check` and stored in the
-bands file (train alone: mean 1.2, p95 4, max 10). A test split is a finding when its count exceeds that p95/p99.
+judged against an empirical null, not the binomial. The null is built from disjoint partitions of the development
+replays: the replays are split at random (stratified by game size) into A and B, bands are built on A with the same
+code `bands` uses, and the rows outside their bands are counted on pseudo-splits of B (20 replays per game size,
+with replacement, like a 60-replay test split). Drawing the pseudo-splits from the replays that built the bands
+would leave out the noise of the development estimate and give a null that is too tight. Two A sizes are used
+(half of the development replays, and a quarter), so the trend is visible: the real bands are built on all
+development replays, which is more than either A, so their development estimate is less noisy; if the count rises
+as A shrinks the null is conservative, an upper bound for the real bands (the printed counts show which way). Mean, p95, p99 and max are
+printed with every `check` and stored in the bands file. A test split is a finding when its count exceeds the p95/p99.
+(The bootstrap of the null's bands is vectorised and uses fewer draws than `bands`; the construction is the same.)
 
 Reports are `evaluate_corpus` JSON files (the build with per-replay masked position quantiles). A quantile that is
 null in a report (an empty sample) counts as missing. Every `check` prints the number of replays behind each row
@@ -45,7 +51,9 @@ import numpy as np
 QUANTILES = ("p50", "p90", "p99")
 DRAWS = 5000
 SEED = 20261002  # reproducibility only
-NULL_DRAWS = 300
+NULL_PARTITIONS = 60
+NULL_PSEUDO_SPLITS = 5
+NULL_BOOTSTRAP_DRAWS = 1000
 
 
 def value_of(rows, row, q):
@@ -102,8 +110,9 @@ def replay_count(replays, row, q, size=None):
     return sum(value_of(rows, row, q) is not None for s, rows in replays if size is None or s == size)
 
 
-def bootstrap(dev, row, q, size=None, per_size=20):
-    """Prediction band for the median over a new split of `per_size` replays per game size."""
+def bootstrap(dev, row, q, size=None, per_size=20, fast_draws=None):
+    """Prediction band for the median over a new split of `per_size` replays per game size. `fast_draws`
+    (the null's many band builds) draws that many resamples as matrices instead of `DRAWS` one by one."""
     rng = np.random.default_rng(SEED)
     sizes = [size] if size else ["1v1", "2v2", "3v3"]
     pools = {}
@@ -111,6 +120,12 @@ def bootstrap(dev, row, q, size=None, per_size=20):
         values = [value_of(rows, row, q) for sz, rows in dev if sz == s]
         pools[s] = np.array([v for v in values if v is not None], dtype=float)
     centre = float(np.median(np.concatenate([pools[s] for s in sizes if len(pools[s])])))
+    if fast_draws:
+        used = [pools[s] for s in sizes if len(pools[s])]
+        new = np.concatenate([p[rng.integers(0, len(p), (fast_draws, per_size))] for p in used], axis=1)
+        old = np.concatenate([p[rng.integers(0, len(p), (fast_draws, len(p)))] for p in used], axis=1)
+        diffs = np.median(new, axis=1) - np.median(old, axis=1)
+        return centre + float(np.percentile(diffs, 2.5)), centre + float(np.percentile(diffs, 97.5))
     diffs = []
     for _ in range(DRAWS):
         new = np.concatenate([rng.choice(pools[s], size=per_size, replace=True) for s in sizes if len(pools[s])])
@@ -170,16 +185,16 @@ def outlier_replays(limits, reports):
     return found
 
 
-def build_bands(dev):
+def build_bands(dev, fast_draws=None):
     bands = {}
     for row in all_rows(dev):
         for q in QUANTILES:
             if degenerate(dev, row, q):
                 continue
-            bands[f"{row} | {q} | all"] = bootstrap(dev, row, q)
+            bands[f"{row} | {q} | all"] = bootstrap(dev, row, q, fast_draws=fast_draws)
             if row.startswith(("car position, one-step", "masked car position h1")):
                 for s in ("1v1", "2v2", "3v3"):
-                    bands[f"{row} | {q} | {s}"] = bootstrap(dev, row, q, s)
+                    bands[f"{row} | {q} | {s}"] = bootstrap(dev, row, q, s, fast_draws=fast_draws)
     return bands
 
 
@@ -231,16 +246,41 @@ def pseudo_split(replays, rng, per_size=20):
     return drawn
 
 
-def empirical_null(dev, draws=NULL_DRAWS):
-    """Bands from the development split `dev`, then the rows outside their bands on `draws` pseudo-splits drawn
-    from the same replays: the distribution of the count a new split of the same population gives."""
-    bands = build_bands(dev)
+def partition(dev, rng, a_per_size):
+    """A random stratified split of the development replays into A (`a_per_size` per game size) and B (the rest)."""
+    a, b = [], []
+    for size in ("1v1", "2v2", "3v3"):
+        pool = [r for r in dev if r[0] == size]
+        order = rng.permutation(len(pool))
+        a.extend(pool[i] for i in order[:a_per_size])
+        b.extend(pool[i] for i in order[a_per_size:])
+    return a, b
+
+
+def empirical_null(dev, a_per_size, partitions=NULL_PARTITIONS, pseudo_splits=NULL_PSEUDO_SPLITS):
+    """The count of rows outside their bands for a new split of the same population, with the noise of the
+    development estimate: bands built on A (a_per_size replays per game size), counted on pseudo-splits of the
+    disjoint B, over `partitions` random partitions of the development replays."""
     rng = np.random.default_rng(SEED + 1)
-    counts = [count_outside(bands, pseudo_split(dev, rng))[0] for _ in range(draws)]
+    counts = []
+    direct = []
+    rows = 0
+    for _ in range(partitions):
+        a, b = partition(dev, rng, a_per_size)
+        bands = build_bands(a, fast_draws=NULL_BOOTSTRAP_DRAWS)
+        rows = len(bands)
+        counts.extend(count_outside(bands, pseudo_split(b, rng))[0] for _ in range(pseudo_splits))
+        if len(b) == 60:
+            direct.append(count_outside(bands, b)[0])  # B itself is a 60-replay split disjoint from A
     return {
-        "draws": draws,
-        "replays": len(dev),
-        "rows": len(bands),
+        "mean_b_itself": float(np.mean(direct)) if direct else None,
+        "p95_b_itself": float(np.percentile(direct, 95)) if direct else None,
+        "a_per_size": a_per_size,
+        "b_per_size": len(dev) // 3 - a_per_size,
+        "partitions": partitions,
+        "pseudo_splits": partitions * pseudo_splits,
+        "development_replays": len(dev),
+        "rows": rows,
         "mean": float(np.mean(counts)),
         "p95": float(np.percentile(counts, 95)),
         "p99": float(np.percentile(counts, 99)),
@@ -248,12 +288,34 @@ def empirical_null(dev, draws=NULL_DRAWS):
     }
 
 
+def nulls(dev):
+    """The null at two A sizes: half and a quarter of the development replays per game size."""
+    per_size = len(dev) // 3
+    return [empirical_null(dev, per_size // 2), empirical_null(dev, per_size // 4)]
+
+
 def print_null(null):
-    print(
-        f"  empirical null for the count outside ({null['draws']} pseudo-splits of {null['replays']} development "
-        f"replays, {null['rows']} rows, bands from the same replays): mean {null['mean']:.1f}, p95 {null['p95']:.0f}, "
-        f"p99 {null['p99']:.0f}, max {null['max']}"
-    )
+    """`null`: a list of nulls at decreasing A size (the first is the one the verdict uses)."""
+    for n in null:
+        extra = (
+            f"; B itself (no resampling) mean {n['mean_b_itself']:.1f}, p95 {n['p95_b_itself']:.0f}"
+            if n.get("mean_b_itself") is not None
+            else ""
+        )
+        print(
+            f"  empirical null for the count outside ({n['pseudo_splits']} pseudo-splits of B from {n['partitions']} "
+            f"partitions of {n['development_replays']} development replays; bands on A = {n['a_per_size']} per game size, "
+            f"{n['rows']} rows; B = {n['b_per_size']} per size, resampled to 20): mean {n['mean']:.1f}, "
+            f"p95 {n['p95']:.0f}, p99 {n['p99']:.0f}, max {n['max']}{extra}"
+        )
+    if len(null) > 1:
+        bias = (
+            "the count rises as A shrinks, so the real bands (built on all development replays, more than either A) "
+            "give fewer outside than the first null: the first null is conservative"
+            if null[1]["mean"] > null[0]["mean"]
+            else "the count did not rise as A shrank, so the first null is not clearly conservative or optimistic"
+        )
+        print(f"  ({bias})")
 
 
 def report_check(label, bands, test, rules, test_reports, null=None, verbose=True):
@@ -280,8 +342,14 @@ def report_check(label, bands, test, rules, test_reports, null=None, verbose=Tru
     print(f"  {total} comparisons ({len(skipped)} skipped), {outside} outside their band; the split has {len(test)} replays")
     if null is not None:
         print_null(null)
-        verdict = "within" if outside <= null["p95"] else ("above the p95 of" if outside <= null["p99"] else "above the p99 of")
-        print(f"  the count outside, {outside}, is {verdict} the empirical null")
+        verdict = "within" if outside <= null[0]["p95"] else ("above the p95 of" if outside <= null[0]["p99"] else "above the p99 of")
+        print(f"  the count outside, {outside}, is {verdict} the empirical null (pseudo-splits of B)")
+        if null[0].get("p95_b_itself") is not None:
+            print(
+                f"  against B itself (a fresh 60-replay split, no resampling; resampling B doubles the variance of a "
+                f"split's statistics, so the pseudo-split null above is the wider one): "
+                f"{'within' if outside <= null[0]['p95_b_itself'] else 'above'} its p95 {null[0]['p95_b_itself']:.0f}"
+            )
     else:
         print(f"  (the binomial expectation {0.05 * total:.1f} understates the spread: rows are correlated)")
     broken = []
@@ -305,8 +373,8 @@ def main():
         dev = [r for replays, _, _ in loaded for r in replays]
         bands = build_bands(dev)
         rules = ordering_rules([(d, a) for _, d, a in loaded])
-        # The null: bands and pseudo-splits from the first development split alone (one split's worth of replays).
-        null = empirical_null(loaded[0][0])
+        # The null from disjoint partitions of all the development replays.
+        null = nulls(dev)
         json.dump({"bands": bands, "ordering": rules, "dev_replays": len(dev), "outlier_limits": outlier_limits(dev),
                    "null_outside": null},
                   open(out, "w"), indent=1)
@@ -325,11 +393,13 @@ def main():
         t_def, t_al, v_def, v_al = sys.argv[2:6]
         train, td, ta = load_split(t_def, t_al)
         val, vd, va = load_split(v_def, v_al)
+        # The same null as `check`'s, from partitions of the two development splits together.
+        pool_null = nulls(train + val)
         for name, dev, other, devrep, otherrep in (("train bands, validation checked", train, val, (td, ta), (vd, va)),
                                                     ("validation bands, train checked", val, train, (vd, va), (td, ta))):
             bands = build_bands(dev)
             rules = ordering_rules([devrep])
-            report_check(name, bands, other, rules, otherrep, empirical_null(dev), verbose=False)
+            report_check(name, bands, other, rules, otherrep, pool_null, verbose=False)
     else:
         print(__doc__)
 

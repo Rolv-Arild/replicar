@@ -239,6 +239,10 @@ pub struct ArenaApplyReport {
 /// Seed an already initialized soccar Arena with the snapshot's public states.
 /// Absolute tick, RNG, and private collision/wheel caches cannot be set through
 /// the pinned RocketSim API; use the detached `ArenaState` for exact inspection.
+/// The states hold absolute arena ticks (a car's `last_extra_hit_tick`, the dropshot ball's
+/// `last_damage_tick`) that count the snapshot's own arena: they are rebased to the same age before the
+/// live arena's tick (a hit older than the live clock reaches back becomes `None`), otherwise a recent
+/// hit would suppress the extra hit impulse for as long as the live tick counter stays below it.
 pub fn apply_soccar_state_to_arena(
     snapshot: &ArenaState,
     arena: &mut Arena,
@@ -278,9 +282,13 @@ pub fn apply_soccar_state_to_arena(
             }
         }
     }
-    arena.set_ball_state(snapshot.ball);
+    let (source_tick, arena_tick) = (snapshot.tick_count, arena.tick_count());
+    let mut ball = snapshot.ball;
+    ball.ds_info.last_damage_tick =
+        crate::conversion::rebase_tick(ball.ds_info.last_damage_tick, source_tick, arena_tick);
+    arena.set_ball_state(ball);
     for (index, (_, car)) in snapshot.cars.iter().enumerate() {
-        arena.set_car_state(index, *car);
+        arena.set_car_state(index, crate::conversion::rebase_car_ticks(*car, source_tick, arena_tick));
     }
     let mut max_pad_error = 0.0f32;
     for (index, (_, pad)) in snapshot.boost_pads.iter().enumerate() {
@@ -373,10 +381,84 @@ mod tests {
         let mut live_record = StateRecord::from_arena_state(&live.get_arena_state());
         live_record.arena_tick = 123;
         live_record.boost_pads[0].cooldown = record.boost_pads[0].cooldown;
+        // The hit 4 ticks before the snapshot's tick is older than the empty live arena's clock (0): dropped.
+        assert_eq!(live_record.cars[0].last_extra_hit_tick, None);
+        live_record.cars[0].last_extra_hit_tick = record.cars[0].last_extra_hit_tick;
         assert_eq!(
             serde_json::to_value(record).unwrap(),
             serde_json::to_value(live_record).unwrap()
         );
+    }
+
+    /// A car with a recent hit, seeded into an arena with another tick counter, keeps the age of the hit:
+    /// the absolute `last_extra_hit_tick` of the snapshot (5000) would suppress the extra impulse in a
+    /// tick-0 arena for 5,000 ticks (the ball left at about 999 instead of 1,791 UU/s).
+    #[test]
+    fn a_recent_hit_seeded_into_another_arena_still_gives_the_full_extra_impulse() {
+        let meshes = Path::new(env!("CARGO_MANIFEST_DIR")).join("collision_meshes");
+        if !meshes.join("soccar").is_dir() {
+            eprintln!("skipping state restoration test: no local collision meshes");
+            return;
+        }
+        rocketsim::init(&meshes, true).unwrap();
+        // Ball speed 6 ticks after the first ball hit of an Octane driving at a resting ball at 1,000 UU/s.
+        let ball_speed_after_hit = |source_tick: u64, hit: Option<u64>, live_ticks: u64| -> f32 {
+            let mut source = Arena::new(GameMode::Soccar);
+            source.add_car(Team::Blue, CarBodyConfig::OCTANE);
+            let mut car = CarState::default();
+            car.phys.pos = Vec3A::new(0.0, -600.0, 17.0);
+            car.phys.vel = Vec3A::new(0.0, 1000.0, 0.0);
+            car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
+            car.is_on_ground = true;
+            car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+            car.controls.throttle = 1.0;
+            source.set_car_state(0, car);
+            let mut ball = BallState::default();
+            ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);
+            source.set_ball_state(ball);
+            let mut snapshot = source.get_arena_state();
+            snapshot.tick_count = source_tick;
+            snapshot.cars[0].1.last_extra_hit_tick = hit;
+            let mut live = Arena::new(GameMode::Soccar);
+            live.add_car(Team::Blue, CarBodyConfig::OCTANE);
+            for _ in 0..live_ticks {
+                live.step_tick();
+            }
+            apply_soccar_state_to_arena(&snapshot, &mut live).unwrap();
+            live.set_car_controls(0, CarControls { throttle: 1.0, ..CarControls::default() });
+            let mut hit_tick = None;
+            for tick in 1..=200 {
+                for event in live.step_tick() {
+                    if matches!(event, rocketsim::ArenaEvent::CarHitBall(_)) && hit_tick.is_none() {
+                        hit_tick = Some(tick);
+                    }
+                }
+                if hit_tick.is_some_and(|h| tick == h + 6) {
+                    return live.get_ball_state().phys.vel.length();
+                }
+            }
+            panic!("the car never hit the ball");
+        };
+        let clean = ball_speed_after_hit(0, None, 0);
+        assert!(clean > 1500.0, "the probe hit should carry the extra impulse: {clean}");
+        // A hit at the snapshot's own tick, in a tick-0 arena and in one at tick 6000.
+        for (source_tick, live_ticks) in [(5000, 0), (5000, 6000), (5000, 3)] {
+            let speed = ball_speed_after_hit(source_tick, Some(source_tick), live_ticks);
+            assert!((speed - clean).abs() < 1.0, "source {source_tick}, live {live_ticks}: {speed} against {clean}");
+        }
+        // The rebased tick keeps the age: a hit 2 ticks before the snapshot, in an arena at tick 10.
+        let mut source = Arena::new(GameMode::Soccar);
+        source.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let mut snapshot = source.get_arena_state();
+        snapshot.tick_count = 700;
+        snapshot.cars[0].1.last_extra_hit_tick = Some(698);
+        let mut live = Arena::new(GameMode::Soccar);
+        live.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        for _ in 0..10 {
+            live.step_tick();
+        }
+        apply_soccar_state_to_arena(&snapshot, &mut live).unwrap();
+        assert_eq!(live.get_car_state(0).last_extra_hit_tick, Some(8));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use arrow_array::LargeBinaryArray;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rocketsim::{Arena, GameMode};
 
+use replay_to_rocketsim::conversion::rebase_tick;
 use replay_to_rocketsim::restoration::{
     apply_soccar_state_to_arena, car_slots_from_header_json, restore_soccar_state,
     state_from_frame_json,
@@ -57,18 +58,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err(format!("snapshot fields differ at frame {frames}").into());
             }
             if frames % 5000 == 0 {
-                let mut arena = Arena::new(GameMode::Soccar);
-                let report = apply_soccar_state_to_arena(&restored, &mut arena)?;
-                max_pad_error = max_pad_error.max(report.max_pad_cooldown_error_seconds);
-                let mut applied = StateRecord::from_arena_state(&arena.get_arena_state());
-                applied.arena_tick = record.arena_tick;
-                for (source, actual) in record.boost_pads.iter().zip(&mut applied.boost_pads) {
-                    actual.cooldown = source.cooldown;
+                // A live arena at tick 0 and one that has run 1,000 ticks: the absolute ticks of the state
+                // (`last_extra_hit_tick`) are rebased to the same age before the live arena's own tick.
+                for live_ticks in [0u64, 1000] {
+                    let mut arena = Arena::new(GameMode::Soccar);
+                    for _ in 0..live_ticks {
+                        arena.step_tick();
+                    }
+                    let report = apply_soccar_state_to_arena(&restored, &mut arena)?;
+                    max_pad_error = max_pad_error.max(report.max_pad_cooldown_error_seconds);
+                    let mut applied = StateRecord::from_arena_state(&arena.get_arena_state());
+                    applied.arena_tick = record.arena_tick;
+                    for (source, actual) in record.boost_pads.iter().zip(&mut applied.boost_pads) {
+                        actual.cooldown = source.cooldown;
+                    }
+                    for (source, actual) in record.cars.iter().zip(&mut applied.cars) {
+                        let expected = rebase_tick(source.last_extra_hit_tick, record.arena_tick, live_ticks);
+                        if actual.last_extra_hit_tick != expected {
+                            return Err(format!(
+                                "live arena (tick {live_ticks}) last_extra_hit_tick {:?}, expected {expected:?} for {:?} at source tick {}, frame {frames}",
+                                actual.last_extra_hit_tick, source.last_extra_hit_tick, record.arena_tick
+                            )
+                            .into());
+                        }
+                        actual.last_extra_hit_tick = source.last_extra_hit_tick;
+                    }
+                    if serde_json::to_value(&record)? != serde_json::to_value(&applied)? {
+                        return Err(format!("live arena fields differ at frame {frames}").into());
+                    }
+                    live_samples += 1;
                 }
-                if serde_json::to_value(&record)? != serde_json::to_value(&applied)? {
-                    return Err(format!("live arena fields differ at frame {frames}").into());
-                }
-                live_samples += 1;
             }
             frames += 1;
         }

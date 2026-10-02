@@ -330,8 +330,21 @@ pub fn write_parquet_with_tables(
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
         .set_max_row_group_row_count(Some(BATCH_SIZE))
         .build();
+    let source_sha256 = format!("{:x}", Sha256::digest(bytes));
+    // The conversion options as serialized in the header; the hash lets a reader tell tables of another
+    // conversion of the same replay from this one's.
+    let options_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(options)?));
     let mut tables = tables_beside
-        .map(|main| Tables::create(main, &properties))
+        .map(|main| {
+            Tables::create(
+                main,
+                &properties,
+                &[
+                    ("source_sha256", source_sha256.clone()),
+                    ("options_sha256", options_sha256.clone()),
+                ],
+            )
+        })
         .transpose()?;
     let mut file = Some(file);
     let mut writer: Option<(ArrowWriter<File>, SchemaRef, usize)> = None;
@@ -390,15 +403,15 @@ pub fn write_parquet_with_tables(
     if !rows.is_empty() {
         writer.write(&batch(&rows, schema, cars, pad_count)?)?;
     }
-    let source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
-    let header = serialization::header_json(&observed, options, &summary, &source_sha256)?;
+    let header = serialization::header_json(&observed, options, &summary, &Some(source_sha256.clone()))?;
     writer.append_key_value_metadata(KeyValue::new(
         "replay_header_json".to_owned(),
         String::from_utf8(header)?,
     ));
+    writer.append_key_value_metadata(KeyValue::new("options_sha256".to_owned(), options_sha256));
     writer.close()?;
     let table_rows = match tables {
-        Some(tables) => tables.finish(&format!("{:x}", Sha256::digest(bytes)), count)?,
+        Some(tables) => tables.finish(count)?,
         None => Vec::new(),
     };
     Ok(ExportSummary {

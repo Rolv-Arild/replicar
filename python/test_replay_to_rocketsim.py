@@ -151,6 +151,11 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual(list(tables), ["touches"])
             self.assertEqual(len(caught.warnings), 3)
             self.assertEqual(sorted(read_record_tables(main, verify=False)), ["events", "packet_lags", "pad_pickups", "touches"])
+            # A truncated table (an export that did not finish) is skipped with a warning too.
+            truncated = directory / "game.touches.parquet"
+            truncated.write_bytes(truncated.read_bytes()[:40])
+            with self.assertWarnsRegex(UserWarning, "unreadable record table"):
+                self.assertNotIn("touches", read_record_tables(main))
 
     def test_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as directory:

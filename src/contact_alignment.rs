@@ -199,6 +199,10 @@ pub fn aligned_lags(
             let parked = {
                 let mut b = BallState::default();
                 b.phys.pos = glam::Vec3A::new(0.0, 0.0, 1800.0);
+                if (car_state.phys.pos - b.phys.pos).length() < 600.0 {
+                    // A car on the ceiling would touch the parked ball.
+                    b.phys.pos = glam::Vec3A::new(3000.0, 4000.0, 300.0);
+                }
                 b
             };
             let mut residuals: Vec<(i64, f32)> = Vec::new();

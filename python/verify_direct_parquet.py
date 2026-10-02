@@ -162,6 +162,8 @@ def verify_tables(jsonl: str, parquet: str) -> dict[str, int]:
 
         for name in RECORD_TABLES:
             expected[name].extend((frame["frame"], row) for row in _expected_rows(name, frame, slot_of))
+    main_footer = pq.ParquetFile(parquet).metadata.metadata or {}
+    options_sha256 = main_footer.get(b"options_sha256", b"").decode()
     main_frames = pq.ParquetFile(parquet).metadata.num_rows
     if main_frames != frames:
         raise AssertionError(f"main file has {main_frames} frames, the JSONL {frames}")
@@ -172,8 +174,12 @@ def verify_tables(jsonl: str, parquet: str) -> dict[str, int]:
             raise AssertionError(f"record table {path} is missing (written with --no-event-tables?)")
         table_file = pq.ParquetFile(str(path))
         metadata = table_file.metadata.metadata or {}
-        if metadata.get(b"source_sha256", b"").decode() != header["source_sha256"]:
-            raise AssertionError(f"{name}: source_sha256 differs from the header's")
+        # The schema metadata as PyArrow shows it (`pq.read_table(..).schema.metadata`), not just the footer.
+        schema_metadata = pq.read_schema(str(path)).metadata or {}
+        if schema_metadata.get(b"source_sha256", b"").decode() != header["source_sha256"]:
+            raise AssertionError(f"{name}: source_sha256 is missing from the schema metadata or differs from the header's")
+        if not options_sha256 or schema_metadata.get(b"options_sha256", b"").decode() != options_sha256:
+            raise AssertionError(f"{name}: options_sha256 is missing from the schema metadata or differs from the main file's")
         if metadata.get(b"frames", b"").decode() != str(frames):
             raise AssertionError(f"{name}: frames metadata differs from the main file's {frames}")
         rows = table_file.read().to_pylist()

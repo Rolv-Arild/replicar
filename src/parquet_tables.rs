@@ -543,10 +543,26 @@ impl<T> Sink<T> {
         build: Build<T>,
         properties: &WriterProperties,
     ) -> Result<Self, Box<dyn Error>> {
-        let metadata = HashMap::from([
+        Self::create_with(main, name, fields, build, properties, &[])
+    }
+
+    /// `schema_metadata` goes into the Arrow schema stored in the file (`pq.read_schema(..).metadata` in
+    /// PyArrow shows it; metadata appended at close lives only in the footer, which PyArrow's schema does not).
+    fn create_with(
+        main: &Path,
+        name: &str,
+        fields: Vec<Field>,
+        build: Build<T>,
+        properties: &WriterProperties,
+        schema_metadata: &[(&str, String)],
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut metadata = HashMap::from([
             ("columnar_version".to_owned(), "1".to_owned()),
             ("table".to_owned(), name.to_owned()),
         ]);
+        for (key, value) in schema_metadata {
+            metadata.insert((*key).to_owned(), value.clone());
+        }
         let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
         let file = File::create(table_path(main, name))?;
         Ok(Self {
@@ -602,47 +618,55 @@ pub(crate) struct Tables {
 }
 
 impl Tables {
+    /// `provenance` (the source replay's `source_sha256` and the conversion options' `options_sha256`) is
+    /// written into every table's schema metadata when the file is opened.
     pub(crate) fn create(
         main: &Path,
         properties: &WriterProperties,
+        provenance: &[(&str, String)],
     ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            touches: Sink::create(main, "touches", touches_fields(), touches_batch, properties)?,
-            ball_contacts: Sink::create(
+            touches: Sink::create_with(main, "touches", touches_fields(), touches_batch, properties, provenance)?,
+            ball_contacts: Sink::create_with(
                 main,
                 "ball_contacts",
                 ball_contacts_fields(),
                 ball_contacts_batch,
                 properties,
+                provenance,
             )?,
-            boost_pickups: Sink::create(
+            boost_pickups: Sink::create_with(
                 main,
                 "boost_pickups",
                 boost_pickups_fields(),
                 boost_pickups_batch,
                 properties,
+                provenance,
             )?,
-            fitted_inputs: Sink::create(
+            fitted_inputs: Sink::create_with(
                 main,
                 "fitted_inputs",
                 fitted_inputs_fields(),
                 fitted_inputs_batch,
                 properties,
+                provenance,
             )?,
-            packet_lags: Sink::create(
+            packet_lags: Sink::create_with(
                 main,
                 "packet_lags",
                 packet_lags_fields(),
                 packet_lags_batch,
                 properties,
+                provenance,
             )?,
-            events: Sink::create(main, "events", events_fields(), events_batch, properties)?,
-            pad_pickups: Sink::create(
+            events: Sink::create_with(main, "events", events_fields(), events_batch, properties, provenance)?,
+            pad_pickups: Sink::create_with(
                 main,
                 "pad_pickups",
                 pad_pickups_fields(),
                 pad_pickups_batch,
                 properties,
+                provenance,
             )?,
         })
     }
@@ -710,17 +734,10 @@ impl Tables {
         Ok(())
     }
 
-    /// Close every file; returns the row count of each table in `TABLE_NAMES` order. Each file's
-    /// metadata records the source replay's SHA-256 and the main file's frame count.
-    pub(crate) fn finish(
-        self,
-        source_sha256: &str,
-        frames: usize,
-    ) -> io::Result<Vec<(&'static str, usize)>> {
-        let provenance = [
-            ("source_sha256", source_sha256.to_owned()),
-            ("frames", frames.to_string()),
-        ];
+    /// Close every file; returns the row count of each table in `TABLE_NAMES` order. Each file's footer
+    /// records the main file's frame count (the replay hash and options hash are in the schema metadata).
+    pub(crate) fn finish(self, frames: usize) -> io::Result<Vec<(&'static str, usize)>> {
+        let provenance = [("frames", frames.to_string())];
         Ok(vec![
             (TABLE_NAMES[0], self.touches.finish(&provenance)?),
             (TABLE_NAMES[1], self.ball_contacts.finish(&provenance)?),
@@ -865,7 +882,7 @@ mod tests {
     #[test]
     fn actor_ids_resolve_to_car_slots_and_tables_carry_their_provenance() {
         let main = main_path("slots");
-        let mut tables = Tables::create(&main, &properties()).unwrap();
+        let mut tables = Tables::create(&main, &properties(), &[("source_sha256", "abc123".to_owned()), ("options_sha256", "def456".to_owned())]).unwrap();
         let packet_lags = vec![
             AppliedPacketLag { actor_id: Some(30), ticks: 2, source: "chain" },
             AppliedPacketLag { actor_id: None, ticks: 1, source: "chain" },
@@ -908,7 +925,7 @@ mod tests {
             }],
         };
         tables.add_slotted(4, &packet_lags, &car_actor_slots, &observed).unwrap();
-        let counts = tables.finish("abc123", 9).unwrap();
+        let counts = tables.finish(9).unwrap();
         assert_eq!(counts[5], ("events", 4));
 
         let slot_values = |array: &ArrayRef| -> Vec<Option<u32>> {

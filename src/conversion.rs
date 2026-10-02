@@ -1712,6 +1712,30 @@ pub(crate) fn scratch_arena(seed: u64, config: CarBodyConfig) -> Arena {
     scratch
 }
 
+/// A car state moved to another arena whose tick counter differs: `last_extra_hit_tick` is an absolute
+/// arena tick and RocketSim grants the extra ball-hit impulse only when `last_hit_tick + 1 < tick_count`, so
+/// the copy keeps the hit's age (`source_tick` is the tick counter the state belongs to, `target_tick` the
+/// destination's). A hit older than the destination's own clock reaches back (age above `target_tick`) is
+/// dropped: it cannot matter, as a hit that old no longer blocks anything.
+pub(crate) fn rebase_car_ticks(mut state: CarState, source_tick: u64, target_tick: u64) -> CarState {
+    state.last_extra_hit_tick = rebase_tick(state.last_extra_hit_tick, source_tick, target_tick);
+    state
+}
+
+/// An absolute arena tick of a state in an arena whose tick counter was `source_tick`, as the same age
+/// before `target_tick`; `None` for no tick, a tick after `source_tick`, or one that would be negative.
+pub fn rebase_tick(tick: Option<u64>, source_tick: u64, target_tick: u64) -> Option<u64> {
+    target_tick.checked_sub(source_tick.checked_sub(tick?)?)
+}
+
+/// Seeds the scratch arena's car (`set_car_state(0, ..)`) with `state` from a timeline whose arena tick was
+/// `source_tick` (the main arena's tick, or the tick the scratch arena had when it produced the state),
+/// rebasing `last_extra_hit_tick` into the scratch arena's own tick counter (`rebase_car_ticks`).
+pub(crate) fn seed_scratch_car(scratch: &mut Arena, state: CarState, source_tick: u64) {
+    let target_tick = scratch.tick_count();
+    scratch.set_car_state(0, rebase_car_ticks(state, source_tick, target_tick));
+}
+
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
 /// The embedded map is generated from the user's item catalog, the official
 /// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
@@ -2744,6 +2768,9 @@ fn plan_air_bvp(
     now_tick: u64,
     scratch: Option<&mut Arena>,
     pending: &[PendingDodge],
+    // Lags a fit has set for single packets (as `car_lag` reads them): the end packet's tick is the one
+    // the main loop injects it at.
+    lag_overrides: &HashMap<(i32, usize, usize), u64>,
 ) -> Option<(AirSchedule, i32)> {
     static TUNING: OnceLock<(f32, f32, f32)> = OnceLock::new();
     let (min_z_value, rot_tol_deg, omega_tol) = *TUNING.get_or_init(|| {
@@ -2831,14 +2858,17 @@ fn plan_air_bvp(
             return air_refused(5);
         }
         if let Some((rot_b, omega_b, z_b)) = fresh_rotation(other, g) {
-            let lag = lags
-                .car_actor
-                .get(&(car.actor_id, car.actor_created_frame, g))
-                .copied()
-                .or(lags.cars[g])
-                .map_or((timeline(g) - timeline(g - 1)).max(0) / 2, |lag| {
-                    lag.round().max(0.0) as i64
-                });
+            let lag = match lag_overrides.get(&(car.actor_id, car.actor_created_frame, g)) {
+                Some(&fitted) => fitted as i64,
+                None => lags
+                    .car_actor
+                    .get(&(car.actor_id, car.actor_created_frame, g))
+                    .copied()
+                    .or(lags.cars[g])
+                    .map_or((timeline(g) - timeline(g - 1)).max(0) / 2, |lag| {
+                        lag.round().max(0.0) as i64
+                    }),
+            };
             end = Some((g, rot_b, omega_b, z_b, timeline(g) - lag));
             break;
         }
@@ -2903,7 +2933,7 @@ fn plan_air_bvp(
                         parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
                     }
                     scratch.set_ball_state(parked);
-                    scratch.set_car_state(0, start);
+                    seed_scratch_car(scratch, start, now_tick);
                     let mut tick = now_tick;
                     for &(controls, n) in segments {
                         for _ in 0..n {
@@ -2972,7 +3002,8 @@ fn plan_air_bvp(
     };
     // A solution that cannot reach the end state means the free-flight model does not hold (a
     // contact, a wall, an unseen flip): leave the interval to the other control paths.
-    if rot_error > rot_tol_deg.to_radians() || omega_error > omega_tol {
+    // (Written so that a NaN solve is refused too.)
+    if !(rot_error <= rot_tol_deg.to_radians() && omega_error <= omega_tol) {
         if std::env::var_os("AIR_NOSOL").is_some() {
             eprintln!(
                 "NOSOL frame {index} pos {:.2} {:.2} ticks {total} flip_time {:.3} flipping {} press {} z {:.0} speed {:.0} rot_err {:.1} deg omega_err {:.2} omega_a {:.2} omega_b {:.2}",
@@ -3247,6 +3278,10 @@ fn fit_ground_control_timing(
     // touch the car (the fit uses spans with no ball or car nearby).
     let mut parked = rocketsim::BallState::default();
     parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+    if (state.phys.pos - parked.phys.pos).length() < 600.0 {
+        // A car on the ceiling would touch the parked ball.
+        parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
+    }
     // Shifts whose control switches fall on the same ticks of the span (or all outside it) give the
     // same simulation, so the cost is computed once per distinct schedule.
     let mut simulated: Vec<(Vec<u32>, f32)> = Vec::new();
@@ -3259,7 +3294,7 @@ fn fit_ground_control_timing(
             continue;
         }
         scratch.set_ball_state(parked);
-        scratch.set_car_state(0, *state);
+        seed_scratch_car(scratch, *state, now_tick);
         for tau in t_a + 1..=t_c {
             let e = controls_at(&entries, shift, tau);
             scratch.set_car_controls(
@@ -3488,7 +3523,7 @@ fn fit_jump_timing(
     let mut costs: Vec<(i64, f32)> = Vec::new();
     for shift in JUMP_TIMING_SHIFTS {
         scratch.set_ball_state(*ball);
-        scratch.set_car_state(0, *state);
+        seed_scratch_car(scratch, *state, now_tick);
         for tau in t_a + 1..=t_c {
             let c = controls_at(shift, tau);
             scratch.set_car_controls(
@@ -3765,9 +3800,10 @@ fn fit_ground_flip_timing(
     for shift in JUMP_TIMING_SHIFTS {
         // The path with the jump at this shift and no dodge, saved tick by tick.
         let mut path = vec![*state];
+        let mut path_ticks = vec![now_tick];
         let mut path_ball = vec![*ball];
         scratch.set_ball_state(*ball);
-        scratch.set_car_state(0, *state);
+        seed_scratch_car(scratch, *state, now_tick);
         for step in 1..=horizon {
             let c = controls_at(shift, t_a + step as i64);
             scratch.set_car_controls(
@@ -3783,6 +3819,7 @@ fn fit_ground_flip_timing(
             );
             scratch.step_tick();
             path.push(*scratch.get_car_state(0));
+            path_ticks.push(scratch.tick_count());
             path_ball.push(*scratch.get_ball_state());
         }
         for d in JUMP_TIMING_SHIFTS {
@@ -3792,7 +3829,7 @@ fn fit_ground_flip_timing(
             }
             let press = press as usize;
             scratch.set_ball_state(path_ball[press - 1]);
-            scratch.set_car_state(0, path[press - 1]);
+            seed_scratch_car(scratch, path[press - 1], path_ticks[press - 1]);
             for step in press..=horizon {
                 let c = controls_at(shift, t_a + step as i64);
                 let mut controls = CarControls {
@@ -3826,7 +3863,7 @@ fn fit_ground_flip_timing(
         let cancel = step as f32 * 0.25;
         // Rebuild the state at the press for this jump shift.
         scratch.set_ball_state(*ball);
-        scratch.set_car_state(0, *state);
+        seed_scratch_car(scratch, *state, now_tick);
         for step_tick in 1..=horizon {
             let c = controls_at(shift, t_a + step_tick as i64);
             let mut controls = CarControls {
@@ -3867,7 +3904,7 @@ fn fit_ground_flip_timing(
     let mut first_packet = None;
     if options.infer_dodge_first_packet_tick && first_fresh.0 >= activation_frame {
         scratch.set_ball_state(*ball);
-        scratch.set_car_state(0, *state);
+        seed_scratch_car(scratch, *state, now_tick);
         let mut states: Vec<CarState> = vec![*state];
         for step_tick in 1..=horizon {
             let c = controls_at(shift, t_a + step_tick as i64);
@@ -4102,6 +4139,7 @@ fn fit_flip_cancel(
     state: &CarState,
     base_controls: &CarControls,
     lag_a: u64,
+    now_tick: u64,
     ball: &rocketsim::BallState,
     scratch: &mut Arena,
 ) -> Option<f32> {
@@ -4217,7 +4255,7 @@ fn fit_flip_cancel(
         for step in 0..=4 {
             let cancel = step as f32 * 0.25;
             scratch.set_ball_state(parked);
-            scratch.set_car_state(0, start);
+            seed_scratch_car(scratch, start, now_tick);
             let mut controls = *base_controls;
             controls.jump = false;
             controls.pitch = cancel * sign;
@@ -4342,7 +4380,7 @@ fn fit_flip_cancel(
         // does), not from wherever an earlier fit left the shared scratch arena's ball.
         scratch.set_ball_state(*ball);
         for (j, target) in targets.iter().enumerate() {
-            scratch.set_car_state(0, start);
+            seed_scratch_car(scratch, start, now_tick);
             let mut controls = *base_controls;
             controls.jump = false;
             controls.pitch = cancel * sign;
@@ -4429,6 +4467,7 @@ fn fit_dodge_start(
     state: &CarState,
     base_controls: &CarControls,
     lag_a: u64,
+    now_tick: u64,
     ball: &rocketsim::BallState,
     scratch: &mut Arena,
 ) -> Option<DodgePlan> {
@@ -4574,19 +4613,21 @@ fn fit_dodge_start(
     base.jump = false;
     // The path with no dodge, saved tick by tick, so each candidate resumes from its start tick.
     let mut path = vec![start];
+    let mut path_ticks = vec![now_tick];
     let mut path_ball = vec![*ball];
     scratch.set_ball_state(*ball);
-    scratch.set_car_state(0, start);
+    seed_scratch_car(scratch, start, now_tick);
     scratch.set_car_controls(0, base);
     for _ in 0..horizon {
         scratch.step_tick();
         path.push(*scratch.get_car_state(0));
+        path_ticks.push(scratch.tick_count());
         path_ball.push(*scratch.get_ball_state());
     }
     // States at every tick from `dodge_tick` to the horizon for a dodge at `dodge_tick` with `cancel`.
     let run_all = |scratch: &mut Arena, dodge_tick: u64, cancel: f32| -> Vec<CarState> {
         scratch.set_ball_state(path_ball[dodge_tick as usize - 1]);
-        scratch.set_car_state(0, path[dodge_tick as usize - 1]);
+        seed_scratch_car(scratch, path[dodge_tick as usize - 1], path_ticks[dodge_tick as usize - 1]);
         let mut after: Vec<CarState> = Vec::new();
         for tick in dodge_tick..=horizon {
             let mut controls = base;
@@ -5400,7 +5441,12 @@ pub fn convert_observations_with(
                         dirty = true;
                     }
                 }
-                if options.boost_pickup_lookahead && !new_lifetime {
+                // A withheld next frame is not read (the lookahead is offline reconstruction only).
+                let next_withheld = options
+                    .withheld_frames
+                    .as_ref()
+                    .is_some_and(|w| w.get(frame_idx + 1).copied().unwrap_or(false));
+                if options.boost_pickup_lookahead && !new_lifetime && !next_withheld {
                     let next_boost = observations
                         .frames
                         .get(frame_idx + 1)
@@ -5733,6 +5779,7 @@ pub fn convert_observations_with(
                                         &state,
                                         &base,
                                         car_lag(car),
+                                        arena.tick_count(),
                                         &ball_now,
                                         scratch,
                                     )
@@ -5793,6 +5840,7 @@ pub fn convert_observations_with(
                             &state,
                             &controls,
                             car_lag(car),
+                            arena.tick_count(),
                             &ball_now,
                             scratch,
                         ) {
@@ -5876,6 +5924,7 @@ pub fn convert_observations_with(
                             None
                         },
                         &pending_dodges,
+                        &lag_overrides.borrow(),
                     );
                     if planned.is_some() {
                         diagnostics.air_bvp_planned += 1;
@@ -6689,6 +6738,20 @@ mod tests {
             owned_entries(&tied, LagBoundary::Longer),
             vec![vec![true, false], vec![true; 2]]
         );
+    }
+
+    /// A hit tick moved between arenas keeps its age before the destination's tick; a hit from the future of
+    /// its source, or older than the destination's clock reaches back, is dropped.
+    #[test]
+    fn a_hit_tick_keeps_its_age_when_the_tick_counter_changes() {
+        assert_eq!(rebase_tick(Some(5000), 5000, 0), Some(0));
+        assert_eq!(rebase_tick(Some(4998), 5000, 10), Some(8));
+        assert_eq!(rebase_tick(Some(4990), 5000, 6), None);
+        assert_eq!(rebase_tick(Some(5001), 5000, 100), None);
+        assert_eq!(rebase_tick(None, 5000, 100), None);
+        let mut state = CarState::default();
+        state.last_extra_hit_tick = Some(99);
+        assert_eq!(rebase_car_ticks(state, 100, 1000).last_extra_hit_tick, Some(999));
     }
 
     #[test]
@@ -7518,6 +7581,7 @@ mod tests {
             &start,
             &CarControls::default(),
             0,
+            0,
             &parked,
             &mut scratch,
         )
@@ -7682,6 +7746,7 @@ mod tests {
                 &replay.frames[0].cars[0],
                 &at_packet,
                 &CarControls::default(),
+                0,
                 0,
                 &parked,
                 scratch,
@@ -7889,6 +7954,7 @@ mod tests {
             &replay.frames[0].cars[0],
             &start,
             &CarControls::default(),
+            0,
             0,
             &parked,
             &mut scratch,

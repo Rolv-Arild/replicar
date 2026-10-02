@@ -363,36 +363,55 @@ def read_record_tables(path: str | Path, verify: bool = True) -> dict[str, Any]:
     written (``convert_replay --no-event-tables``, or a file made by ``write_columnar``) is missing
     from the result; an empty table keeps its schema. The Rust writer is the only one that makes them.
 
-    Each table's metadata holds the ``source_sha256`` of its replay and the main file's ``frames``
-    count. With ``verify`` (the default) a table whose hash or frame count differs from the main
-    file's, or that has none (written before the metadata existed), is skipped with a warning: it
-    belongs to another export that left it beside this file. ``verify=False`` reads whatever is there.
+    Each table's schema metadata holds the ``source_sha256`` of its replay and the ``options_sha256`` of
+    the conversion options (the main file has the same two), and its footer the main file's ``frames``
+    count. With ``verify`` (the default) a table whose hashes or frame count differ from the main file's,
+    that has none (written before the metadata existed), or that cannot be read (truncated), is skipped
+    with a warning: it belongs to another export that left it beside this file, or to an export that did
+    not finish. ``verify=False`` reads whatever is there (an unreadable table still raises).
     """
     _, _, pq = _arrow_modules()
-    expected_sha = expected_frames = None
+    expected = {}
     if verify:
-        expected_sha = read_columnar_header(path).get("source_sha256")
-        expected_frames = pq.ParquetFile(str(path)).metadata.num_rows
+        expected["source_sha256"] = read_columnar_header(path).get("source_sha256")
+        main_metadata = _metadata(path)
+        options = main_metadata.get(b"options_sha256")
+        # A main file without the options hash (an older export, or `write_columnar`) cannot vouch for it.
+        expected["options_sha256"] = options.decode() if options else None
+        expected["frames"] = str(pq.ParquetFile(str(path)).metadata.num_rows)
     tables = {}
     for name in RECORD_TABLES:
         table_path = record_table_path(path, name)
         if not table_path.exists():
             continue
         if verify:
-            metadata = pq.ParquetFile(str(table_path)).metadata.metadata or {}
-            sha = metadata.get(b"source_sha256", b"").decode() or None
-            frames = metadata.get(b"frames", b"").decode() or None
+            try:
+                metadata = _metadata(table_path)
+            except Exception as error:  # a truncated or corrupt file
+                warnings.warn(f"skipping unreadable record table {table_path}: {error}", stacklevel=2)
+                continue
             problem = None
-            if sha is None or expected_sha is None:
+            found = {key: metadata.get(key.encode(), b"").decode() or None for key in expected}
+            if found["source_sha256"] is None or expected["source_sha256"] is None:
                 problem = "its source hash cannot be checked (no source_sha256 in the table or the main file)"
-            elif sha != expected_sha:
-                problem = f"it is from another replay or export (source_sha256 {sha[:12]}, main file {expected_sha[:12]})"
-            elif frames != str(expected_frames):
-                problem = f"it has {frames} frames, the main file {expected_frames}"
+            elif found["source_sha256"] != expected["source_sha256"]:
+                problem = (
+                    f"it is from another replay or export (source_sha256 {found['source_sha256'][:12]}, "
+                    f"main file {expected['source_sha256'][:12]})"
+                )
+            elif expected["options_sha256"] is not None and found["options_sha256"] != expected["options_sha256"]:
+                problem = "it was written by a conversion with other options (options_sha256 differs or is missing)"
+            elif found["frames"] != expected["frames"]:
+                problem = f"it has {found['frames']} frames, the main file {expected['frames']}"
             if problem is not None:
                 warnings.warn(f"skipping stale record table {table_path}: {problem}", stacklevel=2)
                 continue
-        tables[name] = pq.read_table(str(table_path))
+        try:
+            tables[name] = pq.read_table(str(table_path))
+        except Exception as error:
+            if not verify:
+                raise
+            warnings.warn(f"skipping unreadable record table {table_path}: {error}", stacklevel=2)
     return tables
 
 

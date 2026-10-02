@@ -507,6 +507,49 @@ struct ReplayReport {
     masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
 }
 
+/// The options a masked conversion overrides (see `masked_conversion_options`), as applied.
+#[derive(Serialize)]
+struct MaskedRunOptions {
+    /// Packet lags are inferred only by the aligned lag-inferring predictor.
+    infer_packet_lag: bool,
+    /// As in `options` (on by default): the ball-car lag offset is a replay-wide estimate from the hits of
+    /// the whole replay, so the aligned lag-inferring predictor reads packets after a withheld window. Accepted:
+    /// the evaluation measures the reconstruction, not a causal predictor (the default predictor infers no
+    /// lags and is unaffected).
+    estimate_ball_car_lag_offset: bool,
+    block_sim_pad_pickups: bool,
+    air_bvp: bool,
+    fit_on_next_packet: bool,
+    disable_simulated_demolitions: bool,
+    align_contacts: bool,
+}
+
+/// The options of the masked conversions: `options` with everything that would use a packet after a
+/// withheld frame, or a withheld frame's own data, switched off. `lag_inference` is whether this variant
+/// infers packet lags (the aligned lag-inferring predictor and `--infer-packet-lag`).
+fn masked_conversion_options(
+    options: &ConvertOptions,
+    lag_inference: bool,
+    withheld: Vec<bool>,
+) -> ConvertOptions {
+    let mut masked_options = options.clone();
+    // A withheld target's own packet lag is unknowable, so masked prediction keeps
+    // every state at its frame time; packet-lag inference is an offline improvement
+    // measured by the one-step residuals instead.
+    masked_options.infer_packet_lag = lag_inference && options.infer_packet_lag;
+    // A withheld span has no later boost update to correct a simulated pickup with, so the
+    // causal prediction keeps the simulated pad pickups.
+    masked_options.block_sim_pad_pickups = false;
+    masked_options.air_bvp = false;
+    masked_options.fit_on_next_packet = false;
+    // The causal prediction has no demolition report for a withheld frame, so RocketSim's
+    // own demolition rule stays on; the contact alignment uses later ball packets.
+    masked_options.disable_simulated_demolitions = false;
+    masked_options.align_contacts = false;
+    masked_options.withheld_frames = Some(std::sync::Arc::new(withheld));
+    masked_options
+}
+
 #[derive(Serialize)]
 struct Failure {
     path: String,
@@ -527,6 +570,9 @@ struct Report {
     /// first-packet tick and contact alignment, which would each use the packet being scored, are off) or
     /// `offline-fits` (in-sample for rotation and angular velocity).
     one_step_fits: &'static str,
+    /// What the masked conversions change from `options` (they are causal predictions: no later packet,
+    /// control or replay-wide estimate may reach a withheld frame). The values are the ones applied.
+    masked_run_options: MaskedRunOptions,
     /// For `--aligned-targets`: `lag-inferring predictor` or `raw predictor` (the default masked predictor),
     /// and that the targets come from the full offline conversion; empty otherwise.
     aligned_variant: &'static str,
@@ -1250,8 +1296,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // in-sample for the rotation and angular velocity).
     let mut offline_fits = false;
     let mut rotation_trace_path = None;
+    // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
+    let mut final_assessment = false;
     while let Some(arg) = args.next() {
-        if arg == "--no-inferred-boost" {
+        if arg == "--final-assessment" {
+            final_assessment = true;
+        } else if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
         } else if arg == "--inferred-jump" {
             options.infer_jump_from_active = true;
@@ -1456,8 +1506,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--lag-boundary later|earlier|longer] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--lag-boundary later|earlier|longer] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
         }
+    }
+    if replay_to_rocketsim::sealed_path_refused(&root, final_assessment) {
+        return Err("refusing to inspect a path containing 'test' (pass --final-assessment for the frozen run)".into());
     }
     if let Some(meshes) = meshes {
         options.collision_meshes = meshes;
@@ -1485,6 +1538,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
         one_step_fits: if offline_fits { "offline-fits" } else { "held-out" },
+        masked_run_options: {
+            let applied = masked_conversion_options(&options, aligned_targets && aligned_predictor, Vec::new());
+            MaskedRunOptions {
+                infer_packet_lag: applied.infer_packet_lag,
+                estimate_ball_car_lag_offset: applied.estimate_ball_car_lag_offset,
+                block_sim_pad_pickups: applied.block_sim_pad_pickups,
+                air_bvp: applied.air_bvp,
+                fit_on_next_packet: applied.fit_on_next_packet,
+                disable_simulated_demolitions: applied.disable_simulated_demolitions,
+                align_contacts: applied.align_contacts,
+            }
+        },
         aligned_variant: match (aligned_targets, aligned_predictor) {
             (false, _) => "",
             (true, true) => "lag-inferring predictor, offline targets",
@@ -1608,26 +1673,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     replay_hash,
                 };
                 let masked = masked_observations(&conversion.observations, schedule);
-                let mut masked_options = options.clone();
-                // A withheld target's own packet lag is unknowable, so masked prediction keeps
-                // every state at its frame time; packet-lag inference is an offline improvement
-                // measured by the one-step residuals instead.
-                masked_options.infer_packet_lag =
-                    aligned_targets && aligned_predictor && options.infer_packet_lag;
-                // A withheld span has no later boost update to correct a simulated pickup with, so the
-                // causal prediction keeps the simulated pad pickups.
-                masked_options.block_sim_pad_pickups = false;
-                masked_options.air_bvp = false;
-                masked_options.fit_on_next_packet = false;
-                // The causal prediction has no demolition report for a withheld frame, so RocketSim's
-                // own demolition rule stays on; the contact alignment uses later ball packets.
-                masked_options.disable_simulated_demolitions = false;
-                masked_options.align_contacts = false;
-                masked_options.withheld_frames = Some(std::sync::Arc::new(
+                let masked_options = masked_conversion_options(
+                    &options,
+                    aligned_targets && aligned_predictor,
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())
                         .collect(),
-                ));
+                );
                 // The aligned targets come from the full offline conversion (the best estimate of the state at
                 // the target tick), not from the held-out one scored above.
                 let offline_target = if aligned_targets && !offline_fits {
@@ -1976,6 +2028,111 @@ mod tests {
             json(&masked_observations(&other_changed, schedule)),
             "the perturbation of a frame that is not withheld must show"
         );
+    }
+
+    /// The exported physics and boost of the default masked conversion must not depend on anything after a
+    /// window: the replay truncated right after a window gives the same states in the window and before
+    /// it. A negative control feeds a packet from after the window into a window frame on purpose; the
+    /// states then differ, so the test can tell. Pads differ (the replay-wide pad-name votes, RESULTS
+    /// 'Audit, part 4', finding 2) and are only reported. The aligned (lag-inferring) predictor is not
+    /// asserted: it uses the replay-wide ball-car offset estimate, so the largest position difference is
+    /// printed instead (accepted: the evaluation measures the reconstruction, not a causal predictor).
+    /// 1v1 `00a0da63` has a defined offset; skipped when that train replay or the collision meshes are
+    /// absent.
+    #[test]
+    fn masked_conversions_do_not_depend_on_frames_after_a_window() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("replays/train/1v1/00a0da63-492e-4ab7-8a07-16cd5d14dcb4.replay");
+        if !path.exists() || !root.join("collision_meshes").exists() {
+            eprintln!("skipping the masked causality test: no local train replay or meshes");
+            return;
+        }
+        let bytes = fs::read(path).unwrap();
+        let replay = boxcars::ParserBuilder::new(&bytes).must_parse_network_data().parse().unwrap();
+        let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
+        drop(replay);
+        let schedule = MaskSchedule { seed: None, replay_hash: 7 };
+        // The evaluator's own base options.
+        let mut options = ConvertOptions::default();
+        options.air_bvp = false;
+        options.fit_on_next_packet = false;
+        let signature = |output: &ConversionOutput, frame: usize| -> String {
+            let state = &output.frames[frame].state;
+            let mut cars: Vec<_> = state
+                .cars
+                .iter()
+                .map(|(info, car)| format!("{} {:?} {:?} {}", info.idx, car.phys, car.boost.to_bits(), car.is_demoed))
+                .collect();
+            cars.sort();
+            format!("{:?} {:?}", state.ball.phys, cars)
+        };
+        let pads = |output: &ConversionOutput, frame: usize| format!("{:?}", output.frames[frame].state.boost_pads);
+        let convert = |observed: &ObservedReplay, lag_inference: bool, leak: Option<(usize, usize)>| {
+            let withheld = (0..observed.frames.len()).map(|i| schedule.horizon(i).is_some()).collect();
+            let masked_options = masked_conversion_options(&options, lag_inference, withheld);
+            let mut masked = masked_observations(observed, schedule);
+            if let Some((from, to)) = leak {
+                // Deliberately feed the ball packet of frame `from` (after the window) into window frame
+                // `to`, stamped as that frame's own fresh packet.
+                let mut ball = observed.frames[from].ball.clone().expect("a ball body");
+                for value in ball.position.iter_mut() {
+                    value.frame = to;
+                }
+                for value in ball.linear_velocity.iter_mut() {
+                    value.frame = to;
+                }
+                for value in ball.rotation_xyzw.iter_mut() {
+                    value.frame = to;
+                }
+                for value in ball.angular_velocity_replay_units.iter_mut() {
+                    value.frame = to;
+                }
+                masked.frames[to].ball = Some(ball);
+            }
+            convert_observations(masked, &masked_options).unwrap()
+        };
+        let truncated_at = |end: usize| {
+            let mut truncated = original.clone();
+            truncated.frames.truncate(end + 3);
+            truncated
+        };
+        // Default predictor: a reference replay of the first 1,200 frames against the same replay truncated
+        // right after the windows at frames 401 and 901.
+        let reference_frames = 1200;
+        let mut reference_replay = original.clone();
+        reference_replay.frames.truncate(reference_frames);
+        let reference = convert(&reference_replay, false, None);
+        for window in [4usize, 9] {
+            let end = window * 100 + 4;
+            let cut = convert(&truncated_at(end), false, None);
+            let (mut physics, mut pad_frames) = (0usize, 0usize);
+            for frame in 0..=end {
+                physics += usize::from(signature(&reference, frame) != signature(&cut, frame));
+                pad_frames += usize::from(pads(&reference, frame) != pads(&cut, frame));
+            }
+            eprintln!("default predictor, window at {}: {physics} of {} frames differ in physics or boost, {pad_frames} in pads", window * 100 + 1, end + 1);
+            assert_eq!(physics, 0, "truncating the replay after the window at {} changes the exported states", window * 100 + 1);
+        }
+        // Negative control: a ball packet from 40 frames after the window, fed into its first frame in the
+        // longer replay only, changes the states of the window and after it.
+        let end = 4 * 100 + 4;
+        let leaked = convert(&reference_replay, false, Some((end + 40, 401)));
+        let cut = convert(&truncated_at(end), false, None);
+        let differing = (0..=end).filter(|&frame| signature(&leaked, frame) != signature(&cut, frame)).count();
+        eprintln!("negative control (a post-window ball packet fed into frame 401): {differing} frames differ");
+        assert!(differing > 0, "the negative control found no dependence: the test cannot tell");
+        // Aligned predictor: not asserted; the largest position difference is printed.
+        let full = convert(&original, true, None);
+        let cut = convert(&truncated_at(904), true, None);
+        let mut worst = 0.0f32;
+        for frame in 0..=904 {
+            worst = worst.max((full.frames[frame].state.ball.phys.pos - cut.frames[frame].state.ball.phys.pos).length());
+            for ((_, a), (_, b)) in full.frames[frame].state.cars.iter().zip(&cut.frames[frame].state.cars) {
+                worst = worst.max((a.phys.pos - b.phys.pos).length());
+            }
+        }
+        let differing = (0..=904).filter(|&frame| signature(&full, frame) != signature(&cut, frame)).count();
+        eprintln!("aligned predictor (not asserted), window at 901: {differing} of 905 frames differ, largest ball or car position difference {worst:.2} UU");
     }
 
     #[test]
