@@ -1648,6 +1648,23 @@ pub fn hitbox_config(name: &str) -> CarBodyConfig {
     }
 }
 
+/// A scratch arena for the offline fits: one car with the given hitbox and no reachable boost pad. The
+/// fits reuse their scratch arenas for the whole replay, so a pad one fit picked up would stay on
+/// cooldown into later, unrelated fits; the main arena holds its pads on cooldown anyway
+/// (`block_sim_pad_pickups`). RocketSim requires at least one pad (`BoostPadGrid::new` asserts a
+/// non-empty list), so the only pad lies far below the floor.
+pub(crate) fn scratch_arena(seed: u64, config: CarBodyConfig) -> Arena {
+    let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
+    scratch_config.rng_seed = Some(seed);
+    scratch_config.custom_boost_pads = Some(vec![rocketsim::BoostPadConfig {
+        pos: Vec3A::new(0.0, 0.0, -10_000.0),
+        is_big: false,
+    }]);
+    let mut scratch = Arena::new_with_config(scratch_config);
+    scratch.add_car(Team::Blue, config);
+    scratch
+}
+
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
 /// The embedded map is generated from the user's item catalog, the official
 /// Rocket League hitbox roster, and reviewed name aliases. Unknown IDs retain
@@ -3940,7 +3957,10 @@ fn step_ticks(
 /// sum. Fitting the next packet alone (the default, one packet) is in sample there, and once the
 /// flip's speed saturates at 5.5 rad/s the candidates barely differ and the choice can alternate
 /// between packets. Uses later packets, so it is offline reconstruction; spans containing a withheld
-/// frame, an inactive frame, or a change of dodge counter are refused.
+/// frame, an inactive frame, or a change of dodge counter are refused. `ball` is the main arena's ball
+/// at this packet's tick: every candidate starts from it (the previous-interval sources park the ball
+/// instead, since its state at the earlier packet is not at hand), so the result does not depend on
+/// what an earlier fit left in the shared scratch arena.
 #[allow(clippy::too_many_arguments)]
 fn fit_flip_cancel(
     observations: &ObservedReplay,
@@ -3952,6 +3972,7 @@ fn fit_flip_cancel(
     state: &CarState,
     base_controls: &CarControls,
     lag_a: u64,
+    ball: &rocketsim::BallState,
     scratch: &mut Arena,
 ) -> Option<f32> {
     let frames = &observations.frames;
@@ -4055,9 +4076,17 @@ fn fit_flip_cancel(
         start.phys.rot_mat = rot;
         start.phys.ang_vel = ang;
         start.flip_time = (state.flip_time - ticks as f32 / 120.0).max(0.0);
+        // The ball's state at the previous packet is not known here: park it out of reach, so that the
+        // scratch arena's ball (left wherever an earlier fit put it) cannot touch the car.
+        let mut parked = rocketsim::BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        if (pos - parked.phys.pos).length() < 600.0 {
+            parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
+        }
         let mut best: Option<(f32, f32)> = None;
         for step in 0..=4 {
             let cancel = step as f32 * 0.25;
+            scratch.set_ball_state(parked);
             scratch.set_car_state(0, start);
             let mut controls = *base_controls;
             controls.jump = false;
@@ -4179,6 +4208,9 @@ fn fit_flip_cancel(
         let mut start = *state;
         let mut previous_ticks = 0;
         let mut total = 0.0f32;
+        // Every candidate starts from the main arena's ball at this packet's tick (as the dodge start fit
+        // does), not from wherever an earlier fit left the shared scratch arena's ball.
+        scratch.set_ball_state(*ball);
         for (j, target) in targets.iter().enumerate() {
             scratch.set_car_state(0, start);
             let mut controls = *base_controls;
@@ -4751,13 +4783,10 @@ pub fn convert_observations_with(
     // Lags (ticks) fitted for the first car packet after a dodge activation, by (actor, lifetime, frame).
     let lag_overrides: std::cell::RefCell<HashMap<(i32, usize, usize), u64>> =
         std::cell::RefCell::new(HashMap::new());
-    let mut flip_scratch = (options.infer_flip_cancel || options.infer_dodge_start).then(|| {
-        let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
-        scratch_config.rng_seed = Some(options.seed);
-        let mut scratch = Arena::new_with_config(scratch_config);
-        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
-        scratch
-    });
+    // Scratch arenas of the flip cancel, dodge start and flip boundary-value fits, one per hitbox: the
+    // dodge start fit simulates the ball, so a contact depends on the car's hitbox.
+    let flip_fits = options.infer_flip_cancel || options.infer_dodge_start;
+    let mut flip_scratch: HashMap<&'static str, Arena> = HashMap::new();
     let mut flip_cache: HashMap<(i32, usize, usize), Option<f32>> = HashMap::new();
     let mut flip_last: HashMap<(i32, usize), f32> = HashMap::new();
 
@@ -5535,8 +5564,16 @@ pub fn convert_observations_with(
                                         base.yaw = controls.steer;
                                     }
                                 }
-                                let fitted = match flip_scratch.as_mut() {
-                                    Some(scratch) if active && !new_lifetime => fit_flip_cancel(
+                                let ball_now = *arena.get_ball_state();
+                                let fitted = if flip_fits && active && !new_lifetime {
+                                    let (name, config) = slot_bodies
+                                        .get(&slot)
+                                        .copied()
+                                        .unwrap_or(("octane", CarBodyConfig::OCTANE));
+                                    let scratch = flip_scratch
+                                        .entry(name)
+                                        .or_insert_with(|| scratch_arena(options.seed, config));
+                                    fit_flip_cancel(
                                         observations,
                                         options,
                                         &packet_lags,
@@ -5546,9 +5583,11 @@ pub fn convert_observations_with(
                                         &state,
                                         &base,
                                         car_lag(car),
+                                        &ball_now,
                                         scratch,
-                                    ),
-                                    _ => None,
+                                    )
+                                } else {
+                                    None
                                 };
                                 flip_cache.insert(cache_key, fitted);
                             }
@@ -5585,7 +5624,14 @@ pub fn convert_observations_with(
                     && !new_lifetime
                     && !pending_dodges.iter().any(|dodge| dodge.slot == slot)
                 {
-                    if let Some(scratch) = flip_scratch.as_mut() {
+                    if flip_fits {
+                        let (name, config) = slot_bodies
+                            .get(&slot)
+                            .copied()
+                            .unwrap_or(("octane", CarBodyConfig::OCTANE));
+                        let scratch = flip_scratch
+                            .entry(name)
+                            .or_insert_with(|| scratch_arena(options.seed, config));
                         let ball_now = *arena.get_ball_state();
                         if let Some(plan) = fit_dodge_start(
                             observations,
@@ -5648,6 +5694,14 @@ pub fn convert_observations_with(
                 {
                     air_schedules.retain(|schedule| schedule.slot != slot);
                     let current = *arena.get_car_state(slot);
+                    let (name, config) = slot_bodies
+                        .get(&slot)
+                        .copied()
+                        .unwrap_or(("octane", CarBodyConfig::OCTANE));
+                    let flip_or_press = current.is_flipping
+                        || pending_dodges
+                            .iter()
+                            .any(|d| d.slot == slot && d.start_tick > arena.tick_count());
                     let planned = plan_air_bvp(
                         observations,
                         options,
@@ -5659,12 +5713,12 @@ pub fn convert_observations_with(
                         car_lag(car),
                         slot,
                         arena.tick_count(),
-                        if current.is_flipping
-                            || pending_dodges
-                                .iter()
-                                .any(|d| d.slot == slot && d.start_tick > arena.tick_count())
-                        {
-                            flip_scratch.as_mut()
+                        if flip_fits && flip_or_press {
+                            Some(
+                                flip_scratch
+                                    .entry(name)
+                                    .or_insert_with(|| scratch_arena(options.seed, config)),
+                            )
                         } else {
                             None
                         },
@@ -5719,13 +5773,9 @@ pub fn convert_observations_with(
                         .get(&slot)
                         .copied()
                         .unwrap_or(("octane", CarBodyConfig::OCTANE));
-                    let scratch = ground_scratch.entry(name).or_insert_with(|| {
-                        let mut scratch_config = ArenaConfig::new(GameMode::Soccar);
-                        scratch_config.rng_seed = Some(options.seed);
-                        let mut scratch = Arena::new_with_config(scratch_config);
-                        scratch.add_car(Team::Blue, config);
-                        scratch
-                    });
+                    let scratch = ground_scratch
+                        .entry(name)
+                        .or_insert_with(|| scratch_arena(options.seed, config));
                     let current = *arena.get_car_state(slot);
                     let mut schedule = options
                         .fit_ground_control_timing
@@ -7227,6 +7277,175 @@ mod tests {
         assert_eq!(plan.duration, 8);
         assert_eq!(plan.cancel, 0.0);
         assert!((plan.pitch - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scratch_arenas_have_the_cars_hitbox_and_no_reachable_boost_pad() {
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let pad = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar))
+            .get_boost_pad_config(0)
+            .pos;
+        let mut scratch = scratch_arena(0, CarBodyConfig::DOMINUS);
+        assert_eq!(scratch.num_boost_pads(), 1);
+        assert!(scratch.get_boost_pad_config(0).pos.z < -1000.0);
+        assert_eq!(scratch.get_car_info(0).config, CarBodyConfig::DOMINUS);
+        // A car with no boost parked on a pad's spot of the real arena stays without boost.
+        let mut car = CarState::default();
+        car.phys.pos = Vec3A::new(pad.x, pad.y, 17.0);
+        car.boost = 0.0;
+        scratch.set_car_state(0, car);
+        for _ in 0..10 {
+            scratch.step_tick();
+        }
+        assert_eq!(scratch.get_car_state(0).boost, 0.0);
+    }
+
+    #[test]
+    fn flip_cancel_fit_recovers_the_cancel_whatever_the_scratch_ball_was_left_at() {
+        // Truth: an airborne car presses a diagonal dodge at tick 1 and holds a 0.75 pitch cancel.
+        // Fresh packets at ticks 3 (frame 0, already flipping) and 11 (frame 1), exact lags.
+        rocketsim::init(Path::new("collision_meshes"), true).unwrap();
+        let mut config = ArenaConfig::new(GameMode::Soccar);
+        config.rng_seed = Some(1);
+        let mut parked = rocketsim::BallState::default();
+        parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
+        let mut truth = Arena::new_with_config(config.clone());
+        truth.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        truth.set_ball_state(parked);
+        let mut start = CarState::default();
+        start.phys.pos = Vec3A::new(-2000.0, 1000.0, 900.0);
+        start.phys.vel = Vec3A::new(600.0, 0.0, 100.0);
+        start.is_on_ground = false;
+        start.has_jumped = true;
+        start.air_time_since_jump = 0.05;
+        truth.set_car_state(0, start);
+        let mut states = vec![*truth.get_car_state(0)];
+        for tick in 1..=11u64 {
+            let mut controls = CarControls::default();
+            if tick == 1 {
+                // A diagonal dodge: the cancel turns the spin's direction, which the fit can see even
+                // after the angular speed reaches its limit.
+                controls.jump = true;
+                controls.pitch = 0.7;
+                controls.yaw = 0.7;
+            } else {
+                controls.pitch = 0.75 * truth.get_car_state(0).flip_rel_torque.y.signum();
+            }
+            truth.set_car_controls(0, controls);
+            truth.step_tick();
+            states.push(*truth.get_car_state(0));
+        }
+        let packet_ticks = [3usize, 11];
+        let car = |frame: usize| {
+            let state = &states[packet_ticks[frame]];
+            let stamp = |v: [f32; 3]| {
+                Some(Value {
+                    value: v,
+                    frame,
+                    source: Source::Replay,
+                })
+            };
+            let q = Quat::from_mat3a(&state.phys.rot_mat);
+            observations::Car {
+                actor_id: 1,
+                actor_created_frame: 0,
+                player_key: Some("p1".to_string()),
+                player_link_active: true,
+                team: Some(0),
+                body_product_id: None,
+                body: Body {
+                    position: stamp(state.phys.pos.to_array()),
+                    linear_velocity: stamp(state.phys.vel.to_array()),
+                    rotation_xyzw: Some(Value {
+                        value: [q.x, q.y, q.z, q.w],
+                        frame,
+                        source: Source::Replay,
+                    }),
+                    angular_velocity_replay_units: stamp((state.phys.ang_vel * 100.0).to_array()),
+                    ..Body::default()
+                },
+                boost: None,
+                boost_raw: None,
+                inputs: observations::Inputs {
+                    dodge_active_raw: Some(Value {
+                        value: 1,
+                        frame: 0,
+                        source: Source::Replay,
+                    }),
+                    ..observations::Inputs::default()
+                },
+            }
+        };
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames: (0..2)
+                .map(|index| observations::Frame {
+                    index,
+                    time: index as f32 * 8.0 / 120.0,
+                    delta: 8.0 / 120.0,
+                    ball: None,
+                    cars: vec![car(index)],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(Value {
+                        value: "Active".to_string(),
+                        frame: index,
+                        source: Source::Replay,
+                    }),
+                    events: Vec::new(),
+                    pad_pickups: Vec::new(),
+                })
+                .collect(),
+            diagnostics: Default::default(),
+        };
+        let mut lags = PacketLags {
+            ball: vec![None; 2],
+            cars: vec![None; 2],
+            car_actor: HashMap::new(),
+            ..PacketLags::default()
+        };
+        lags.car_actor.insert((1, 0, 0), 0.0);
+        lags.car_actor.insert((1, 0, 1), 0.0);
+        let lags = Some(lags);
+        let options = ConvertOptions::default();
+        let at_packet = states[packet_ticks[0]];
+        assert!(at_packet.is_flipping);
+        let mut scratch = Arena::new_with_config(config);
+        scratch.add_car(Team::Blue, CarBodyConfig::OCTANE);
+        let fit = |scratch: &mut Arena| {
+            fit_flip_cancel(
+                &replay,
+                &options,
+                &lags,
+                0.0,
+                0,
+                &replay.frames[0].cars[0],
+                &at_packet,
+                &CarControls::default(),
+                0,
+                &parked,
+                scratch,
+            )
+        };
+        assert_eq!(fit(&mut scratch), Some(0.75));
+        // Whatever ball an earlier fit left in the shared scratch arena (here one on this car's path),
+        // the fit starts from the ball it is given: the result and the scratch arena's simulated ball
+        // are the same.
+        let mut ends = Vec::new();
+        for left_behind in [states[7].phys.pos, Vec3A::new(2500.0, -3000.0, 93.0)] {
+            let mut ball = rocketsim::BallState::default();
+            ball.phys.pos = left_behind;
+            scratch.set_ball_state(ball);
+            assert_eq!(fit(&mut scratch), Some(0.75));
+            ends.push(scratch.get_ball_state().phys.pos);
+        }
+        assert_eq!(ends[0], ends[1]);
     }
 
     #[test]
