@@ -95,6 +95,10 @@ pub struct ConvertOptions {
     /// of 12 on a host replay and 8 of 12 on a client replay of the remote-client games). The car
     /// stays demolished for RocketSim's respawn delay even while the replay's car actor is linked.
     pub apply_observed_demolitions: bool,
+    /// Apply the replay's `DodgesRefreshedCounter` increases (a flip reset happened: off the ball or another
+    /// car) to the car's state when the simulation has not reproduced the reset: the jump and flip flags
+    /// are cleared as RocketSim does on a wheel contact. Never in a withheld frame.
+    pub apply_observed_dodge_refreshes: bool,
     /// Offline: find car-ball contacts from the ball packets (a ball-only rollout between
     /// consecutive packets; `ball_evidence`) and report them as `ball_contacts`.
     pub contacts_from_ball_packets: bool,
@@ -288,6 +292,7 @@ impl Default for ConvertOptions {
             infer_dodge_from_active: true,
             gate_dodge_on_observed_impulse: true,
             apply_observed_demolitions: true,
+            apply_observed_dodge_refreshes: true,
             contacts_from_ball_packets: true,
             align_contacts: true,
             disable_simulated_demolitions: true,
@@ -470,6 +475,10 @@ pub struct Diagnostics {
     pub unlinked_car_frames: usize,
     pub default_hitbox_players: usize,
     pub active_pawn_demo_corrections: usize,
+    /// Observed dodge-refresh counter increases, and how many of them found the car's flags still set (the
+    /// simulation had not reproduced the reset, so it was applied).
+    pub dodge_refreshes_observed: usize,
+    pub dodge_refreshes_applied: usize,
     pub shadowed_car_frames: usize,
     /// Simulated frames with an inferred ball packet lag (`infer_packet_lag`).
     pub ball_lag_frames: usize,
@@ -5889,6 +5898,45 @@ pub fn convert_observations_with(
                     arena.set_car_state(slot, state);
                 }
                 demo_hold_until.insert(slot, timeline_tick + 360);
+            }
+        }
+        if options.apply_observed_dodge_refreshes && simulated && !frame_withheld {
+            for event in &frame.events {
+                let observations::Event::DodgeRefreshed { car, .. } = event else {
+                    continue;
+                };
+                let Some(&(slot, created)) = actor_slots.get(car) else {
+                    continue;
+                };
+                if !frame
+                    .cars
+                    .iter()
+                    .any(|c| c.actor_id == *car && c.actor_created_frame == created)
+                {
+                    continue;
+                }
+                diagnostics.dodge_refreshes_observed += 1;
+                let mut state = *arena.get_car_state(slot);
+                if state.is_demoed
+                    || !(state.has_jumped || state.has_double_jumped || state.has_flipped || state.is_flipping)
+                {
+                    continue;
+                }
+                // What RocketSim does on the tick a wheel touches something (`update_double_jump_or_flip`,
+                // and the re-arm of the jump on landing).
+                state.has_jumped = false;
+                state.has_double_jumped = false;
+                state.has_flipped = false;
+                state.is_flipping = false;
+                state.is_jumping = false;
+                state.flip_time = 0.0;
+                state.air_time = 0.0;
+                state.air_time_since_jump = 0.0;
+                // `set_car_state` overwrites the controls: keep them.
+                let controls = *arena.get_car_controls(slot);
+                arena.set_car_state(slot, state);
+                arena.set_car_controls(slot, controls);
+                diagnostics.dodge_refreshes_applied += 1;
             }
         }
         if options.sync_boost_pad_pickups {
