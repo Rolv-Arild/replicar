@@ -1,6 +1,6 @@
 //! Typed replay observations with actor identity and per-field freshness.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use boxcars::{ActorId, Attribute, HeaderProp, Replay, Vector3f};
 use serde::Serialize;
@@ -261,6 +261,74 @@ pub struct Diagnostics {
     pub actor_class_replacements: usize,
     pub unknown_actor_updates: usize,
     pub unlinked_car_frames: usize,
+    /// The replay header's `MapName`.
+    pub map_name: Option<String>,
+    /// The distinct values the replay announced for the game settings the converter does not model
+    /// (`ReplicatedGameMutatorIndex`, `ReplicatedBallGravityScale`, `ReplicatedBallMaxLinearSpeedScale`).
+    pub game_settings: BTreeMap<String, Vec<String>>,
+    /// Anything that makes the replay non-standard for the soccar arena the converter simulates: a map that
+    /// is not in `KNOWN_MAPS`, a game mutator index other than -1, a ball gravity or speed scale other than 1.
+    /// A report, not a refusal: the conversion still runs and is simulated as standard soccar.
+    pub nonstandard_notes: Vec<String>,
+    /// A player's key (unique id, player id, name) changed between frames.
+    pub player_key_changes: usize,
+    /// A player replication actor was deleted while cars still pointed at it (the cars' link is cleared;
+    /// they would otherwise keep a stale owner and simulate for a player who has left).
+    pub players_deleted_with_cars: usize,
+    /// A car was linked to a player that another car actor lifetime already owned (a replacement car), and
+    /// how many of those links came after the car's creation frame.
+    pub replacement_cars_linked: usize,
+    pub replacement_cars_linked_after_creation: usize,
+    /// Frames whose time is earlier than the previous frame's (the conversion clamps them).
+    pub non_monotonic_frame_times: usize,
+}
+
+/// Map names (lower case) of the train replays, all converted with normal residuals: soccar arenas of the
+/// standard dimensions (`Stadium_10A`, Throwback, included: one train replay converts normally). A map
+/// outside the list is reported in `Diagnostics::nonstandard_notes`.
+const KNOWN_MAPS: [&str; 18] = [
+    "chn_stadium_p",
+    "eurostadium_dusk_p",
+    "eurostadium_night_p",
+    "eurostadium_p",
+    "ff_dusk_p",
+    "farm_grs_p",
+    "neotokyo_standard_p",
+    "park_rainy_p",
+    "stadium_10a_p",
+    "stadium_p",
+    "trainstation_dawn_p",
+    "trainstation_night_p",
+    "underwater_grs_p",
+    "utopiastadium_dusk_p",
+    "beach_night_p",
+    "cs_day_p",
+    "cs_p",
+    "woods_p",
+];
+
+fn nonstandard_notes(map: Option<&str>, settings: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let mut notes = Vec::new();
+    match map {
+        None => notes.push("the replay header has no MapName".to_owned()),
+        Some(map) if !KNOWN_MAPS.contains(&map.to_lowercase().as_str()) => {
+            notes.push(format!("map {map} is not one of the maps measured on train"));
+        }
+        _ => {}
+    }
+    for (name, values) in settings {
+        let standard = match name.as_str() {
+            "ProjectX.GRI_X:ReplicatedGameMutatorIndex" => "-1",
+            _ => "1",
+        };
+        for value in values {
+            let is_standard = value == standard || value.parse::<f32>().is_ok_and(|v| (v - standard.parse::<f32>().unwrap_or(0.0)).abs() < 1e-6);
+            if !is_standard {
+                notes.push(format!("{name} = {value} (standard {standard})"));
+            }
+        }
+    }
+    notes
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +407,9 @@ struct Tracker {
     demolished_at: HashMap<i32, f32>,
     /// Last `DodgesRefreshedCounter` value seen per car actor.
     dodges_refreshed: HashMap<i32, i32>,
+    /// The car actor lifetime that last linked to each player actor, and the last key seen per player actor.
+    player_owner: HashMap<ActorId, (ActorId, usize)>,
+    last_player_keys: HashMap<i32, String>,
     diagnostics: Diagnostics,
 }
 
@@ -425,6 +496,15 @@ impl Tracker {
                 }
                 ActorKind::Player => {
                     self.players.remove(&id);
+                    // Cars must not keep pointing at a player actor id that can be reused.
+                    for car in self.cars.values_mut() {
+                        if car.player_actor == Some(id) {
+                            car.player_actor = None;
+                            car.player_link_active = false;
+                            self.diagnostics.players_deleted_with_cars += 1;
+                        }
+                    }
+                    self.player_owner.remove(&id);
                 }
                 ActorKind::Component(_) => {
                     self.components.remove(&id);
@@ -476,7 +556,7 @@ impl Tracker {
         );
     }
 
-    fn link(&mut self, actor: ActorId, property: &str, attribute: &Attribute) {
+    fn link(&mut self, actor: ActorId, property: &str, attribute: &Attribute, frame: usize) {
         match property {
             "Engine.Pawn:PlayerReplicationInfo" => {
                 if let Some(car) = self.cars.get_mut(&actor) {
@@ -484,6 +564,17 @@ impl Tracker {
                         car.player_link_active = value.active;
                         if value.active {
                             car.player_actor = Some(value.actor);
+                            let lifetime = (actor, car.created_frame);
+                            let created = car.created_frame;
+                            // A car lifetime that takes over a player another lifetime owned is a replacement.
+                            if let Some(previous) = self.player_owner.insert(value.actor, lifetime) {
+                                if previous != lifetime {
+                                    self.diagnostics.replacement_cars_linked += 1;
+                                    if created != frame {
+                                        self.diagnostics.replacement_cars_linked_after_creation += 1;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -667,6 +758,21 @@ impl Tracker {
                     if !self.goal_events_this_phase.contains(team) {
                         self.goal_events_this_phase.push(*team);
                         events.push(Event::GoalScoredOn { team: *team });
+                    }
+                }
+            }
+            "ProjectX.GRI_X:ReplicatedGameMutatorIndex"
+            | "TAGame.Ball_TA:ReplicatedBallGravityScale"
+            | "TAGame.Ball_TA:ReplicatedBallMaxLinearSpeedScale" => {
+                let value = match attribute {
+                    Attribute::Int(v) => Some(v.to_string()),
+                    Attribute::Float(v) => Some(v.to_string()),
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    let seen = self.diagnostics.game_settings.entry(property.to_owned()).or_default();
+                    if !seen.contains(&value) {
+                        seen.push(value);
                     }
                 }
             }
@@ -856,6 +962,13 @@ impl Tracker {
             })
             .collect();
         players.sort_by_key(|player| player.actor_id);
+        for player in &players {
+            if let Some(previous) = self.last_player_keys.insert(player.actor_id, player.key.clone()) {
+                if previous != player.key {
+                    self.diagnostics.player_key_changes += 1;
+                }
+            }
+        }
         let player_lookup: HashMap<_, _> = players
             .iter()
             .map(|player| {
@@ -939,7 +1052,12 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
     let frames = &replay.network_frames.as_ref()?.frames;
     let mut tracker = Tracker::default();
     let mut output = Vec::with_capacity(frames.len());
+    let mut previous_time: Option<f32> = None;
     for (index, frame) in frames.iter().enumerate() {
+        if previous_time.is_some_and(|previous| frame.time < previous) {
+            tracker.diagnostics.non_monotonic_frame_times += 1;
+        }
+        previous_time = Some(frame.time);
         for actor in &frame.deleted_actors {
             tracker.delete(*actor);
         }
@@ -950,7 +1068,7 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         }
         for update in &frame.updated_actors {
             if let Some(property) = prop_name(replay, update.object_id.0) {
-                tracker.link(update.actor_id, property, &update.attribute);
+                tracker.link(update.actor_id, property, &update.attribute, index);
             }
         }
         let mut events = Vec::new();
@@ -970,6 +1088,12 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         }
         output.push(tracker.snapshot(index, frame.time, frame.delta, events, pad_pickups));
     }
+    tracker.diagnostics.map_name = replay.properties.iter().find_map(|(name, prop)| match (name.as_str(), prop) {
+        ("MapName", HeaderProp::Name(map) | HeaderProp::Str(map)) => Some(map.clone()),
+        _ => None,
+    });
+    tracker.diagnostics.nonstandard_notes =
+        nonstandard_notes(tracker.diagnostics.map_name.as_deref(), &tracker.diagnostics.game_settings);
     Some(ObservedReplay {
         header: Header {
             game_type: replay.game_type.clone(),
@@ -1053,6 +1177,48 @@ mod event_tests {
         assert!(SpawnPose::from_trajectory(&trajectory(Some(13), Some(90), Some(75)), 7).unwrap().rotation_xyzw.is_none());
         let no_location = boxcars::Trajectory { location: None, rotation: None };
         assert!(SpawnPose::from_trajectory(&no_location, 7).is_none());
+    }
+
+    /// A car taking over a player another car lifetime owned is a replacement (late when linked after its
+    /// creation); deleting a player actor clears the link of the cars that still point at it; non-standard
+    /// settings and unknown maps are reported.
+    #[test]
+    fn link_changes_and_settings_are_reported() {
+        let announce = |tracker: &mut Tracker, id: i32, class: &str, frame: usize| {
+            tracker.announce(ActorId(id), class, frame, &boxcars::Trajectory { location: None, rotation: None });
+        };
+        let link = |tracker: &mut Tracker, car: i32, player: i32, frame: usize| {
+            tracker.link(
+                ActorId(car),
+                "Engine.Pawn:PlayerReplicationInfo",
+                &Attribute::ActiveActor(boxcars::ActiveActor { active: true, actor: ActorId(player) }),
+                frame,
+            );
+        };
+        let mut tracker = Tracker::default();
+        announce(&mut tracker, 5, "TAGame.Default__PRI_TA", 0);
+        announce(&mut tracker, 1, "Archetypes.Car.Car_Default", 0);
+        link(&mut tracker, 1, 5, 0);
+        assert_eq!(tracker.diagnostics.replacement_cars_linked, 0);
+        announce(&mut tracker, 2, "Archetypes.Car.Car_Default", 10);
+        link(&mut tracker, 2, 5, 12);
+        assert_eq!(tracker.diagnostics.replacement_cars_linked, 1);
+        assert_eq!(tracker.diagnostics.replacement_cars_linked_after_creation, 1);
+        tracker.delete(ActorId(5));
+        assert_eq!(tracker.diagnostics.players_deleted_with_cars, 2);
+        assert!(tracker.cars.values().all(|car| car.player_actor.is_none() && !car.player_link_active));
+
+        let mut settings = BTreeMap::new();
+        settings.insert("ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(), vec!["-1".to_owned()]);
+        settings.insert("TAGame.Ball_TA:ReplicatedBallGravityScale".to_owned(), vec!["1".to_owned(), "0.5".to_owned()]);
+        let notes = nonstandard_notes(Some("Stadium_P"), &settings);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("BallGravityScale = 0.5"));
+        assert!(nonstandard_notes(Some("SomeNewMap_P"), &BTreeMap::new())[0].contains("SomeNewMap_P"));
+        assert_eq!(nonstandard_notes(Some("CS_P"), &BTreeMap::new()), Vec::<String>::new());
+        settings.clear();
+        settings.insert("ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(), vec!["3".to_owned()]);
+        assert_eq!(nonstandard_notes(Some("Stadium_P"), &settings).len(), 1);
     }
 
     fn repeat_of(frame: &Frame) -> bool {

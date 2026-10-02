@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -57,7 +58,11 @@ def run_one(replay: Path, output: Path, warmup: bool) -> dict:
     elapsed = time.perf_counter() - started
     if child.returncode != 0 or not output.is_file():
         raise RuntimeError(f"conversion failed ({child.returncode}): {replay}\n{stdout}\n{stderr}")
-    frames = int(stdout.strip().split(" frames -> ", 1)[0])
+    # The converter prints one `<n> rows -> <table>` line per record table before the `<n> frames -> <file>` line.
+    match = re.search(r"^(\d+) frames -> ", stdout, flags=re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"no '<n> frames -> <file>' line in the converter output of {replay}:\n{stdout}")
+    frames = int(match.group(1))
     result = {
         "replay": str(replay.relative_to(ROOT)),
         "format": output.suffix[1:],

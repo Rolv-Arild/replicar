@@ -26,6 +26,7 @@ pub enum ConvertError {
     Init(io::Error),
     Output(io::Error),
     InvalidTime { frame: usize, time: f32 },
+    InvalidOptions(String),
 }
 
 impl fmt::Display for ConvertError {
@@ -39,6 +40,7 @@ impl fmt::Display for ConvertError {
             Self::InvalidTime { frame, time } => {
                 write!(f, "invalid replay time {time} at frame {frame}")
             }
+            Self::InvalidOptions(message) => write!(f, "invalid conversion options: {message}"),
         }
     }
 }
@@ -308,6 +310,26 @@ pub struct ConvertOptions {
     pub max_gap_ticks: u64,
 }
 
+impl ConvertOptions {
+    /// Option combinations that cannot work. The legacy lag chains (`exact_tick_lag_chains` off) leave the
+    /// exact-chain run registries empty, so the features that place or move whole runs would silently do
+    /// nothing: they are refused instead.
+    pub fn validate(&self) -> Result<(), ConvertError> {
+        if !self.exact_tick_lag_chains
+            && self.infer_packet_lag
+            && (self.align_contacts
+                || self.estimate_ball_car_lag_offset
+                || self.ball_car_lag_offset.is_some())
+        {
+            return Err(ConvertError::InvalidOptions(
+                "the legacy (non-exact) lag chains cannot be combined with contact alignment or the ball-car lag offset, which work on exact-chain runs: also pass --no-align-contacts and --no-estimate-ball-car-offset"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for ConvertOptions {
     fn default() -> Self {
         Self {
@@ -515,6 +537,12 @@ pub struct ConvertedFrame {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Diagnostics {
     pub skipped_timeline_ticks: u64,
+    /// Why the ball-contact intervals could not be prepared (`contacts_from_ball_packets`); the export then has
+    /// no `ball_contacts`.
+    pub ball_interval_error: Option<String>,
+    /// A slot's car later showed another team or car body than the one its slot was created with (counted per
+    /// distinct (slot, team, body)); the slot keeps its first hitbox and team.
+    pub slot_loadout_changes: usize,
     pub unlinked_car_frames: usize,
     pub default_hitbox_players: usize,
     pub active_pawn_demo_corrections: usize,
@@ -4837,6 +4865,30 @@ pub fn car_slot_count(observations: &ObservedReplay) -> usize {
     keys.len()
 }
 
+/// RocketSim panics (instead of returning an error) when the mesh directory exists but holds no soccar
+/// collision meshes, so look for them first: `<dir>/soccar/*.cmf`.
+pub fn check_soccar_meshes(meshes: &Path) -> Result<(), ConvertError> {
+    let soccar = meshes.join("soccar");
+    let found = std::fs::read_dir(&soccar)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("cmf")))
+        })
+        .unwrap_or(false);
+    if found {
+        Ok(())
+    } else {
+        Err(ConvertError::Init(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "no soccar collision meshes (*.cmf) in {}: put the supplied RocketSim meshes under <collision_meshes>/soccar/",
+                soccar.display()
+            ),
+        )))
+    }
+}
+
 /// Convert observations with RocketSim. The mesh directory is initialized once per process.
 pub fn convert_observations(
     observations: ObservedReplay,
@@ -4888,6 +4940,8 @@ pub fn convert_observations_with(
             observations.header.game_type.clone(),
         ));
     }
+    options.validate()?;
+    check_soccar_meshes(Path::new(&options.collision_meshes))?;
     rocketsim::init(Path::new(&options.collision_meshes), true).map_err(ConvertError::Init)?;
     let mut config = ArenaConfig::new(GameMode::Soccar);
     config.rng_seed = Some(options.seed);
@@ -4899,10 +4953,11 @@ pub fn convert_observations_with(
     }
     let mut arena = Arena::new_with_config(config);
     let mut slots: HashMap<String, usize> = HashMap::new();
-    let mut car_slots = Vec::new();
+    let mut car_slots: Vec<CarSlot> = Vec::new();
     let mut actor_slots: HashMap<i32, (usize, usize)> = HashMap::new();
     // Car lifetimes already started from their spawn trajectory (`observations::SpawnPose`).
     let mut spawn_started: HashSet<(i32, usize)> = HashSet::new();
+    let mut slot_changes_seen: HashSet<(usize, Option<u8>, Option<u32>)> = HashSet::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
     let mut last_double_raw: HashMap<(i32, usize), u8> = HashMap::new();
@@ -4987,16 +5042,22 @@ pub fn convert_observations_with(
         && options.infer_packet_lag
         && !options.zero_packet_lag
     {
-        packet_lags
+        match packet_lags
             .as_ref()
-            .and_then(|lags| crate::ball_evidence::ball_intervals(observations, lags, options).ok())
-            .map(|v| {
-                v.into_iter()
-                    .filter(|i| i.velocity_residual > crate::ball_evidence::CONTACT_VELOCITY_THRESHOLD)
-                    .map(|i| (i.frame_b, i))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|lags| crate::ball_evidence::ball_intervals(observations, lags, options))
+        {
+            Some(Ok(v)) => v
+                .into_iter()
+                .filter(|i| i.velocity_residual > crate::ball_evidence::CONTACT_VELOCITY_THRESHOLD)
+                .map(|i| (i.frame_b, i))
+                .collect(),
+            Some(Err(error)) => {
+                // Without them there are no ball contacts: report it instead of silently exporting none.
+                diagnostics.ball_interval_error = Some(error.to_string());
+                HashMap::new()
+            }
+            None => HashMap::new(),
+        }
     } else {
         HashMap::new()
     };
@@ -5398,6 +5459,16 @@ pub fn convert_observations_with(
                 let slot = if let Some(key) = &car.player_key {
                     if let Some(slot) = slots.get(key).copied() {
                         actor_slots.insert(car.actor_id, (slot, car.actor_created_frame));
+                        if let Some(info) = car_slots.iter().find(|s| s.slot == slot) {
+                            let body_now = car.body_product_id.as_ref().map(|v| v.value);
+                            let team_changed = car.team.is_some_and(|team| team != info.team);
+                            let body_changed = body_now.is_some()
+                                && info.body_product_id.is_some()
+                                && body_now != info.body_product_id;
+                            if (team_changed || body_changed) && slot_changes_seen.insert((slot, car.team, body_now)) {
+                                diagnostics.slot_loadout_changes += 1;
+                            }
+                        }
                         Some((slot, car.actor_created_frame == frame.index))
                     } else if let Some(team_idx) = car.team {
                         let body_product_id = car.body_product_id.as_ref().map(|v| v.value);
@@ -6984,6 +7055,24 @@ mod tests {
         assert_eq!(demoed(&live), [false; 5]);
         assert!(live.frames.iter().all(|f| f.demolition_inferred.is_empty()));
         assert_eq!(live.frames[1].sleeping_velocity_inferred, vec![Some(1)]);
+    }
+
+    #[test]
+    fn invalid_option_combinations_and_missing_meshes_are_refused_cleanly() {
+        let mut options = ConvertOptions::default();
+        assert!(options.validate().is_ok());
+        options.exact_tick_lag_chains = false;
+        assert!(matches!(options.validate(), Err(ConvertError::InvalidOptions(_))));
+        options.align_contacts = false;
+        options.estimate_ball_car_lag_offset = false;
+        assert!(options.validate().is_ok());
+        // A mesh directory without soccar meshes is an error, not a RocketSim panic.
+        let empty = std::env::temp_dir().join(format!("empty-meshes-{}", std::process::id()));
+        std::fs::create_dir_all(empty.join("soccar")).unwrap();
+        assert!(matches!(check_soccar_meshes(&empty), Err(ConvertError::Init(_))));
+        std::fs::write(empty.join("soccar").join("field.cmf"), b"").unwrap();
+        assert!(check_soccar_meshes(&empty).is_ok());
+        std::fs::remove_dir_all(&empty).ok();
     }
 
     #[test]

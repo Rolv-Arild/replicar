@@ -324,6 +324,9 @@ pub fn write_parquet_with_tables(
     // and the replay header, which holds the conversion's diagnostics, is appended to the file's
     // key-value metadata once the pass is done.
     let cars = conversion::car_slot_count(&observed);
+    if cars == 0 {
+        return Err("the replay has no player-linked car (no car slot): there is nothing to put in the per-car Parquet columns; export it as JSONL".into());
+    }
     // A slot's column is its index: slots are numbered in the order they are created.
     let slot_index: HashMap<usize, usize> = (0..cars).map(|slot| (slot, slot)).collect();
     let properties = WriterProperties::builder()

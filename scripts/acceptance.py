@@ -36,6 +36,9 @@ Reports are `evaluate_corpus` JSON files (the build with per-replay masked posit
 null in a report (an empty sample) counts as missing. Every `check` prints the number of replays behind each row
 and a message for each row that could not be compared.
 
+Every report pair is checked before use: the same replays (path and SHA-256), the same options, no failed
+replay, and EXPECTED_REPLAYS (60; `--expect-replays N` before the mode's arguments overrides) replays each.
+
 usage:
   python scripts/acceptance.py bands <bands.json> <dev-default.json>[,<dev-aligned.json>] ...   # one group per
          development split, files of one split joined by commas: default first, aligned second
@@ -85,10 +88,42 @@ def rows_of(replay, variant):
     return out
 
 
+EXPECTED_REPLAYS = 60  # replays per split (20 per game size); `--expect-replays N` overrides
+
+
+def check_identity(d, a, default_path, aligned_path):
+    """The default and the aligned report must describe the same run: the same replays (by path and SHA-256),
+    the same conversion options, no failed replay, and the expected number of replays. Raises SystemExit."""
+    problems = []
+    by_default = {r["path"]: r for r in d["replays"]}
+    by_aligned = {r["path"]: r for r in a["replays"]}
+    if set(by_default) != set(by_aligned):
+        problems.append(
+            f"the reports hold different replays ({len(set(by_default) ^ set(by_aligned))} paths in only one of them)"
+        )
+    for path in sorted(set(by_default) & set(by_aligned)):
+        left, right = by_default[path].get("sha256"), by_aligned[path].get("sha256")
+        if not left or left != right:
+            problems.append(f"{path}: replay SHA-256 differs between the reports or is missing")
+    if d.get("options") != a.get("options"):
+        keys = sorted(k for k in set(d.get("options", {})) | set(a.get("options", {}))
+                      if d.get("options", {}).get(k) != a.get("options", {}).get(k))
+        problems.append(f"the conversion options differ between the reports: {keys}")
+    for label, report in (("default", d), ("aligned", a)):
+        if report.get("failures"):
+            problems.append(f"the {label} report lists {len(report['failures'])} failed replay(s)")
+        if len(report["replays"]) != EXPECTED_REPLAYS:
+            problems.append(f"the {label} report has {len(report['replays'])} replays, expected {EXPECTED_REPLAYS}")
+    if problems:
+        sep = "\n  "
+        sys.exit(f"{default_path} / {aligned_path}:" + sep + sep.join(problems))
+
+
 def load_split(default_path, aligned_path):
     """list of (size, {row: {q: value}}) over the replays of one split (both variants merged per replay)."""
     d = json.load(open(default_path))
     a = json.load(open(aligned_path))
+    check_identity(d, a, default_path, aligned_path)
     by_path = {r["path"]: r for r in a["replays"]}
     replays = []
     for r in d["replays"]:
@@ -368,6 +403,11 @@ def report_check(label, bands, test, rules, test_reports, null=None, verbose=Tru
 
 
 def main():
+    global EXPECTED_REPLAYS
+    if "--expect-replays" in sys.argv:
+        at = sys.argv.index("--expect-replays")
+        EXPECTED_REPLAYS = int(sys.argv[at + 1])
+        del sys.argv[at:at + 2]
     mode = sys.argv[1]
     if mode == "bands":
         out = sys.argv[2]

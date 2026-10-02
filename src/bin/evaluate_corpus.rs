@@ -1537,7 +1537,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         boxcars_version: "0.12.0",
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
-        one_step_fits: if offline_fits { "offline-fits" } else { "held-out" },
+        // The boundary-value solve and the next-packet flip fit use the packet being scored: with either on the
+        // one-step rows are in sample, whatever else is held out.
+        one_step_fits: if offline_fits || options.air_bvp || options.fit_on_next_packet {
+            "offline-fits"
+        } else {
+            "held-out"
+        },
         masked_run_options: {
             let applied = masked_conversion_options(&options, aligned_targets && aligned_predictor, Vec::new());
             MaskedRunOptions {
@@ -1925,6 +1931,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         report.one_step_kinematics_all.car.rotation_degrees.hold.p50,
     ) {
         println!("1-step car rotation deg: sim p50={sim_rot:.2}, hold p50={hold_rot:.2}");
+    }
+    // The report is written either way; a failed replay must not look like a clean run to a script.
+    if !report.failures.is_empty() {
+        return Err(format!("{} replay(s) failed (listed in the report)", report.failures.len()).into());
     }
     Ok(())
 }
