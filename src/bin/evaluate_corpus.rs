@@ -1782,6 +1782,92 @@ mod tests {
         assert!(quaternion([0.0; 4]).is_none());
     }
 
+    /// The masked observations must not depend on the withheld frames' own body, boost or pad data: perturb
+    /// those fields in the original (bodies by hundreds of UU, boost, ball) at the withheld frames and the
+    /// masked replay is byte-identical; perturbing a frame that is not withheld changes it (the test can
+    /// tell the difference). Uses a local train replay; skipped when it is absent.
+    #[test]
+    fn masked_observations_do_not_depend_on_the_withheld_frames() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(path) = fs::read_dir(root.join("replays/train/1v1"))
+            .ok()
+            .and_then(|dir| {
+                let mut paths: Vec<_> = dir
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|x| x == "replay"))
+                    .collect();
+                paths.sort();
+                paths.into_iter().next()
+            })
+        else {
+            eprintln!("skipping masked leak test: no local train replay");
+            return;
+        };
+        let bytes = fs::read(path).unwrap();
+        let replay = boxcars::ParserBuilder::new(&bytes)
+            .must_parse_network_data()
+            .parse()
+            .unwrap();
+        let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
+        let schedule = MaskSchedule { seed: None, replay_hash: 7 };
+        let shift = |body: &mut Body, by: f32| {
+            for value in body.position.iter_mut() {
+                value.value[0] += by;
+            }
+            for value in body.linear_velocity.iter_mut() {
+                value.value[1] += by;
+            }
+            for value in body.rotation_xyzw.iter_mut() {
+                value.value[2] += 0.1 * by.signum();
+            }
+            for value in body.angular_velocity_replay_units.iter_mut() {
+                value.value[0] += by;
+            }
+        };
+        let perturb = |observed: &mut ObservedReplay, withheld: bool| {
+            for index in 1..observed.frames.len() {
+                if schedule.horizon(index).is_some() != withheld {
+                    continue;
+                }
+                let frame = &mut observed.frames[index];
+                if let Some(ball) = frame.ball.as_mut() {
+                    shift(ball, 300.0);
+                }
+                for car in &mut frame.cars {
+                    shift(&mut car.body, 300.0);
+                    for boost in car.boost.iter_mut() {
+                        boost.value += 11.0;
+                    }
+                    for raw in car.boost_raw.iter_mut() {
+                        raw.value = raw.value.wrapping_add(9);
+                    }
+                }
+            }
+        };
+        let json = |observed: &ObservedReplay| -> Vec<String> {
+            observed
+                .frames
+                .iter()
+                .map(|f| serde_json::to_string(f).unwrap())
+                .collect()
+        };
+        let baseline = json(&masked_observations(&original, schedule));
+        let mut withheld_changed = original.clone();
+        perturb(&mut withheld_changed, true);
+        assert_eq!(
+            baseline,
+            json(&masked_observations(&withheld_changed, schedule)),
+            "the masked replay depends on a withheld frame's body or boost"
+        );
+        let mut other_changed = original.clone();
+        perturb(&mut other_changed, false);
+        assert_ne!(
+            baseline,
+            json(&masked_observations(&other_changed, schedule)),
+            "the perturbation of a frame that is not withheld must show"
+        );
+    }
+
     #[test]
     fn mask_schedule_selects_four_consecutive_frames_per_block() {
         for seed in [None, Some(42)] {
