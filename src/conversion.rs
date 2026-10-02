@@ -2381,9 +2381,11 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                     .or_default()
                     .push(packet);
                 let key = (car.actor_id, car.actor_created_frame);
+                // The hitbox the conversion uses (`use_loadout_hitboxes`), for the ball-car offset.
                 hitboxes.entry(key).or_insert_with(|| {
                     car.body_product_id
                         .as_ref()
+                        .filter(|_| options.use_loadout_hitboxes)
                         .and_then(|v| hitbox_for_body_product(v.value))
                         .map_or(CarBodyConfig::OCTANE, |(_, config)| config)
                 });
