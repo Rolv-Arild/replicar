@@ -14,6 +14,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use rocketsim::Mat3A;
 use sha2::{Digest, Sha256};
@@ -165,12 +166,10 @@ fn list_field(name: &str, dtype: DataType, width: usize) -> Field {
     )
 }
 
-fn schema(
-    cars: usize,
-    pads: usize,
-    header_json: Vec<u8>,
-    pad_json: Vec<u8>,
-) -> io::Result<SchemaRef> {
+/// The main file's schema. The replay header (`replay_header_json`) is not in it: it holds the
+/// conversion's diagnostics, known only after the single conversion pass, so the writer appends it
+/// to the file's key-value metadata at close, where Arrow readers merge it into the schema metadata.
+fn schema(cars: usize, pads: usize, pad_json: Vec<u8>) -> io::Result<SchemaRef> {
     let f = DataType::Float32;
     let b = DataType::Boolean;
     let fields = vec![
@@ -204,10 +203,6 @@ fn schema(
     ];
     let metadata = HashMap::from([
         ("columnar_version".to_owned(), "1".to_owned()),
-        (
-            "replay_header_json".to_owned(),
-            String::from_utf8(header_json).map_err(io::Error::other)?,
-        ),
         (
             "pad_config_json".to_owned(),
             String::from_utf8(pad_json).map_err(io::Error::other)?,
@@ -297,9 +292,9 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
     RecordBatch::try_new(schema, columns).map_err(io::Error::other)
 }
 
-/// Parse once and simulate twice: discover final fixed list widths, then write
-/// frames directly to Parquet in bounded batches. Parsed replay observations
-/// remain resident because the offline control model uses future packets.
+/// Parse once and simulate once, writing frames directly to Parquet in bounded batches (the fixed list
+/// widths come from a scan of the observations). Parsed replay observations remain resident because
+/// the offline control model uses future packets.
 pub fn write_parquet(
     bytes: &[u8],
     options: &ConvertOptions,
@@ -324,29 +319,13 @@ pub fn write_parquet_with_tables(
     if observed.frames.is_empty() {
         return Err("cannot build a columnar schema for a replay without frames".into());
     }
-    let mut pad_json = None;
-    let expected = conversion::convert_observations_with(&observed, options, |frame, _, _| {
-        if pad_json.is_none() {
-            let pads: Vec<_> = frame
-                .state
-                .boost_pads
-                .iter()
-                .map(|(config, state)| serialization::PadRecord {
-                    position: config.pos.to_array(),
-                    is_big: config.is_big,
-                    cooldown: state.cooldown,
-                    is_active: state.is_active(),
-                })
-                .collect();
-            pad_json = Some(serde_json::to_vec(&pads).map_err(io::Error::other)?);
-        }
-        Ok(())
-    })?;
-    let source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
-    let header = serialization::header_json(&observed, options, &expected, &source_sha256)?;
-    let pad_json = pad_json.unwrap_or_else(|| b"[]".to_vec());
-    let pads: Vec<serde_json::Value> = serde_json::from_slice(&pad_json)?;
-    let schema = schema(expected.car_slots.len(), pads.len(), header, pad_json)?;
+    // One conversion pass. The per-slot column widths come from a scan of the observations (the
+    // number of slots does not depend on the simulation), the pad configuration from the first frame,
+    // and the replay header, which holds the conversion's diagnostics, is appended to the file's
+    // key-value metadata once the pass is done.
+    let cars = conversion::car_slot_count(&observed);
+    // A slot's column is its index: slots are numbered in the order they are created.
+    let slot_index: HashMap<usize, usize> = (0..cars).map(|slot| (slot, slot)).collect();
     let properties = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
         .set_max_row_group_row_count(Some(BATCH_SIZE))
@@ -354,16 +333,11 @@ pub fn write_parquet_with_tables(
     let mut tables = tables_beside
         .map(|main| Tables::create(main, &properties))
         .transpose()?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(properties))?;
+    let mut file = Some(file);
+    let mut writer: Option<(ArrowWriter<File>, SchemaRef, usize)> = None;
     let mut rows = Vec::with_capacity(BATCH_SIZE);
     let mut count = 0usize;
-    let slot_index: HashMap<usize, usize> = expected
-        .car_slots
-        .iter()
-        .enumerate()
-        .map(|(index, slot)| (slot.slot, index))
-        .collect();
-    let actual = conversion::convert_observations_with(
+    let summary = conversion::convert_observations_with(
         &observed,
         options,
         |frame, observation, residuals| {
@@ -373,38 +347,55 @@ pub fn write_parquet_with_tables(
                     "nonsequential frame index",
                 ));
             }
+            if writer.is_none() {
+                let pads: Vec<_> = frame
+                    .state
+                    .boost_pads
+                    .iter()
+                    .map(|(config, state)| serialization::PadRecord {
+                        position: config.pos.to_array(),
+                        is_big: config.is_big,
+                        cooldown: state.cooldown,
+                        is_active: state.is_active(),
+                    })
+                    .collect();
+                let pad_json = serde_json::to_vec(&pads).map_err(io::Error::other)?;
+                let schema = schema(cars, pads.len(), pad_json)?;
+                let file = file.take().expect("the file is taken once");
+                let created = ArrowWriter::try_new(file, schema.clone(), Some(properties.clone()))
+                    .map_err(io::Error::other)?;
+                writer = Some((created, schema, pads.len()));
+            }
+            let (arrow_writer, schema, pad_count) = writer.as_mut().expect("created above");
             if let Some(tables) = tables.as_mut() {
                 tables.add_frame(frame, observation)?;
             }
-            rows.push(row(
-                frame,
-                observation,
-                residuals,
-                &slot_index,
-                expected.car_slots.len(),
-                pads.len(),
-            )?);
+            rows.push(row(frame, observation, residuals, &slot_index, cars, *pad_count)?);
             count += 1;
             if rows.len() == BATCH_SIZE {
-                writer
-                    .write(&batch(
-                        &rows,
-                        schema.clone(),
-                        expected.car_slots.len(),
-                        pads.len(),
-                    )?)
+                arrow_writer
+                    .write(&batch(&rows, schema.clone(), cars, *pad_count)?)
                     .map_err(io::Error::other)?;
                 rows.clear();
             }
             Ok(())
         },
     )?;
-    if actual != expected {
-        return Err("conversion passes differed".into());
+    if summary.car_slots.len() != cars
+        || summary.car_slots.iter().enumerate().any(|(index, slot)| slot.slot != index)
+    {
+        return Err("the conversion's car slots differ from the slot scan".into());
     }
+    let (mut writer, schema, pad_count) = writer.ok_or("the conversion produced no frames")?;
     if !rows.is_empty() {
-        writer.write(&batch(&rows, schema, expected.car_slots.len(), pads.len())?)?;
+        writer.write(&batch(&rows, schema, cars, pad_count)?)?;
     }
+    let source_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
+    let header = serialization::header_json(&observed, options, &summary, &source_sha256)?;
+    writer.append_key_value_metadata(KeyValue::new(
+        "replay_header_json".to_owned(),
+        String::from_utf8(header)?,
+    ));
     writer.close()?;
     let table_rows = match tables {
         Some(tables) => tables.finish()?,
@@ -454,7 +445,7 @@ mod tests {
 
     #[test]
     fn original_columns_keep_their_positions_and_scoreboard_columns_follow() {
-        let schema = schema(1, 1, b"{}".to_vec(), b"[]".to_vec()).unwrap();
+        let schema = schema(1, 1, b"[]".to_vec()).unwrap();
         let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names[..22],
@@ -497,7 +488,7 @@ mod tests {
 
     #[test]
     fn a_missing_scoreboard_or_clock_value_is_null_not_zero() {
-        let schema = schema(1, 1, b"{}".to_vec(), b"[]".to_vec()).unwrap();
+        let schema = schema(1, 1, b"[]".to_vec()).unwrap();
         let rows = [
             blank_row(
                 0,

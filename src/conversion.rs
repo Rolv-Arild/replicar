@@ -4608,6 +4608,22 @@ pub fn convert_bytes(
     Ok(output)
 }
 
+/// The number of car slots a conversion of `observations` creates, without simulating: one per player
+/// key that appears on a primary linked car with a known team (the rule `convert_observations_with`
+/// adds a slot by). The order of the slots depends on the packet lags, their number does not, so a
+/// writer can size per-slot columns before the single conversion pass.
+pub fn car_slot_count(observations: &ObservedReplay) -> usize {
+    let mut keys: HashSet<&str> = HashSet::new();
+    for frame in &observations.frames {
+        for car in observations::primary_linked_cars(frame) {
+            if let (Some(key), Some(_)) = (car.player_key.as_deref(), car.team) {
+                keys.insert(key);
+            }
+        }
+    }
+    keys.len()
+}
+
 /// Convert observations with RocketSim. The mesh directory is initialized once per process.
 pub fn convert_observations(
     observations: ObservedReplay,
