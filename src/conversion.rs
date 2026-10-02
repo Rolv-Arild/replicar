@@ -62,6 +62,32 @@ pub enum FlipCancelSource {
     ExternalRuleNext,
 }
 
+/// Which lag a packet shared by two consecutive exact-chain runs of one actor gets. When a pair
+/// (a, b) cannot extend the current run, a new run starts with `a` as its first packet, so `a` is in
+/// both runs with two different lags (1-4 ticks apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum LagBoundary {
+    /// The later run's lag (the later run overwrites the earlier one); a car's per-frame median
+    /// counts both lags. The original behaviour.
+    #[default]
+    Later,
+    /// The run that ended at the packet keeps it; the later run only uses it as its start constraint.
+    Earlier,
+    /// The run with more packets keeps it (a tie goes to the later run).
+    Longer,
+}
+
+impl LagBoundary {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "later" => Self::Later,
+            "earlier" => Self::Earlier,
+            "longer" => Self::Longer,
+            _ => return None,
+        })
+    }
+}
+
 impl FlipCancelSource {
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
@@ -209,6 +235,8 @@ pub struct ConvertOptions {
     /// pairs more than 0.25 tick from one), so lag differences are exact instead of independently
     /// rounded estimates, and fix the absolute tick with the packets' real-time windows.
     pub exact_tick_lag_chains: bool,
+    /// Which run owns a packet shared by two consecutive exact-chain runs (`LagBoundary`).
+    pub lag_boundary: LagBoundary,
     /// Continue a ball chain across a hit: the exact free-flight paths before and after it meet at
     /// the hit, which fixes the ticks between the two packets (`ball_hit_interval_ticks`). Joins
     /// the ball runs on both sides of a hit into one run with one lag level.
@@ -320,6 +348,7 @@ impl Default for ConvertOptions {
             apply_hit_extra_impulse: false,
             limit_reported_velocities: true,
             exact_tick_lag_chains: true,
+            lag_boundary: LagBoundary::Later,
             ball_hit_chains: true,
             ball_car_lag_offset: None,
             estimate_ball_car_lag_offset: true,
@@ -1872,6 +1901,38 @@ struct RawRun {
     start: i64,
 }
 
+/// Per run and entry: whether the run owns that packet's lag. Two consecutive runs of one actor can
+/// share a packet (the last of the first and the first of the second); `rule` picks one owner. All
+/// entries are owned under `Later`, which keeps the original behaviour (the later run overwrites the
+/// earlier and both lags enter a car's per-frame median).
+fn owned_entries(runs: &[RawRun], rule: LagBoundary) -> Vec<Vec<bool>> {
+    let mut owned: Vec<Vec<bool>> = runs.iter().map(|run| vec![true; run.entries.len()]).collect();
+    if rule == LagBoundary::Later {
+        return owned;
+    }
+    for i in 1..runs.len() {
+        let (previous, next) = (&runs[i - 1], &runs[i]);
+        let (Some(last), Some(first)) = (previous.entries.last(), next.entries.first()) else {
+            continue;
+        };
+        if last.0 != first.0 {
+            continue;
+        }
+        let keep_earlier = match rule {
+            LagBoundary::Earlier => true,
+            LagBoundary::Longer => previous.entries.len() > next.entries.len(),
+            LagBoundary::Later => false,
+        };
+        if keep_earlier {
+            owned[i][0] = false;
+        } else {
+            let end = owned[i - 1].len() - 1;
+            owned[i - 1][end] = false;
+        }
+    }
+    owned
+}
+
 /// Places the ball runs relative to the car runs. A car's physical tick in a frame is
 /// `tick - lag` with a lag spread uniformly over the frame window, so a car run is already
 /// centred by its own window bounds (`chain_packet_lags_exact`). In one frame the ball's physical
@@ -2424,6 +2485,8 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     }
     let mut per_frame: Vec<Vec<f32>> = vec![Vec::new(); frames.len()];
     let mut car_runs: Vec<((i32, usize), RawRun)> = Vec::new();
+    // Parallel to `car_runs`: which entries each run owns (`owned_entries`).
+    let mut car_owned: Vec<Vec<bool>> = Vec::new();
     for ((actor, created), packets) in &chains {
         let mut runs: Vec<RawRun> = Vec::new();
         chain_packet_lags(
@@ -2451,6 +2514,7 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
                 lags.car_actor.insert((*actor, *created, frame), lag);
             },
         );
+        car_owned.extend(owned_entries(&runs, options.lag_boundary));
         car_runs.extend(runs.into_iter().map(|run| ((*actor, *created), run)));
     }
     // A replay saved by the server (host) has every packet fresh at its frame's own tick: its chain
@@ -2485,19 +2549,40 @@ pub fn infer_packet_lags(observations: &ObservedReplay, options: &ConvertOptions
     lags.ball_car_offset = offset;
     lags.bridged_hits = ball_hits.borrow().len();
     if let Some(offset) = offset {
-        place_ball_runs(&mut ball_runs, &car_runs, offset);
+        if options.lag_boundary == LagBoundary::Later {
+            place_ball_runs(&mut ball_runs, &car_runs, offset);
+        } else {
+            // A packet shared by two runs counts once in the frame's car ticks.
+            let owned_car_runs: Vec<((i32, usize), RawRun)> = car_runs
+                .iter()
+                .zip(&car_owned)
+                .map(|((key, run), owned)| {
+                    let mut run = run.clone();
+                    let mut flags = owned.iter();
+                    run.entries.retain(|_| flags.next().copied().unwrap_or(true));
+                    (*key, run)
+                })
+                .collect();
+            place_ball_runs(&mut ball_runs, &owned_car_runs, offset);
+        }
     }
     // Exact runs: the lag of an entry is the frame's tick minus its physical tick.
     let first_time = f64::from(frames.first().map_or(0.0, |frame| frame.time));
     let timeline = |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
-    for run in &ball_runs {
-        for &(frame, k) in &run.entries {
-            lags.ball[frame] = Some((timeline(frame) - (run.start + k)).max(0) as f32);
+    let ball_owned = owned_entries(&ball_runs, options.lag_boundary);
+    for (run, owned) in ball_runs.iter().zip(&ball_owned) {
+        for (&(frame, k), &own) in run.entries.iter().zip(owned) {
+            if own {
+                lags.ball[frame] = Some((timeline(frame) - (run.start + k)).max(0) as f32);
+            }
         }
     }
-    for ((actor, created), run) in &car_runs {
+    for (((actor, created), run), owned) in car_runs.iter().zip(&car_owned) {
         let index = lags.car_runs.len();
-        for &(frame, k) in &run.entries {
+        for (&(frame, k), &own) in run.entries.iter().zip(owned) {
+            if !own {
+                continue;
+            }
             let lag = (timeline(frame) - (run.start + k)).max(0) as f32;
             per_frame[frame].push(lag);
             lags.car_actor.insert((*actor, *created, frame), lag);
@@ -6549,6 +6634,41 @@ mod tests {
         for i in 0..3 {
             assert!((p0[i] - a.pos[i]).abs() < 1e-2 && (v0[i] - a.vel[i]).abs() < 1e-2);
         }
+    }
+
+    /// Two runs share frame 5: the first has three packets, the second two. Each rule picks one owner of
+    /// the shared packet; `Later` keeps every entry (the second run overwrites the first).
+    #[test]
+    fn a_packet_shared_by_two_runs_has_one_owner() {
+        let run = |frames: &[usize]| RawRun {
+            entries: frames.iter().map(|&f| (f, 0)).collect(),
+            lo: 0,
+            hi: 0,
+            start: 0,
+        };
+        let runs = [run(&[3, 4, 5]), run(&[5, 6]), run(&[8, 9])];
+        assert_eq!(
+            owned_entries(&runs, LagBoundary::Later),
+            vec![vec![true; 3], vec![true; 2], vec![true; 2]]
+        );
+        assert_eq!(
+            owned_entries(&runs, LagBoundary::Earlier),
+            vec![vec![true; 3], vec![false, true], vec![true; 2]]
+        );
+        assert_eq!(
+            owned_entries(&runs, LagBoundary::Longer),
+            vec![vec![true; 3], vec![false, true], vec![true; 2]]
+        );
+        let runs = [run(&[3, 4]), run(&[4, 5, 6])];
+        assert_eq!(
+            owned_entries(&runs, LagBoundary::Longer),
+            vec![vec![true, false], vec![true; 3]]
+        );
+        let tied = [run(&[3, 4]), run(&[4, 5])];
+        assert_eq!(
+            owned_entries(&tied, LagBoundary::Longer),
+            vec![vec![true, false], vec![true; 2]]
+        );
     }
 
     #[test]

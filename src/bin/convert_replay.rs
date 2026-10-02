@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let mut mesh_path = None;
     let mut event_tables = true;
-    for arg in args {
+    while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
         } else if arg == "--inferred-jump" {
@@ -34,6 +34,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.gate_jump_on_observed_impulse = false;
         } else if arg == "--no-align-contacts" {
             options.align_contacts = false;
+        } else if arg == "--lag-boundary" {
+            let name = args.next().ok_or("--lag-boundary requires a name")?;
+            options.lag_boundary =
+                replay_to_rocketsim::conversion::LagBoundary::from_name(&name.to_string_lossy())
+                    .ok_or("--lag-boundary: later, earlier or longer")?;
         } else if arg == "--no-event-tables" {
             event_tables = false;
         } else if arg == "--octane-hitbox" {
@@ -44,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--no-event-tables]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier|longer] [--no-event-tables]".into());
         }
     }
     if let Some(path) = mesh_path {
