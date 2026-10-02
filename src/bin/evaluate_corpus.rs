@@ -442,6 +442,13 @@ struct Report {
     boxcars_version: &'static str,
     rocketsim_revision: &'static str,
     options: ConvertOptions,
+    /// How the one-step residuals were produced: `held-out` (the flip cancel, air control lookahead, dodge
+    /// first-packet tick and contact alignment, which would each use the packet being scored, are off) or
+    /// `offline-fits` (in-sample for rotation and angular velocity).
+    one_step_fits: &'static str,
+    /// For `--aligned-targets`: `lag-inferring predictor` or `raw predictor` (the default masked predictor),
+    /// and that the targets come from the full offline conversion; empty otherwise.
+    aligned_variant: &'static str,
     replays: Vec<ReplayReport>,
     failures: Vec<Failure>,
     by_game_size: BTreeMap<String, BodySummary>,
@@ -735,11 +742,10 @@ fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> Obs
             frame.ball = Some(previous_ball);
         }
         for car in &mut frame.cars {
-            if let Some(prior) = previous
-                .cars
-                .iter()
-                .find(|prior| prior.actor_id == car.actor_id)
-            {
+            // The same car lifetime: an actor id reused in consecutive frames is another car.
+            if let Some(prior) = previous.cars.iter().find(|prior| {
+                prior.actor_id == car.actor_id && prior.actor_created_frame == car.actor_created_frame
+            }) {
                 car.body = prior.body.clone();
                 car.boost = prior.boost.clone();
                 car.boost_raw = prior.boost_raw.clone();
@@ -749,6 +755,30 @@ fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> Obs
     masked
 }
 
+/// Time in seconds from the stale packet's tick (its frame's timeline tick minus the lag the masked
+/// conversion inferred for it) to the target frame's tick. The linear baseline extrapolates over this
+/// instead of the raw frame-time difference, so that it gets exactly the timing knowledge of the
+/// simulated prediction (the masked conversion's own lags, inferred without the withheld frames), not
+/// the offline lags the aligned target is built from. Without inferred lags it is the raw difference.
+fn lag_corrected_dt(
+    output: &ConversionOutput,
+    actor: Option<i32>,
+    stale_frame: usize,
+    index: usize,
+) -> Option<f32> {
+    let lag = output
+        .frames
+        .get(stale_frame)?
+        .packet_lags
+        .iter()
+        .find(|lag| lag.actor_id == actor)?
+        .ticks;
+    let stale_tick = output.frames[stale_frame].timeline_tick as f64 - lag as f64;
+    let target_tick = output.frames.get(index)?.timeline_tick as f64;
+    Some(((target_tick - stale_tick) / 120.0) as f32)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn add_masked_error(
     samples: &mut Samples,
     actual: &Body,
@@ -756,6 +786,8 @@ fn add_masked_error(
     index: usize,
     predicted: [f32; 3],
     frames: &[replay_to_rocketsim::observations::Frame],
+    // The masked conversion and the actor (None: the ball), for the lag-corrected baseline.
+    timing: Option<(&ConversionOutput, Option<i32>)>,
 ) {
     let (Some(position), Some(previous)) = (&actual.position, &stale.position) else {
         return;
@@ -764,9 +796,12 @@ fn add_masked_error(
         return;
     }
     let dt = frames[index].time - frames[previous.frame].time;
+    let linear_dt = timing
+        .and_then(|(output, actor)| lag_corrected_dt(output, actor, previous.frame, index))
+        .unwrap_or(dt);
     let linear = stale.linear_velocity.as_ref().map(|velocity| {
         let extrapolated =
-            std::array::from_fn(|axis| previous.value[axis] + velocity.value[axis] * dt);
+            std::array::from_fn(|axis| previous.value[axis] + velocity.value[axis] * linear_dt);
         distance(extrapolated, position.value)
     });
     samples.add(&PositionResidual {
@@ -871,6 +906,7 @@ fn masked_metrics(
                 index,
                 state.ball.phys.pos.to_array(),
                 &original.frames,
+                aligned.map(|_| (conversion, None)),
             );
             add_masked_kinematics(
                 &mut by_kinematics.ball,
@@ -921,6 +957,7 @@ fn masked_metrics(
                 index,
                 predicted.phys.pos.to_array(),
                 &original.frames,
+                aligned.map(|_| (conversion, Some(car.actor_id))),
             );
             add_masked_kinematics(
                 &mut by_kinematics.car,
@@ -1120,6 +1157,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut meshes = None;
     let mut mask_seed = None;
     let mut aligned_targets = false;
+    // Whether the masked predictor infers packet lags (and so also uses the lag-dependent ground and jump
+    // fits) in the aligned variant. `--aligned-targets-raw-predictor` scores the unchanged default
+    // predictor against the aligned targets, separating the cleaner target from the better predictor.
+    let mut aligned_predictor = true;
+    // The one-step residuals are held out by default: the fits that choose a value using the packet that is
+    // then scored are switched off for that conversion (`--offline-fits` keeps them: reconstruction quality,
+    // in-sample for the rotation and angular velocity).
+    let mut offline_fits = false;
     let mut rotation_trace_path = None;
     while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
@@ -1279,6 +1324,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.fit_jump_timing = true;
         } else if arg == "--no-fit-jump-timing" {
             options.fit_jump_timing = false;
+        } else if arg == "--offline-fits" {
+            offline_fits = true;
+        } else if arg == "--aligned-targets-raw-predictor" {
+            aligned_targets = true;
+            aligned_predictor = false;
         } else if arg == "--aligned-targets" {
             aligned_targets = true;
         } else if arg == "--no-infer-packet-lag" {
@@ -1314,7 +1364,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl]".into());
         }
     }
     if let Some(meshes) = meshes {
@@ -1342,6 +1392,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         boxcars_version: "0.12.0",
         rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
+        one_step_fits: if offline_fits { "offline-fits" } else { "held-out" },
+        aligned_variant: match (aligned_targets, aligned_predictor) {
+            (false, _) => "",
+            (true, true) => "lag-inferring predictor, offline targets",
+            (true, false) => "raw predictor, offline targets",
+        },
         replays: Vec::new(),
         failures: Vec::new(),
         by_game_size: BTreeMap::new(),
@@ -1359,6 +1415,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         masked_car_angular_by_altitude: BTreeMap::new(),
         worst_car_regret_uu: Vec::new(),
     };
+    let mut strict_options = options.clone();
+    if !offline_fits {
+        strict_options.flip_cancel_holdout = true;
+        strict_options.infer_air_controls_from_lookahead = false;
+        strict_options.infer_dodge_first_packet_tick = false;
+        strict_options.align_contacts = false;
+    }
     let mut masked_by_horizon: BTreeMap<usize, ByBody> = BTreeMap::new();
     let mut masked_by_size: BTreeMap<String, BTreeMap<usize, ByBody>> = BTreeMap::new();
     let mut kinematics_by_horizon: BTreeMap<usize, KinematicsByBody> = BTreeMap::new();
@@ -1370,7 +1433,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (index, (size, path)) in replay_paths.iter().enumerate() {
         match fs::read(path)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| convert_bytes(&bytes, &options).map_err(|error| error.to_string()))
+            .and_then(|bytes| convert_bytes(&bytes, &strict_options).map_err(|error| error.to_string()))
         {
             Ok(conversion) => {
                 let mut own = ByBody::default();
@@ -1454,7 +1517,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // A withheld target's own packet lag is unknowable, so masked prediction keeps
                 // every state at its frame time; packet-lag inference is an offline improvement
                 // measured by the one-step residuals instead.
-                masked_options.infer_packet_lag = aligned_targets && options.infer_packet_lag;
+                masked_options.infer_packet_lag =
+                    aligned_targets && aligned_predictor && options.infer_packet_lag;
                 // A withheld span has no later boost update to correct a simulated pickup with, so the
                 // causal prediction keeps the simulated pad pickups.
                 masked_options.block_sim_pad_pickups = false;
@@ -1469,6 +1533,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .map(|index| schedule.horizon(index).is_some())
                         .collect(),
                 ));
+                // The aligned targets come from the full offline conversion (the best estimate of the state at
+                // the target tick), not from the held-out one scored above.
+                let offline_target = if aligned_targets && !offline_fits {
+                    match fs::read(path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| convert_bytes(&bytes, &options).map_err(|error| error.to_string()))
+                    {
+                        Ok(target) => Some(target),
+                        Err(error) => {
+                            report.failures.push(Failure {
+                                path: path.display().to_string(),
+                                error: format!("aligned target conversion: {error}"),
+                            });
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 match convert_observations(masked, &masked_options) {
                     Ok(masked_conversion) => {
                         let mut own_masked = BTreeMap::new();
@@ -1487,7 +1570,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &mut own_masked_kinematics,
                             &mut own_boost,
                             &mut own_angular_by_altitude,
-                            aligned_targets.then_some(&conversion),
+                            aligned_targets.then(|| offline_target.as_ref().unwrap_or(&conversion)),
                         );
                         if let Some(writer) = &mut rotation_trace {
                             for trace in own_rotation_traces {

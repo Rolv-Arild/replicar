@@ -11,7 +11,7 @@ for path in sys.argv[1:]:
     print(f"== {path}  ({d['split_directory']}, rocketsim {d['rocketsim_revision'][:7]}, {len(d['replays'])} replays, {len(d['failures'])} failures)")
     for obj in ('car', 'ball'):
         a = d['all'][obj]
-        print(f"  {obj} masked position error UU p50/p90/p99: simulated {q(a['simulated'])} | hold {q(a['hold'])} | linear {q(a['linear'])}  (n {a['simulated']['count']})")
+        print(f"  {obj} pre-correction position error (one-step, at fresh packets) UU p50/p90/p99: simulated {q(a['simulated'])} | hold {q(a['hold'])} | linear {q(a['linear'])}  (n {a['simulated']['count']})")
     k = d['one_step_kinematics_all']
     for obj in ('car', 'ball'):
         v = k[obj]

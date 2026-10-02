@@ -63,10 +63,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(
         env::args_os()
             .nth(1)
-            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--no-infer-flip-cancel]")?,
+            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--no-infer-flip-cancel] [--final-assessment]")?,
     );
-    if path.to_string_lossy().contains("test") {
-        return Err("refusing to inspect a path containing 'test'".into());
+    // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
+    if path.to_string_lossy().contains("test") && !env::args_os().any(|arg| arg == "--final-assessment") {
+        return Err("refusing to inspect a path containing 'test' (pass --final-assessment for the frozen run)".into());
     }
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
@@ -109,20 +110,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.apply_observed_demolitions =
         !env::args_os().any(|arg| arg == "--no-observed-demolitions");
     options.per_car_control_shift = !env::args_os().any(|arg| arg == "--no-per-car-control-shift");
+    // As ConvertOptions::default() (on), like evaluate_corpus.
     options.estimate_ball_car_lag_offset =
-        env::args_os().any(|arg| arg == "--estimate-ball-car-offset");
+        !env::args_os().any(|arg| arg == "--no-estimate-ball-car-offset");
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     // Parity of each car's dodge counter at its previous residual, to spot the first packet after
     // an activation.
-    let mut previous_dodge_parity: std::collections::HashMap<i32, bool> = Default::default();
-    let mut previous_jump_parity: BTreeMap<i32, bool> = BTreeMap::new();
-    let mut previous_altitude: std::collections::HashMap<i32, f32> = Default::default();
+    // Keyed by car lifetime (actor id and creation frame) and cleared per replay, so an id that is
+    // reused or appears in the next replay does not inherit another car's previous packet.
+    let mut previous_dodge_parity: std::collections::HashMap<(i32, usize), bool> = Default::default();
+    let mut previous_jump_parity: BTreeMap<(i32, usize), bool> = BTreeMap::new();
+    let mut previous_altitude: std::collections::HashMap<(i32, usize), f32> = Default::default();
     let mut skipped = 0usize;
     let (mut activations, mut fitted) = (0usize, 0usize);
     let mut used = 0usize;
 
     for replay_path in replay_paths(&path)? {
         let output = convert_bytes(&fs::read(&replay_path)?, &options)?;
+        previous_dodge_parity.clear();
+        previous_jump_parity.clear();
+        previous_altitude.clear();
         activations += output.diagnostics.dodge_activations;
         fitted += output.diagnostics.dodge_starts_fitted;
         let frames = &output.observations.frames;
@@ -160,15 +167,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         || odd(&c.inputs.flip_car_active_raw)
                 };
                 let dodge_odd_now = odd(&car.inputs.dodge_active_raw);
+                let lifetime = (actor, car.actor_created_frame);
                 let first_after_activation =
-                    dodge_odd_now && previous_dodge_parity.get(&actor).copied() == Some(false);
-                previous_dodge_parity.insert(actor, dodge_odd_now);
+                    dodge_odd_now && previous_dodge_parity.get(&lifetime).copied() == Some(false);
+                previous_dodge_parity.insert(lifetime, dodge_odd_now);
                 let jump_odd_now = odd(&car.inputs.jump_active_raw);
                 let first_jump =
-                    jump_odd_now && previous_jump_parity.get(&actor).copied() == Some(false);
-                previous_jump_parity.insert(actor, jump_odd_now);
+                    jump_odd_now && previous_jump_parity.get(&lifetime).copied() == Some(false);
+                previous_jump_parity.insert(lifetime, jump_odd_now);
                 let previous_z =
-                    previous_altitude.insert(actor, residual.altitude_z.unwrap_or(f32::NAN));
+                    previous_altitude.insert(lifetime, residual.altitude_z.unwrap_or(f32::NAN));
                 let flipping = active_counter(car) || previous.is_some_and(active_counter);
                 let subtype = if first_after_activation {
                     match previous_z {
