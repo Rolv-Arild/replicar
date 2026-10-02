@@ -424,6 +424,8 @@ struct ReplayReport {
     position_uu: BodySummary,
     kinematics: KinematicsByBodySummary,
     masked_kinematics_by_horizon_frames: BTreeMap<usize, KinematicsByBodySummary>,
+    /// The masked position errors of this replay alone, by horizon (for per-replay comparisons).
+    masked_position_uu_by_horizon_frames: BTreeMap<usize, BodySummary>,
 }
 
 #[derive(Serialize)]
@@ -1439,6 +1441,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut own = ByBody::default();
                 let mut own_kinematics = KinematicsByBody::default();
                 let mut own_masked_kinematics_report = BTreeMap::new();
+                let mut own_masked_position_report = BTreeMap::new();
                 for residual in &conversion.position_residuals {
                     own.add(residual);
                     own_kinematics.add_residual(residual);
@@ -1588,6 +1591,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .or_default()
                                 .extend(&samples);
                         }
+                        own_masked_position_report = own_masked
+                            .iter()
+                            .map(|(&horizon, samples)| (horizon, samples.summary()))
+                            .collect();
                         for (horizon, samples) in own_masked {
                             masked_by_horizon
                                 .entry(horizon)
@@ -1648,6 +1655,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     position_uu: own.summary(),
                     kinematics: own_kinematics.summary(),
                     masked_kinematics_by_horizon_frames: own_masked_kinematics_report,
+                    masked_position_uu_by_horizon_frames: own_masked_position_report,
                 });
             }
             Err(error) => report.failures.push(Failure {
