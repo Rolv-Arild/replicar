@@ -231,7 +231,13 @@ def _metadata(path: str | Path) -> dict[bytes, bytes]:
     _, ipc, pq = _arrow_modules()
     if _kind(path) == "arrow":
         return ipc.open_file(str(path)).schema.metadata or {}
-    return pq.ParquetFile(str(path)).schema_arrow.metadata or {}
+    parquet = pq.ParquetFile(str(path))
+    # The Rust writer converts in one pass and appends ``replay_header_json`` (which holds the
+    # conversion's diagnostics) to the file's key-value metadata at close; PyArrow's ``schema_arrow``
+    # only carries the schema metadata written when the file was opened.
+    metadata = dict(parquet.schema_arrow.metadata or {})
+    metadata.update(parquet.metadata.metadata or {})
+    return metadata
 
 
 def read_columnar_header(path: str | Path) -> dict[str, Any]:

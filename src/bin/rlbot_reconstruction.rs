@@ -357,7 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     covered
                         .entry(name.clone())
                         .or_default()
-                        .push((start, start + e.cancel as i64));
+                        .push((start, start + e.span_ticks.unwrap_or(0) as i64));
                 }
             }
         }

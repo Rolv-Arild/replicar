@@ -964,7 +964,7 @@ mod event_tests {
     #[test]
     fn dodge_refresh_counter_increases_are_events() {
         let mut tracker = Tracker::default();
-        let mut observe = |tracker: &mut Tracker, actor: i32, value: i32| {
+        let observe = |tracker: &mut Tracker, actor: i32, value: i32| {
             let mut events = Vec::new();
             tracker.observe(
                 ActorId(actor),

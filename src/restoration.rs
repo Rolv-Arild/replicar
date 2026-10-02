@@ -179,9 +179,11 @@ pub fn car_slots_from_header_json(json: &[u8]) -> Result<Vec<CarSlot>, Box<dyn E
     Ok(header.car_slots)
 }
 
-/// Rebuild an exact detached soccar `ArenaState` snapshot. This preserves the
-/// serialized tick and all public soccar ball/car/pad state fields. It does not
-/// restore RocketSim's private live Arena physics caches or RNG state.
+/// Rebuild a detached soccar `ArenaState` snapshot. This preserves the serialized
+/// tick and the public soccar ball/car/pad state fields, except the ray hits of
+/// `wheels_with_contact`: the record keeps only whether each wheel touches, so a
+/// touching wheel gets a default `RaycastHitInfo`. It does not restore RocketSim's
+/// private live Arena physics caches or RNG state.
 pub fn restore_soccar_state(
     record: &StateRecord,
     slots: &[CarSlot],
