@@ -71,7 +71,7 @@ The columnar format keeps complete observations, simulated events, residuals, an
 The Rust CLI also writes typed per-record tables next to the main file, so the scoreboard, touches, contacts, pickups, fitted inputs, and events need no per-frame JSON parsing (pass `--no-event-tables` to skip them). The main file gets four more columns appended after `frame_json` (existing columns and positions are unchanged): `scoreboard_period` and `scoreboard_clock_state` (dictionary-encoded strings, read by PyArrow as categoricals) and nullable Float32 `scoreboard_seconds_remaining` and `scoreboard_overtime_seconds`. For `game.parquet` the tables are `game.touches.parquet`, `game.ball_contacts.parquet`, `game.boost_pickups.parquet`, `game.fitted_inputs.parquet`, `game.packet_lags.parquet`, `game.events.parquet` (goals and demolitions) and `game.pad_pickups.parquet`, one row per record with the `frame` it belongs to; they are always written, empty when a replay has none. A null is an unknown or inapplicable value, never zero. [RESULTS.md](RESULTS.md) ("Parquet columns and record tables") lists every column.
 
 ```python
-import pyarrow.parquet as pq
+import pyarrow.parquet as pq  # .to_pandas() also needs pandas, which requirements-columnar.txt does not install
 
 frames = pq.read_table("target/example.parquet", columns=["frame", "scoreboard_clock_state", "scoreboard_seconds_remaining"])
 touches = pq.read_table("target/example.touches.parquet").to_pandas()    # frame, car_slot, tick, contact_point
