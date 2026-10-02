@@ -74,16 +74,25 @@ cargo build --release --bins
 ./target/release/check_scoreboard.exe replays/test
 ./target/release/count_demolitions.exe replays/test
 python scripts/summarize_reference.py target/test-default.json target/test-aligned.json target/test-aligned-raw.json target/test-offline.json
+python scripts/acceptance.py check target/acceptance-bands.json target/test-default.json target/test-aligned.json
 ```
+
+The bands are built from the development reports (60 train and 60 validation replays, default and aligned runs of the
+build that is frozen) before the test run, with
+`python scripts/acceptance.py bands target/acceptance-bands.json <train-default>,<train-aligned> <val-default>,<val-aligned>`;
+`scripts/run_reference.sh` makes the four reports.
 
 ## 4. Held-out accuracy: development reference and acceptance
 
-Development reference from the validation split at commit `2e32781` (reports in `target/ref-fix/*.json`; a
-run is `evaluate_corpus replays/validation <report> [flag]`, summarised by `python scripts/summarize_reference.py`).
+Development reference at commit `8acdb70` (reports in `target/ref-final/*.json` for train and validation, default and
+aligned; a run is `evaluate_corpus replays/<split> <report> [flag]`, summarised by `python scripts/summarize_reference.py`).
 It is the commit after the independent review of 2026-10-02 (RESULTS.md, "Independent review of the evaluators"),
 which changed the evaluators: the one-step rows are now held out by default and the linear baseline of the aligned
 variant is lag-corrected, so the earlier reference (`96d1e0a`, `3f91f6d`) is not comparable on the rows marked *.
-All 60 validation replays convert. The train split was not re-run for these variants.
+All 120 train and validation replays convert. The pooled numbers in the table are validation; train is close but not
+within a few percent everywhere (the default masked car position at horizon 1 is 17.1 / 44.6 / 76 UU on train against
+16.6 / 41.0 / 75, p90 +9%; the aligned masked ball 0.00 / 14.5 / 31 against 0.00 / 13.3 / 29, p90 +9%), which is why the
+acceptance below is not a fixed percentage.
 The table was regenerated at the merged tip `2f5a37b` (after the second review pass and the dodge-refresh correction;
 reports in `target/ref-merge/`): every row above is unchanged to the printed precision (the one-step ball velocity
 p99 moves 406 to 402 UU/s).
@@ -119,17 +128,27 @@ error the simulation had removed). With that baseline the simulation's lead for 
 p50 and 24 to 16.5 at p90; for the ball the linear baseline is within 1 UU at p50 and 15.6 against 13.3 UU
 at p90 at horizon 1.
 
-Acceptance, per metric and per game size (1v1, 2v2, 3v3), for the test split against validation:
-* the p90 and p99 of every row above (starred rows against their held-out values) are within +10% of the validation values (the p50 within +0.5 UU
-  or +10%, whichever is larger);
-* the ordering simulated < linear < hold of the masked rows holds at every horizon and size (for the aligned
-  ball at horizon 1 the margin to linear at p90 is under 15%; a test-split reversal there is within the
-  expected noise and is reported, not counted as a failure);
-* no individual replay has a car p90 above three times the validation p90 of its game size, and any that
-  has is listed with its cause when it can be found from its own data (checkable from the per-replay report
-  for the one-step position and the masked kinematics rows; the per-replay report has no masked position
-  quantiles, so the masked position rows are checked per game size only);
-* 60 of 60 replays convert; time per replay at most the development maximum plus 50% (development: mean 9 s, maximum 24 s per replay with four converting in parallel, 120 replays, before the speedups of 2026-10-01; the reference run now takes 271 / 478 s on train and 279 / 486 s on validation, default / aligned, against 395 / 815 and 346 / 625 s; re-measure the per-replay maximum at the freeze).
+Acceptance. A fixed tolerance (such as +10% of the validation value) would be arbitrary here: two 60-replay splits
+of the same corpus differ by up to 9% at p90 (above). The bands are therefore derived from the spread of the
+development replays themselves (`scripts/acceptance.py`; its docstring has the method):
+* **Rows and bands.** For each row (the five one-step car and ball rows and the masked car and ball position at
+  horizons 1 to 4 in the default and aligned variants) and each of p50, p90 and p99, the statistic of a split is the
+  median over its replays of each replay's own quantile. The band is a bootstrap prediction interval for that
+  statistic over a new 60-replay split (20 per game size), from the 120 development replays; the car position rows
+  also have a band per game size. A test statistic outside its band is a finding. About 4 of the 84 comparisons are
+  expected outside by chance alone, so the number is judged against that and not against zero. Calibration
+  check (`scripts/acceptance.py selfcheck`): bands from train against validation had 3 of 84 outside, bands from
+  validation against train 3 of 84. Rows whose simulated position error is below 0.01 UU in the development
+  median (the replay's own position resolution) are not graded.
+* **Ordering.** Simulated < linear < hold of the masked rows is graded where it holds at that horizon, object and
+  quantile (p50, p90) in both development splits (30 of the possible 32 do; it does not hold for the default
+  masked ball at p50, where a linear extrapolation is as good as the simulation), and the test split must show
+  the same order.
+* **Outlier replays.** Test replays whose own car p90 (one-step position, masked horizon 1 default and aligned)
+  exceeds that of every development replay of the same game size are listed with a cause when one can be found
+  from their own data.
+* **Robustness.** Every test replay converts (60 of 60). Wall time and the hardware are reported (development:
+  train 253 / 701 s and validation 264 / 731 s for the default and the aligned run), with no threshold.
 A miss is reported as a finding, not as a failure of the assessment.
 
 ## 5. Truth-free consistency checks (reported, not graded against validation)

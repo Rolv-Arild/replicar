@@ -10,8 +10,9 @@ prediction interval: the development median plus the 2.5th to 97.5th percentile 
 resampled from the development replays) minus (the median of a development-sized resample), so it includes both
 the new split's sampling noise and the uncertainty of the development estimate (a plain bootstrap of the
 development statistic would be too narrow by about the square root of two: `selfcheck` showed 7 and 4 of 24
-rows outside, against 1.2 expected). Rows whose simulated error is zero in practically every replay (the
-one-step ball position at p50 and p90) carry no information and are not graded. A test split whose statistic
+rows outside, against 1.2 expected). Rows whose simulated position error is below 0.01 UU (the replay's own
+position resolution) in the development median (the one-step ball position at p50 and p90, the aligned masked
+ball at p50) carry no information and are not graded. A test split whose statistic
 falls outside a band is reported as a finding; with about 70 comparisons about 3 are expected outside by chance
 alone, so the count is judged against that, not against zero.
 
@@ -103,16 +104,47 @@ def all_rows(replays):
     return names
 
 
-def degenerate(row, q):
-    """The simulated ball position error is zero in practically every replay except in its tail."""
-    return row.startswith("ball position, one-step") and q in ("p50", "p90")
+def degenerate(dev, row, q):
+    """A position row whose development median is below 0.01 UU (the replay's own position resolution)."""
+    return row.endswith("(UU)") and statistic(dev, row, q) < 0.01
+
+
+OUTLIER_ROWS = (
+    "car position, one-step (UU)",
+    "masked car position h1 (default) (UU)",
+    "masked car position h1 (aligned) (UU)",
+)
+
+
+def outlier_limits(dev):
+    """Per game size, the largest per-replay p90 of each car row among the development replays."""
+    limits = {}
+    for row in OUTLIER_ROWS:
+        for size, rows in dev:
+            if row in rows:
+                limits.setdefault(row, {})
+                limits[row][size] = max(limits[row].get(size, 0.0), rows[row]["p90"])
+    return limits
+
+
+def outlier_replays(limits, reports):
+    """Test replays whose own p90 of a car row exceeds the largest value among the development replays of the
+    same game size (a replay that no development replay of its size resembles), with the path."""
+    found = []
+    for variant, report in zip(("default", "aligned"), reports):
+        for replay in report["replays"]:
+            size = size_of(replay["path"])
+            for row, rowvals in rows_of(replay, variant).items():
+                if row in limits and size in limits[row] and rowvals["p90"] > limits[row][size]:
+                    found.append((replay["path"], row, round(rowvals["p90"], 2), round(limits[row][size], 2)))
+    return found
 
 
 def build_bands(dev):
     bands = {}
     for row in all_rows(dev):
         for q in QUANTILES:
-            if degenerate(row, q):
+            if degenerate(dev, row, q):
                 continue
             bands[f"{row} | {q} | all"] = bootstrap(dev, row, q)
             if row.startswith(("car position, one-step", "masked car position h1")):
@@ -179,13 +211,18 @@ def main():
         dev = [r for replays, _, _ in loaded for r in replays]
         bands = build_bands(dev)
         rules = ordering_rules([(d, a) for _, d, a in loaded])
-        json.dump({"bands": bands, "ordering": rules, "dev_replays": len(dev)}, open(out, "w"), indent=1)
+        json.dump({"bands": bands, "ordering": rules, "dev_replays": len(dev), "outlier_limits": outlier_limits(dev)},
+                  open(out, "w"), indent=1)
         print(f"{len(bands)} bands from {len(dev)} development replays, {len(rules)} ordering rules -> {out}")
     elif mode == "check":
         spec = json.load(open(sys.argv[2]))
         test, d, a = load_split(sys.argv[3], sys.argv[4])
         report_check(f"{sys.argv[3]} against {sys.argv[2]}", {k: tuple(v) for k, v in spec["bands"].items()},
                      test, [tuple(r) for r in spec["ordering"]], (d, a))
+        outliers = outlier_replays(spec["outlier_limits"], (d, a))
+        print(f"  replays above every development replay of their game size (car p90 rows): {len(outliers)}")
+        for o in outliers:
+            print("   ", o)
     elif mode == "selfcheck":
         t_def, t_al, v_def, v_al = sys.argv[2:6]
         train, td, ta = load_split(t_def, t_al)
