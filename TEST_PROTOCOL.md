@@ -84,6 +84,9 @@ It is the commit after the independent review of 2026-10-02 (RESULTS.md, "Indepe
 which changed the evaluators: the one-step rows are now held out by default and the linear baseline of the aligned
 variant is lag-corrected, so the earlier reference (`96d1e0a`, `3f91f6d`) is not comparable on the rows marked *.
 All 60 validation replays convert. The train split was not re-run for these variants.
+The table was regenerated at the merged tip `2f5a37b` (after the second review pass and the dodge-refresh correction;
+reports in `target/ref-merge/`): every row above is unchanged to the printed precision (the one-step ball velocity
+p99 moves 406 to 402 UU/s).
 
 | Metric (p50 / p90 / p99) | Simulated | Hold baseline | Linear baseline |
 | --- | --- | --- | --- |
