@@ -285,6 +285,8 @@ Keep this file current after each phase: update the status, dependency revisions
 
 - 2026-10-02 (independent review): a context-free reviewer read the evaluators and the converter's main loop (RESULTS "Independent review of the evaluators and the converter"). Fixed on `review-fixes`: one-step rows now held out by default (`--offline-fits` for the in-sample ones; rotation p90 +29%, angular velocity p90 +80%), fair lag-corrected linear baseline in the aligned variant, `--aligned-targets-raw-predictor`, simulated pad pickups blocked from the first tick, `error_budget` guard/default/state, contact-alignment tie bias, a frame-0 underflow, masked body copy per lifetime, a test that had been failing. `TEST_PROTOCOL.md` reference regenerated on validation (`target/ref-fix`). Not yet done: tests for pad blocking and the evaluator leak, the review's unreached parts (jump, ground-flip, dodge-start, air-plan fits, restoration, Parquet details, Python tests), train split for the new variants.
 
+- 2026-10-02 (flip resets): the replay's per-car `DodgesRefreshedCounter` (builds from March 2026; 3 of the 120 development replays have it) is now exported as the observed event `dodge_refreshed` (JSONL events, Parquet `events` table with `car`, `refreshed_count`). The converter's simulated flags already reproduce the resets (host 7 of 7; client 5 of 7 at frame resolution) and the truth agrees, including 3 resets the counter does not count (wheel contact with a car or wall). RESULTS "Flip resets".
+
 ## Backlog (kept current; 2026-10-01)
 
 Done items are struck through in the work log above; this is what is still open, in rough priority order.

@@ -298,6 +298,9 @@ pub(crate) fn events_fields() -> Vec<Field> {
         nullable("victim_velocity_y", DataType::Float32),
         nullable("victim_velocity_z", DataType::Float32),
         nullable("repeat", DataType::Boolean),
+        // `dodge_refreshed` only: the replay car actor id and its new DodgesRefreshedCounter total.
+        nullable("car", DataType::Int32),
+        nullable("refreshed_count", DataType::Int32),
     ]
 }
 
@@ -309,25 +312,26 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
             Some(match r.1 {
                 Event::GoalScoredOn { .. } => "goal_scored_on",
                 Event::Demolish { .. } => "demolish",
+                Event::DodgeRefreshed { .. } => "dodge_refreshed",
             })
         }))?,
         Arc::new(UInt8Array::from(
             rows.iter()
                 .map(|r| match r.1 {
                     Event::GoalScoredOn { team } => Some(team),
-                    Event::Demolish { .. } => None,
+                    Event::Demolish { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
         dict(rows.iter().map(|r| match &r.1 {
             Event::Demolish { source, .. } => Some(*source),
-            Event::GoalScoredOn { .. } => None,
+            Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
         }))?,
         Arc::new(Int32Array::from(
             rows.iter()
                 .map(|r| match &r.1 {
                     Event::Demolish { attacker_car, .. } => *attacker_car,
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -335,7 +339,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
             rows.iter()
                 .map(|r| match &r.1 {
                     Event::Demolish { victim_car, .. } => *victim_car,
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -343,7 +347,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
             rows.iter()
                 .map(|r| match &r.1 {
                     Event::Demolish { attacker_pri, .. } => *attacker_pri,
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -351,7 +355,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
             rows.iter()
                 .map(|r| match &r.1 {
                     Event::Demolish { self_demolish, .. } => Some(*self_demolish),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -361,7 +365,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[0]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -371,7 +375,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[1]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -381,7 +385,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         attacker_velocity, ..
                     } => Some(attacker_velocity[2]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -391,7 +395,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[0]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -401,7 +405,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[1]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -411,7 +415,7 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
                     Event::Demolish {
                         victim_velocity, ..
                     } => Some(victim_velocity[2]),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
                 })
                 .collect::<Vec<_>>(),
         )),
@@ -419,7 +423,23 @@ pub(crate) fn events_batch(rows: Rows<Event>, schema: &SchemaRef) -> io::Result<
             rows.iter()
                 .map(|r| match &r.1 {
                     Event::Demolish { repeat, .. } => Some(*repeat),
-                    Event::GoalScoredOn { .. } => None,
+                    Event::GoalScoredOn { .. } | Event::DodgeRefreshed { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Int32Array::from(
+            rows.iter()
+                .map(|r| match &r.1 {
+                    Event::DodgeRefreshed { car, .. } => Some(*car),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Int32Array::from(
+            rows.iter()
+                .map(|r| match &r.1 {
+                    Event::DodgeRefreshed { count, .. } => Some(*count),
+                    _ => None,
                 })
                 .collect::<Vec<_>>(),
         )),

@@ -75,7 +75,7 @@ import pyarrow.parquet as pq
 
 frames = pq.read_table("target/example.parquet", columns=["frame", "scoreboard_clock_state", "scoreboard_seconds_remaining"])
 touches = pq.read_table("target/example.touches.parquet").to_pandas()    # frame, car_slot, tick, contact_point
-events = pq.read_table("target/example.events.parquet").to_pandas()      # kind: goal_scored_on | demolish
+events = pq.read_table("target/example.events.parquet").to_pandas()      # kind: goal_scored_on | demolish | dodge_refreshed (car, refreshed_count)
 demolitions = events[(events.kind == "demolish") & (events.repeat == False)]
 ```
 

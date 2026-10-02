@@ -144,6 +144,13 @@ pub enum Event {
         /// false.
         repeat: bool,
     },
+    /// The car's `DodgesRefreshedCounter` went up: the car regained its flip in the air (the replay's own
+    /// flip-reset indicator, builds from March 2026). `car` is the replay car actor id and `count` the new
+    /// total for that car actor. Reported only for an increase over a value already seen for the actor (a
+    /// first value above zero, or a re-sent value, is not an event), and seen with the replication delay of
+    /// the update, not at the tick of the contact. The counter does not count every reset: the flags also
+    /// clear on wheel contact with a car or a wall (RESULTS.md, 'Flip resets').
+    DodgeRefreshed { car: i32, count: i32 },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,6 +302,8 @@ struct Tracker {
     pad_reported: HashMap<ActorId, u8>,
     /// Time of the last demolition reported for each victim car actor.
     demolished_at: HashMap<i32, f32>,
+    /// Last `DodgesRefreshedCounter` value seen per car actor.
+    dodges_refreshed: HashMap<i32, i32>,
     diagnostics: Diagnostics,
 }
 
@@ -365,6 +374,8 @@ impl Tracker {
                 ActorKind::Car => {
                     self.cars.remove(&id);
                     self.components.retain(|_, car| *car != id);
+                    // A recycled actor id must not inherit the previous car's counter.
+                    self.dodges_refreshed.remove(&id.0);
                 }
                 ActorKind::Ball => {
                     if self
@@ -618,6 +629,14 @@ impl Tracker {
                     if !self.goal_events_this_phase.contains(team) {
                         self.goal_events_this_phase.push(*team);
                         events.push(Event::GoalScoredOn { team: *team });
+                    }
+                }
+            }
+            "TAGame.Car_TA:DodgesRefreshedCounter" => {
+                if let Attribute::Int(count) = attribute {
+                    let before = self.dodges_refreshed.insert(actor.0, *count);
+                    if before.is_some_and(|before| *count > before) {
+                        events.push(Event::DodgeRefreshed { car: actor.0, count: *count });
                     }
                 }
             }
@@ -938,6 +957,42 @@ mod event_tests {
             victim_velocity: [0.0; 3],
             repeat: false,
         }
+    }
+
+    /// Only an increase over a value already seen is a flip reset: the first value, a value re-sent
+    /// unchanged every ten seconds, and a recycled actor id are not.
+    #[test]
+    fn dodge_refresh_counter_increases_are_events() {
+        let mut tracker = Tracker::default();
+        let mut observe = |tracker: &mut Tracker, actor: i32, value: i32| {
+            let mut events = Vec::new();
+            tracker.observe(
+                ActorId(actor),
+                "TAGame.Car_TA:DodgesRefreshedCounter",
+                &Attribute::Int(value),
+                &[],
+                0,
+                &mut events,
+                &mut Vec::new(),
+            );
+            events
+        };
+        assert!(observe(&mut tracker, 5, 0).is_empty());
+        assert!(observe(&mut tracker, 5, 0).is_empty());
+        let events = observe(&mut tracker, 5, 1);
+        assert!(matches!(events[..], [Event::DodgeRefreshed { car: 5, count: 1 }]));
+        assert!(observe(&mut tracker, 5, 1).is_empty());
+        let events = observe(&mut tracker, 5, 2);
+        assert!(matches!(events[..], [Event::DodgeRefreshed { car: 5, count: 2 }]));
+        // A car first seen with a nonzero total has no event for it (when it happened is unknown).
+        assert!(observe(&mut tracker, 6, 3).is_empty());
+        // After the actor is deleted its id starts over.
+        tracker.actors.insert(
+            ActorId(5),
+            Actor { class: "Car".to_owned(), kind: ActorKind::Car },
+        );
+        tracker.delete(ActorId(5));
+        assert!(observe(&mut tracker, 5, 1).is_empty());
     }
 
     fn repeat_of(frame: &Frame) -> bool {
