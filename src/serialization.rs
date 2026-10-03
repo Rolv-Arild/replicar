@@ -473,12 +473,7 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
         {
             residual_index += 1;
         }
-        let labels = replay_labels.frame(
-            &output.observations,
-            converted.replay_frame,
-            converted,
-            output.car_slots.len(),
-        );
+        let labels = replay_labels.frame_at(&output.observations.frames, converted.replay_frame);
         let fresh = freshness.frame(&output.observations, converted.replay_frame, converted);
         let line = frame_line(
             converted,

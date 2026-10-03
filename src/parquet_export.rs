@@ -62,17 +62,23 @@ struct Row {
     /// Per car slot: the raw ping byte of the slot's player (`observations::Player::ping_raw`); `None` until the
     /// player's first update, and for a slot not created yet. An observation, not a label.
     ping_raw: Vec<Option<u8>>,
+    /// Per car slot: the frame time minus the time of the frame of the slot's player's last ping update (the
+    /// ping's source frame), so a stale value is visible; `None` with the ping.
+    ping_age_seconds: Vec<Option<f32>>,
     /// Packet freshness (`freshness.rs`), written as `ball_fresh` and its sibling columns.
     freshness: FrameFreshness,
 }
 
-/// The raw ping of each slot's player in this frame. `slot_players` holds each slot's player key, learned from
-/// the frame's car actors (`ConvertedFrame::car_actor_slots`) the frame the slot is created in and kept after.
+/// The raw ping of each slot's player in frame `index` of `frames`, and its age (frame time minus the time of the
+/// ping's source frame). `slot_players` holds each slot's player key, learned from the frame's car actors
+/// (`ConvertedFrame::car_actor_slots`) the frame the slot is created in and kept after.
 fn slot_pings(
     car_actor_slots: &[(i32, usize)],
-    observed: &observations::Frame,
+    frames: &[observations::Frame],
+    index: usize,
     slot_players: &mut [Option<String>],
-) -> Vec<Option<u8>> {
+) -> (Vec<Option<u8>>, Vec<Option<f32>>) {
+    let observed = &frames[index];
     for &(actor, slot) in car_actor_slots {
         let key = observed
             .cars
@@ -83,16 +89,18 @@ fn slot_pings(
             known.get_or_insert_with(|| key.clone());
         }
     }
-    let mut ping_of: HashMap<&str, u8> = HashMap::new();
+    let mut ping_of: HashMap<&str, (u8, f32)> = HashMap::new();
     for player in &observed.players {
         if let Some(ping) = &player.ping_raw {
-            ping_of.insert(player.key.as_str(), ping.value);
+            let age = (f64::from(observed.time) - f64::from(frames[ping.frame.min(index)].time)) as f32;
+            ping_of.insert(player.key.as_str(), (ping.value, age));
         }
     }
     slot_players
         .iter()
         .map(|key| key.as_deref().and_then(|key| ping_of.get(key).copied()))
-        .collect()
+        .map(|ping| (ping.map(|(value, _)| value), ping.map(|(_, age)| age)))
+        .unzip()
 }
 
 fn rotation(rot: Mat3A) -> Vec<f32> {
@@ -111,7 +119,7 @@ fn row(
     observed: &observations::Frame,
     residuals: &[PositionResidual],
     labels: FrameLabels,
-    ping_raw: Vec<Option<u8>>,
+    ping: (Vec<Option<u8>>, Vec<Option<f32>>),
     freshness: FrameFreshness,
     slot_index: &HashMap<usize, usize>,
     cars: usize,
@@ -167,7 +175,8 @@ fn row(
         dead_shell_held: vec![None; cars],
         spawn_pose_held: vec![false; cars],
         labels,
-        ping_raw,
+        ping_raw: ping.0,
+        ping_age_seconds: ping.1,
         freshness,
     };
     for &slot in &converted.spawn_pose_held {
@@ -271,23 +280,24 @@ fn schema(cars: usize, pads: usize, pad_json: Vec<u8>) -> io::Result<SchemaRef> 
         list_field("dead_shell_held", DataType::UInt8, cars),
         // Per car slot: the car is known only from its spawn pose (no rigid-body packet yet); false otherwise.
         list_field("spawn_pose_held", DataType::Boolean, cars),
-        // Training labels (`labels.rs`), always separate from the state and observations. Future-derived
+        // Training labels (`labels.rs`), always separate from the state and observations. All are future-derived
         // (read from later frames): label_episode, label_episode_seconds_remaining, label_next_scoring_team
         // and label_seconds_until_next_goal; null when not applicable (outside play, no further goal).
-        // Observed: label_update_age_seconds, per car slot (null: no car, or no packet yet).
         Field::new("label_episode", DataType::UInt32, true),
         Field::new("label_episode_seconds_remaining", DataType::Float32, true),
         Field::new("label_next_scoring_team", DataType::UInt8, true),
         Field::new("label_seconds_until_next_goal", DataType::Float32, true),
-        list_field("label_update_age_seconds", DataType::Float32, cars),
         // Per car slot, an observation (not a label): the raw `Engine.PlayerReplicationInfo:Ping` byte of the
         // slot's player (null until its first update, never 0 for unknown).
         list_field("ping_raw", DataType::UInt8, cars),
+        // Per car slot: the frame time minus the time of the frame of the ping's last update; null with the ping.
+        list_field("ping_age_seconds", DataType::Float32, cars),
         // Packet freshness (`freshness.rs`), observed or inferred, not labels. The tick ages use the offline
         // packet-lag inference and are null when no lag was inferred (see `freshness.rs`).
         Field::new("ball_fresh", DataType::Boolean, true),
         list_field("car_fresh", DataType::Boolean, cars),
         Field::new("ball_update_age_seconds", DataType::Float32, true),
+        list_field("car_update_age_seconds", DataType::Float32, cars),
         Field::new("ball_packet_age_ticks", DataType::UInt32, true),
         list_field("car_packet_age_ticks", DataType::UInt32, cars),
     ];
@@ -430,8 +440,8 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
         Arc::new(Float32Array::from(
             rows.iter().map(|r| r.labels.seconds_until_next_goal).collect::<Vec<_>>(),
         )),
-        nullable_floats(rows, cars, |r| &r.labels.update_age_seconds)?,
         small_ints(rows, cars, |r| &r.ping_raw)?,
+        nullable_floats(rows, cars, |r| &r.ping_age_seconds)?,
         Arc::new(BooleanArray::from(rows.iter().map(|r| r.freshness.ball_fresh).collect::<Vec<_>>())),
         nullable_list(rows, cars, DataType::Boolean, |rows| {
             Arc::new(BooleanArray::from(
@@ -441,6 +451,7 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
         Arc::new(Float32Array::from(
             rows.iter().map(|r| r.freshness.ball_update_age_seconds).collect::<Vec<_>>(),
         )),
+        nullable_floats(rows, cars, |r| &r.freshness.car_update_age_seconds)?,
         Arc::new(UInt32Array::from(
             rows.iter().map(|r| r.freshness.ball_packet_age_ticks).collect::<Vec<_>>(),
         )),
@@ -550,10 +561,10 @@ pub fn write_parquet_with_tables(
             if let Some(tables) = tables.as_mut() {
                 tables.add_frame(frame, observation)?;
             }
-            let labels = replay_labels.frame(&observed, frame.replay_frame, frame, cars);
-            let ping_raw = slot_pings(&frame.car_actor_slots, observation, &mut slot_players);
+            let labels = replay_labels.frame_at(&observed.frames, frame.replay_frame);
+            let ping = slot_pings(&frame.car_actor_slots, &observed.frames, frame.replay_frame, &mut slot_players);
             let fresh = freshness.frame(&observed, frame.replay_frame, frame);
-            rows.push(row(frame, observation, residuals, labels, ping_raw, fresh, &slot_index, cars, *pad_count)?);
+            rows.push(row(frame, observation, residuals, labels, ping, fresh, &slot_index, cars, *pad_count)?);
             count += 1;
             if rows.len() == BATCH_SIZE {
                 arrow_writer
@@ -626,17 +637,19 @@ mod tests {
             dead_shell_held: vec![None; 1],
             spawn_pose_held: vec![false; 1],
             labels: FrameLabels {
+                future_derived: true,
                 episode: None,
                 episode_seconds_remaining: None,
                 next_scoring_team: None,
                 seconds_until_next_goal: None,
-                update_age_seconds: vec![None],
             },
             ping_raw: vec![None],
+            ping_age_seconds: vec![None],
             freshness: FrameFreshness {
                 ball_fresh: false,
                 car_fresh: vec![None],
                 ball_update_age_seconds: None,
+                car_update_age_seconds: vec![None],
                 ball_packet_age_ticks: None,
                 car_packet_age_ticks: vec![None],
             },
@@ -687,11 +700,12 @@ mod tests {
                 "label_episode_seconds_remaining",
                 "label_next_scoring_team",
                 "label_seconds_until_next_goal",
-                "label_update_age_seconds",
                 "ping_raw",
+                "ping_age_seconds",
                 "ball_fresh",
                 "car_fresh",
                 "ball_update_age_seconds",
+                "car_update_age_seconds",
                 "ball_packet_age_ticks",
                 "car_packet_age_ticks",
             ]
@@ -773,6 +787,8 @@ mod tests {
         row.dead_shell_held = vec![None; cars];
         row.spawn_pose_held = vec![false; cars];
         row.ping_raw = vec![None; cars];
+        row.ping_age_seconds = vec![None; cars];
+        row.freshness.car_update_age_seconds = vec![None; cars];
         row.freshness.car_fresh = vec![None; cars];
         row.freshness.car_packet_age_ticks = vec![None; cars];
         row.labels = labels;
@@ -786,22 +802,22 @@ mod tests {
             0,
             2,
             FrameLabels {
+                future_derived: true,
                 episode: Some(0),
                 episode_seconds_remaining: Some(0.0),
                 next_scoring_team: Some(0),
                 seconds_until_next_goal: Some(0.0),
-                update_age_seconds: vec![Some(0.0), None],
             },
         );
         let unknown = wide_row(
             1,
             2,
             FrameLabels {
+                future_derived: true,
                 episode: None,
                 episode_seconds_remaining: None,
                 next_scoring_team: None,
                 seconds_until_next_goal: None,
-                update_age_seconds: vec![None, None],
             },
         );
         let batch = batch(&[known, unknown], schema, 2, 1).unwrap();
@@ -818,11 +834,8 @@ mod tests {
         let team = column("label_next_scoring_team");
         let team = team.as_primitive::<UInt8Type>();
         assert!(team.is_valid(0) && team.value(0) == 0 && team.is_null(1));
-        let ages = column("label_update_age_seconds");
-        let values = ages.as_fixed_size_list().values().as_primitive::<Float32Type>().clone();
-        assert_eq!(values.len(), 4);
-        assert!(values.is_valid(0) && values.value(0) == 0.0);
-        assert!(values.is_null(1) && values.is_null(2) && values.is_null(3));
+        // Every label column is future-derived: the observed ages live in the freshness columns.
+        assert!(batch.column_by_name("label_update_age_seconds").is_none());
     }
 
     fn player(actor_id: i32, key: &str, ping: Option<(u8, usize)>) -> observations::Player {
@@ -857,11 +870,11 @@ mod tests {
         }
     }
 
-    fn frame(cars: Vec<observations::Car>, players: Vec<observations::Player>) -> observations::Frame {
+    fn frame(index: usize, cars: Vec<observations::Car>, players: Vec<observations::Player>) -> observations::Frame {
         observations::Frame {
-            index: 0,
-            time: 0.0,
-            delta: 0.0,
+            index,
+            time: index as f32 / 10.0,
+            delta: 0.1,
             ball: None,
             cars,
             players,
@@ -877,52 +890,63 @@ mod tests {
     #[test]
     fn a_slots_ping_is_its_players_raw_byte_and_null_until_there_is_one() {
         let mut slot_players = vec![None; 3];
-        // Slots 0 and 1 exist (cars of players "a" and "b"); slot 2 is not created yet. Only "a" has a ping.
-        let first = frame(
+        let mut frames: Vec<_> = (0..10).map(|index| frame(index, Vec::new(), Vec::new())).collect();
+        // Slots 0 and 1 exist (cars of players "a" and "b"); slot 2 is not created yet. Only "a" has a ping
+        // (updated in frame 3, so it is 0.2 s old at frame 5).
+        frames[5] = frame(
+            5,
             vec![car(10, Some("a")), car(11, Some("b")), car(12, None)],
             vec![player(1, "a", Some((0, 3))), player(2, "b", None), player(3, "c", Some((9, 1)))],
         );
-        let pings = slot_pings(&[(10, 0), (11, 1)], &first, &mut slot_players);
+        let (pings, ages) = slot_pings(&[(10, 0), (11, 1)], &frames, 5, &mut slot_players);
         // A ping of 0 is a value; no update is null; a player without a slot yet shows nowhere.
         assert_eq!(pings, [Some(0), None, None]);
+        assert!((ages[0].unwrap() - 0.2).abs() < 1e-6 && ages[1].is_none() && ages[2].is_none());
         // The slot keeps its player once learned, also in a frame without its car.
-        let later = frame(
+        frames[9] = frame(
+            9,
             vec![car(12, Some("c"))],
             vec![player(1, "a", Some((7, 8))), player(2, "b", Some((6, 9))), player(3, "c", Some((9, 1)))],
         );
-        let pings = slot_pings(&[(12, 2)], &later, &mut slot_players);
+        let (pings, ages) = slot_pings(&[(12, 2)], &frames, 9, &mut slot_players);
         assert_eq!(pings, [Some(7), Some(6), Some(9)]);
-        // And it is a typed, nullable UInt8 list in the file.
+        // The age says how stale a ping is: 0.1 s, 0 s (updated this frame), 0.8 s.
+        assert!((ages[0].unwrap() - 0.1).abs() < 1e-6 && ages[1] == Some(0.0) && (ages[2].unwrap() - 0.8).abs() < 1e-6);
+        // And they are typed, nullable lists in the file.
         let schema = schema(3, 1, b"[]".to_vec()).unwrap();
         let mut row = wide_row(
             0,
             3,
             FrameLabels {
+                future_derived: true,
                 episode: None,
                 episode_seconds_remaining: None,
                 next_scoring_team: None,
                 seconds_until_next_goal: None,
-                update_age_seconds: vec![None; 3],
             },
         );
         row.ping_raw = vec![Some(0), None, Some(255)];
+        row.ping_age_seconds = vec![Some(0.0), None, Some(1.5)];
         let batch = batch(&[row], schema, 3, 1).unwrap();
         let column = batch.column_by_name("ping_raw").unwrap().clone();
         let values = column.as_fixed_size_list().values().as_primitive::<UInt8Type>().clone();
         assert!(values.is_valid(0) && values.value(0) == 0);
         assert!(values.is_null(1));
         assert!(values.is_valid(2) && values.value(2) == 255);
+        let column = batch.column_by_name("ping_age_seconds").unwrap().clone();
+        let values = column.as_fixed_size_list().values().as_primitive::<Float32Type>().clone();
+        assert!(values.is_valid(0) && values.value(0) == 0.0 && values.is_null(1) && values.value(2) == 1.5);
     }
 
     #[test]
     fn freshness_columns_keep_unknown_as_null_and_a_zero_age_as_a_value() {
         let schema = schema(2, 1, b"[]".to_vec()).unwrap();
         let blank = FrameLabels {
+            future_derived: true,
             episode: None,
             episode_seconds_remaining: None,
             next_scoring_team: None,
             seconds_until_next_goal: None,
-            update_age_seconds: vec![None; 2],
         };
         let mut fresh = wide_row(0, 2, blank.clone());
         fresh.freshness = FrameFreshness {
@@ -930,14 +954,17 @@ mod tests {
             // Slot 0 fresh, slot 1 has no car.
             car_fresh: vec![Some(true), None],
             ball_update_age_seconds: Some(0.0),
+            car_update_age_seconds: vec![Some(0.0), None],
             ball_packet_age_ticks: Some(0),
             car_packet_age_ticks: vec![Some(3), None],
         };
         let mut stale = wide_row(1, 2, blank);
         stale.freshness = FrameFreshness {
             ball_fresh: false,
+            // Slot 0 has a packet 0.25 s old but no inferred lag: the tick age is null, the update age a value.
             car_fresh: vec![Some(false), Some(false)],
             ball_update_age_seconds: None,
+            car_update_age_seconds: vec![Some(0.25), Some(0.5)],
             ball_packet_age_ticks: None,
             car_packet_age_ticks: vec![None, Some(7)],
         };
@@ -957,6 +984,10 @@ mod tests {
         let ticks = column("ball_packet_age_ticks");
         let ticks = ticks.as_primitive::<arrow_array::types::UInt32Type>();
         assert!(ticks.is_valid(0) && ticks.value(0) == 0 && ticks.is_null(1));
+        let car_age = column("car_update_age_seconds");
+        let items = car_age.as_fixed_size_list().values().as_primitive::<Float32Type>().clone();
+        assert!(items.is_valid(0) && items.value(0) == 0.0 && items.is_null(1));
+        assert!(items.value(2) == 0.25 && items.value(3) == 0.5);
         let car_ticks = column("car_packet_age_ticks");
         let items = car_ticks.as_fixed_size_list().values().as_primitive::<arrow_array::types::UInt32Type>().clone();
         assert!(items.is_valid(0) && items.value(0) == 3 && items.is_null(1));

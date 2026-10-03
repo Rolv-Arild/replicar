@@ -2,14 +2,20 @@
 //! one is. Observed or inferred values, not future-derived labels, and outputs only: nothing here feeds the
 //! conversion or the state.
 //!
-//! * `ball_fresh` and `car_fresh`: the converter applied a fresh rigid-body packet at this frame (the test
-//!   of the `packet_lags` records: the body's position was updated in the frame; `ConvertedFrame::ball_fresh`
-//!   and `fresh_car_slots`). `car_fresh` is null for a slot with no car in the frame's state.
-//! * `ball_update_age_seconds`: frame time minus the time of the frame that carried the ball's last
-//!   packet (frame cadence, not packet time); null before the first ball packet.
+//! * `ball_fresh` and `car_fresh`: the converter applied a fresh rigid-body packet at this frame (the body's
+//!   position was updated in the frame: `ConvertedFrame::ball_fresh` and `fresh_car_slots`). `car_fresh` is
+//!   null for a slot with no car in the frame's state and for a slot whose primary car cannot be resolved
+//!   in the frame (between actor lifetimes), where it is unknown. It is a SUPERSET of the `packet_lags`
+//!   rows: it also counts fresh packets in frames the converter does not simulate (goal pause, countdown,
+//!   the first kickoff frame), which have no lag record.
+//! * `ball_update_age_seconds` and `car_update_age_seconds` (per slot): frame time minus the time of the
+//!   frame that carried the body's last packet (frame cadence, not packet time; 0 at a fresh frame); null
+//!   before the first packet, for a slot with no resolved car, and for a respawned car until its first
+//!   packet.
 //! * `ball_packet_age_ticks` and `car_packet_age_ticks`: the frame's timeline tick minus the inferred server
 //!   tick of the last applied packet, where that tick is the timeline tick of the packet's frame minus the
-//!   packet's lag, carried forward (0 to 4 at a fresh frame, growing between packets). This USES THE OFFLINE
+//!   packet's lag, carried forward (normally 0 to 4 at a fresh frame, larger when the frame gap exceeds 4
+//!   ticks: the train maximum is 9 for cars and 5 for the ball; it grows between packets). This USES THE OFFLINE
 //!   LAG INFERENCE (`packet_lags`): it is null before the first packet, when no lag was inferred for the
 //!   packet (inference off, a frame the converter does not simulate, or the `default` source, which is only
 //!   half the frame window and not an inference), and for a car from its respawn (a new actor) until its
@@ -27,10 +33,13 @@ pub struct FrameFreshness {
     /// A fresh ball packet was applied at this frame.
     pub ball_fresh: bool,
     /// Per car slot: a fresh packet of the slot's primary car was applied at this frame; null for a slot with
-    /// no car in this frame's state.
+    /// no car in this frame's state or whose primary car cannot be resolved in it (unknown).
     pub car_fresh: Vec<Option<bool>>,
     /// Frame time minus the time of the frame with the ball's last packet; null before the first.
     pub ball_update_age_seconds: Option<f32>,
+    /// Per car slot, frame time minus the time of the frame with the slot's car's last packet; null when
+    /// unknown (see the module docs).
+    pub car_update_age_seconds: Vec<Option<f32>>,
     /// Offline-inferred age of the ball's last packet in server ticks (see the module docs); null when unknown.
     pub ball_packet_age_ticks: Option<u32>,
     /// Per car slot, the same for the slot's car; null when unknown or the slot has no car.
@@ -105,12 +114,13 @@ impl FreshnessTracker {
             .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32);
         let slot_cars = slot_primary_cars(frame, car_actor_slots, present);
         let mut car_fresh = Vec::with_capacity(present.len());
+        let mut car_update_age_seconds = Vec::with_capacity(present.len());
         let mut car_packet_age_ticks = Vec::with_capacity(present.len());
         for (slot, car) in slot_cars.iter().enumerate() {
             let Some(car) = car else {
-                // A slot in the state whose primary car cannot be resolved still has a car (fresh as the
-                // converter said); a slot with no car is null.
-                car_fresh.push(present[slot].then(|| fresh_car_slots.contains(&slot)));
+                // No car, or a car that cannot be resolved (between actor lifetimes): unknown, not stale.
+                car_fresh.push(None);
+                car_update_age_seconds.push(None);
                 car_packet_age_ticks.push(None);
                 continue;
             };
@@ -125,12 +135,20 @@ impl FreshnessTracker {
                 self.cars[slot] = Some((lifetime, server_tick(timeline_tick, lag)));
             }
             car_fresh.push(Some(fresh));
+            car_update_age_seconds.push(
+                car.body
+                    .position
+                    .as_ref()
+                    .filter(|packet| packet.frame <= index)
+                    .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32),
+            );
             car_packet_age_ticks.push(age(self.cars[slot].and_then(|(_, tick)| tick)));
         }
         FrameFreshness {
             ball_fresh,
             car_fresh,
             ball_update_age_seconds,
+            car_update_age_seconds,
             ball_packet_age_ticks: age(self.ball.flatten()),
             car_packet_age_ticks,
         }
@@ -246,6 +264,13 @@ mod tests {
             [Some(false), Some(true), Some(false), Some(true), Some(false), Some(false)]
         );
         assert!(seen.iter().all(|f| f.car_fresh[1] == Some(false)));
+        // The car's frame-time age: packets at frames 1 and 3, so 0 at them and one frame (1/30 s) per frame
+        // after; slot 1 has no packet and stays null.
+        let car_age: Vec<Option<f32>> = seen.iter().map(|f| f.car_update_age_seconds[0]).collect();
+        assert_eq!(&car_age[..2], [None, Some(0.0)]);
+        assert!((car_age[2].unwrap() - 1.0 / 30.0).abs() < 1e-6 && car_age[3] == Some(0.0));
+        assert!((car_age[5].unwrap() - 2.0 / 30.0).abs() < 1e-6);
+        assert!(seen.iter().all(|f| f.car_update_age_seconds[1].is_none()));
         // The frame-time age of the ball: one frame (1/30 s) after a packet in the previous frame, 0 at one.
         assert_eq!(seen[1].ball_update_age_seconds, Some(0.0));
         assert!((seen[2].ball_update_age_seconds.unwrap() - 1.0 / 30.0).abs() < 1e-6);
@@ -293,10 +318,24 @@ mod tests {
         assert_eq!(first.car_packet_age_ticks, [Some(1), None]);
         // Absent slot: car_fresh and the age are null, not false or 0.
         assert_eq!(first.car_fresh, [Some(true), None]);
+        assert_eq!(first.car_update_age_seconds[1], None);
         let second = tracker.step(&frames, 1, 4, false, &[], &[], &actor_slots, &present);
         assert_eq!(second.car_packet_age_ticks, [None, None]);
         assert_eq!(second.car_fresh, [Some(false), None]);
         let third = tracker.step(&frames, 2, 8, false, &[0], &[lag(Some(20), 2, "frame_median")], &actor_slots, &present);
         assert_eq!(third.car_packet_age_ticks, [Some(2), None]);
+    }
+
+    #[test]
+    fn a_slot_whose_primary_car_is_unresolved_is_unknown_not_stale() {
+        // Slot 0 is in the state but the frame has no car that maps to it (between actor lifetimes).
+        let frames = vec![frame(0, None, vec![car(10, 0, "a", Some(0))]), frame(1, None, Vec::new())];
+        let mut tracker = FreshnessTracker::new(1);
+        let present = [true];
+        let first = tracker.step(&frames, 0, 0, false, &[0], &[lag(Some(10), 1, "chain")], &[(10, 0)], &present);
+        assert_eq!(first.car_fresh, [Some(true)]);
+        let second = tracker.step(&frames, 1, 4, false, &[], &[], &[], &present);
+        assert_eq!(second.car_fresh, [None]);
+        assert_eq!((second.car_update_age_seconds.clone(), second.car_packet_age_ticks), (vec![None], vec![None]));
     }
 }

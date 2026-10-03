@@ -3,8 +3,9 @@
 //! Most of them are FUTURE-DERIVED on purpose: a frame's episode, its time to the end of the episode and
 //! the next goal are read from frames after it (the replay's observed goal events). They are outputs
 //! only; nothing here feeds the conversion, the state or the scoreboard, so the rule that final scores
-//! never leak into earlier frames of the state still holds. The exception is `update_age_seconds`,
-//! which is observed (from the frame and earlier ones only).
+//! never leak into earlier frames of the state still holds. Everything in `labels` (and every `label_*`
+//! column) is future-derived, which each frame's `labels` object states (`future_derived: true`), so a
+//! user can drop the whole block; the observed per-frame freshness values are in `freshness.rs`.
 //!
 //! Episodes. Frame `f` is in play when the replay's game state is `Active` (the scoreboard's
 //! `kickoff`, `running`, `expired` and `decided` clock states). Episode k (0-based, counted in replay
@@ -24,12 +25,14 @@
 
 use serde::Serialize;
 
-use crate::conversion::ConvertedFrame;
 use crate::observations::{Car, Event, Frame, ObservedReplay, primary_linked_cars};
 
 /// The labels of one replay frame (`labels` in a JSONL frame, `label_*` columns in Parquet).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FrameLabels {
+    /// Always true: every label of this object is read from later frames (the marker travels with the
+    /// frame in `frame_json` and the JSONL stream).
+    pub future_derived: bool,
     /// Future-derived. The goal-to-goal segment of this frame (0-based); null outside play.
     pub episode: Option<u32>,
     /// Future-derived. Replay time from this frame to the end of its episode (its goal frame, or the last
@@ -40,11 +43,6 @@ pub struct FrameLabels {
     pub next_scoring_team: Option<u8>,
     /// Future-derived. Replay time from this frame to that goal's frame; null when no goal follows.
     pub seconds_until_next_goal: Option<f32>,
-    /// Observed, not future-derived. Per car slot: this frame's time minus the time of the frame that
-    /// carried the last rigid-body packet of the slot's car (0 when the packet is in this frame). Null for
-    /// a slot with no car in this frame's state and before the car's first packet (its current actor has
-    /// none yet, a spawn pose holds it).
-    pub update_age_seconds: Vec<Option<f32>>,
 }
 
 /// Header-level labels, final and future-derived (`labels` in the JSONL header).
@@ -170,64 +168,18 @@ impl ReplayLabels {
         self.episodes
     }
 
-    /// The labels of frame `index`. `converted` supplies the slots of the car actors and which slots have a
-    /// car in the state; `slots` is the width of the per-slot values (the conversion's number of car slots).
-    pub fn frame(
-        &self,
-        observed: &ObservedReplay,
-        index: usize,
-        converted: &ConvertedFrame,
-        slots: usize,
-    ) -> FrameLabels {
-        let mut present = vec![false; slots];
-        for (info, _) in &converted.state.cars {
-            if let Some(flag) = present.get_mut(info.idx) {
-                *flag = true;
-            }
-        }
-        self.frame_from(&observed.frames, index, &converted.car_actor_slots, &present)
-    }
-
-    fn frame_from(
-        &self,
-        frames: &[Frame],
-        index: usize,
-        car_actor_slots: &[(i32, usize)],
-        present: &[bool],
-    ) -> FrameLabels {
+    /// The labels of frame `index` of `frames`.
+    pub fn frame_at(&self, frames: &[Frame], index: usize) -> FrameLabels {
         let time = |frame: usize| f64::from(frames[frame].time);
         let until = |end: usize| (time(end) - time(index)) as f32;
         FrameLabels {
+            future_derived: true,
             episode: self.episode[index],
             episode_seconds_remaining: self.episode_end[index].map(until),
             next_scoring_team: self.next_goal[index].map(|(_, team)| team),
             seconds_until_next_goal: self.next_goal[index].map(|(goal, _)| until(goal)),
-            update_age_seconds: update_ages(frames, index, car_actor_slots, present),
         }
     }
-}
-
-/// Per car slot, the age of the slot's car's last rigid-body packet at frame `index`, in seconds of
-/// replay time (observed: only that frame and earlier ones are used). `car_actor_slots` maps each car
-/// actor of the frame to its slot; the slot's car is the primary linked car of that slot. Null when the
-/// slot has no car in the state (`present`), no primary car, or that car has had no packet yet.
-fn update_ages(
-    frames: &[Frame],
-    index: usize,
-    car_actor_slots: &[(i32, usize)],
-    present: &[bool],
-) -> Vec<Option<f32>> {
-    let frame = &frames[index];
-    slot_primary_cars(frame, car_actor_slots, present)
-        .into_iter()
-        .map(|car| {
-            car?.body
-                .position
-                .as_ref()
-                .filter(|packet| packet.frame <= index)
-                .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32)
-        })
-        .collect()
 }
 
 /// The car each slot shows in a frame: the primary linked car whose actor maps to the slot in
@@ -289,7 +241,7 @@ pub fn header_labels(observed: &ObservedReplay) -> HeaderLabels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observations::{Body, Car, Header, Inputs, Source, Value};
+    use crate::observations::{Header, Source, Value};
 
     fn value<T>(value: T, frame: usize) -> Option<Value<T>> {
         Some(Value {
@@ -362,6 +314,7 @@ mod tests {
     fn episodes_run_from_a_kickoff_through_the_goal_frame() {
         let observed = two_goal_replay();
         let labels = ReplayLabels::new(&observed);
+        assert!(labels.frame_at(&observed.frames, 0).future_derived);
         let episodes: Vec<Option<u32>> = labels.episode.clone();
         let expect = |range: std::ops::Range<usize>, value: Option<u32>| {
             for index in range {
@@ -375,7 +328,7 @@ mod tests {
         expect(20..21, None);
         expect(21..25, Some(2)); // no goal: runs to the last frame
         assert_eq!(labels.episodes(), 3);
-        let at = |index: usize| labels.frame_from(&observed.frames, index, &[], &[]);
+        let at = |index: usize| labels.frame_at(&observed.frames, index);
         // The goal frame has 0 s remaining, the kickoff frame its whole episode.
         assert_eq!(at(10).episode_seconds_remaining, Some(0.0));
         assert!((at(4).episode_seconds_remaining.unwrap() - 0.6).abs() < 1e-6);
@@ -390,7 +343,7 @@ mod tests {
     fn the_next_goal_is_looked_up_from_the_goal_events() {
         let observed = two_goal_replay();
         let labels = ReplayLabels::new(&observed);
-        let at = |index: usize| labels.frame_from(&observed.frames, index, &[], &[]);
+        let at = |index: usize| labels.frame_at(&observed.frames, index);
         // Scored on team 1 means team 0 scored; frames before it, and the goal frame itself, look to it.
         for index in 0..=10 {
             assert_eq!(at(index).next_scoring_team, Some(0), "frame {index}");
@@ -431,7 +384,7 @@ mod tests {
         );
         // The first episode has no goal: it ends at its last in-play frame; frames of it still look to the
         // overtime goal.
-        let first = labels.frame_from(&observed.frames, 0, &[], &[]);
+        let first = labels.frame_at(&observed.frames, 0);
         assert!((first.episode_seconds_remaining.unwrap() - 0.2).abs() < 1e-6);
         assert_eq!(first.next_scoring_team, Some(1));
         assert!((first.seconds_until_next_goal.unwrap() - 0.7).abs() < 1e-6);
@@ -450,10 +403,10 @@ mod tests {
         let labels = ReplayLabels::new(&observed);
         assert_eq!(labels.episode, [None, None, None, Some(0)]);
         assert_eq!(labels.episodes(), 1);
-        let first = labels.frame_from(&observed.frames, 0, &[], &[]);
+        let first = labels.frame_at(&observed.frames, 0);
         assert_eq!((first.next_scoring_team, first.seconds_until_next_goal), (Some(1), Some(0.0)));
         // No goal after frame 0: the later frames have no next goal.
-        assert_eq!(labels.frame_from(&observed.frames, 3, &[], &[]).next_scoring_team, None);
+        assert_eq!(labels.frame_at(&observed.frames, 3).next_scoring_team, None);
     }
 
     #[test]
@@ -462,63 +415,11 @@ mod tests {
         let labels = ReplayLabels::new(&observed);
         assert_eq!(labels.episode, [None, None]);
         assert_eq!(labels.episodes(), 0);
-        let one = labels.frame_from(&observed.frames, 1, &[], &[]);
+        let one = labels.frame_at(&observed.frames, 1);
         assert_eq!(
             (one.episode, one.episode_seconds_remaining, one.next_scoring_team, one.seconds_until_next_goal),
             (None, None, None, None)
         );
-    }
-
-    fn car(actor_id: i32, key: &str, packet_frame: Option<usize>) -> Car {
-        Car {
-            actor_id,
-            actor_created_frame: 0,
-            player_key: Some(key.to_string()),
-            player_link_active: true,
-            team: Some(0),
-            body_product_id: None,
-            body: Body {
-                position: packet_frame.and_then(|frame| value([0.0; 3], frame)),
-                ..Body::default()
-            },
-            boost: None,
-            boost_raw: None,
-            inputs: Inputs::default(),
-            spawn_pose: None,
-        }
-    }
-
-    #[test]
-    fn the_update_age_is_the_time_since_the_cars_last_packet() {
-        let mut frames: Vec<Frame> = (0..6).map(|index| frame(index, "Active", None)).collect();
-        // Slot 0 (actor 10): packets at frames 1 and 4. Slot 1 (actor 11): none yet at frame 4, one at 5.
-        // Slot 2 (actor 12) is not in the state. Actor 13 is a shadowed older car of slot 0.
-        frames[4].cars = vec![car(10, "a", Some(4)), car(11, "b", None), car(12, "c", Some(0))];
-        frames[3].cars = vec![car(10, "a", Some(1)), car(11, "b", None)];
-        frames[5].cars = vec![car(10, "a", Some(4)), car(11, "b", Some(5)), car(13, "a", Some(0))];
-        frames[5].cars[2].player_link_active = false;
-        let actor_slots = [(10, 0), (11, 1), (12, 2), (13, 0)];
-        let present = [true, true, false];
-        let labels = ReplayLabels::new(&replay(frames.clone()));
-        let at = |index: usize| labels.frame_from(&frames, index, &actor_slots, &present).update_age_seconds;
-        let near = |value: Option<f32>, expected: Option<f32>| match (value, expected) {
-            (Some(a), Some(b)) => assert!((a - b).abs() < 1e-6, "{a} vs {b}"),
-            (a, b) => assert_eq!(a, b),
-        };
-        // Frame 3: slot 0 last updated at frame 1 (0.2 s ago), slot 1 has no packet yet, slot 2 has no car.
-        let ages = at(3);
-        near(ages[0], Some(0.2));
-        assert_eq!((ages[1], ages[2]), (None, None));
-        // Frame 4: a packet in this frame is age 0; the absent slot stays null although its actor has a packet.
-        let ages = at(4);
-        near(ages[0], Some(0.0));
-        assert_eq!((ages[1], ages[2]), (None, None));
-        // Frame 5: the unlinked shadow does not replace the slot's primary car.
-        let ages = at(5);
-        near(ages[0], Some(0.1));
-        near(ages[1], Some(0.0));
-        // A frame with no cars: every slot null.
-        assert_eq!(at(0), vec![None, None, None]);
     }
 
     #[test]

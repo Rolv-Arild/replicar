@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import struct
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -54,10 +55,18 @@ def iter_frames(path: str | Path) -> Iterator[dict[str, Any]]:
         yield record
 
 
+def f32(value: float) -> float:
+    """``value`` rounded to float32 (the frame times are float32 on the Rust side)."""
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+
 def slot_pings(
-    frame: dict[str, Any], slots: list[dict[str, Any]], created: set[int]
-) -> list[int | None]:
-    """The raw ping byte of each car slot's player in one frame, ``None`` where unknown.
+    frame: dict[str, Any], slots: list[dict[str, Any]], created: set[int], times: list[float]
+) -> tuple[list[int | None], list[float | None]]:
+    """The raw ping byte of each car slot's player in one frame and its age in seconds (frame time minus the
+    time of the ping's source frame), ``None`` where unknown.
+
+    ``times`` holds the float32-rounded ``replay_time`` of the frames so far (``f32``), this frame's last.
 
     ``slots`` is the header's ``car_slots`` (the column of a slot is its index). A slot counts as created from
     the first frame its car is in the state (``created`` holds the columns seen so far; keep it across
@@ -69,12 +78,14 @@ def slot_pings(
     for car in frame["state"]["cars"]:
         created.add(slot_columns[car["slot"]])
     pings: list[int | None] = [None] * len(slots)
+    ages: list[float | None] = [None] * len(slots)
     for player in frame["observations"].get("players", ()):
         column = slot_by_key.get(player["key"])
         ping = player.get("ping_raw")
         if column is not None and ping is not None and column in created:
             pings[column] = ping["value"]
-    return pings
+            ages[column] = times[-1] - times[ping["frame"]]
+    return pings, ages
 
 
 def load_numpy(path: str | Path) -> dict[str, Any]:
@@ -102,32 +113,38 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     in collisions.
 
     The ``label_*`` entries are the training labels (the frame's ``labels`` object; see ``src/labels.rs``).
-    They are kept apart from the state and observations, and four of them are FUTURE-DERIVED (read from
-    later frames of the same replay): ``label_episode`` (int32, the goal-to-goal segment, -1 outside play),
+    They are kept apart from the state and observations, and ALL of them are FUTURE-DERIVED (read from
+    later frames of the same replay; each ``labels`` object says ``future_derived: true``):
+    ``label_episode`` (int32, the goal-to-goal segment, -1 outside play),
     ``label_episode_seconds_remaining`` (float32, replay time to the end of the episode, NaN outside one),
     ``label_next_scoring_team`` (int8, 0 blue / 1 orange from the observed goal events, -1 when no goal
-    follows) and ``label_seconds_until_next_goal`` (float32, NaN when none). ``label_update_age_seconds``
-    (frames x car slots, float32) is observed: the frame time minus the time of the frame with the car's
-    last rigid-body packet, NaN with no car or before the first packet. A frame without a ``labels`` object
-    (an older export) reads as unknown throughout. The replay's final score and winning team are in
+    follows) and ``label_seconds_until_next_goal`` (float32, NaN when none). In goal-pause, countdown and
+    tail frames the next-goal labels refer to the next goal anywhere, which may be in the next episode or in
+    overtime. A frame without a ``labels`` object (an older export) reads as unknown throughout. The replay's final score and winning team are in
     ``header["labels"]`` (final, future-derived; not per frame).
 
     ``ping_raw`` (frames x car slots, int16) is an observation, not a label: the raw
     ``Engine.PlayerReplicationInfo:Ping`` byte of the slot's player (probably milliseconds / 4; the unit is
     not calibrated), -1 until the player's first update (a ping of 0 is a value) and for a slot whose car does
-    not exist yet. Host and bot players of a host or LAN replay never have one.
+    not exist yet. Host and bot players of a host or LAN replay never have one. ``ping_age_seconds`` (float32,
+    NaN with the ping) is the frame time minus the time of the frame of the ping's last update, so a stale
+    value is visible.
 
     The packet-freshness entries (the frame's ``freshness`` object, ``src/freshness.rs``) are observed or
-    inferred, not labels: ``ball_fresh`` (frames, bool) and ``car_fresh`` (frames x car slots, bool) say whether
-    the converter applied a fresh rigid-body packet at that frame (the test of the ``packet_lags`` records;
-    ``car_fresh`` is False for a slot with no car, which ``car_present`` tells apart from a stale car).
-    ``ball_update_age_seconds`` (float32, NaN before the first ball packet) is frame time minus the time of the
-    frame with the last ball packet. ``ball_packet_age_ticks`` (int32) and ``car_packet_age_ticks`` (frames x car
+    inferred, not labels: ``ball_fresh`` (frames, int8) and ``car_fresh`` (frames x car slots, int8) say whether
+    the converter applied a fresh rigid-body packet at that frame (1 yes, 0 no, -1 unknown: a slot with no car
+    or whose primary car cannot be resolved in the frame, and a frame of an export without freshness). They
+    count fresh packets in frames the converter does not simulate too, so they are a superset of the
+    ``packet_lags`` rows. ``ball_update_age_seconds`` and ``car_update_age_seconds`` (float32; frames and
+    frames x car slots) are frame time minus the time of the frame with the body's last packet, NaN before the
+    first packet, for an unresolved slot and for a respawned car until its first packet.
+    ``ball_packet_age_ticks`` (int32) and ``car_packet_age_ticks`` (frames x car
     slots, int32) are the frame's timeline tick minus the inferred server tick of the last applied packet (the
     tick of the packet's frame minus its inferred lag, carried forward: 0 to 4 at a fresh frame, growing between
     packets). They use the OFFLINE lag inference (``packet_lags``) and are -1 when unknown: before the first
     packet, when no lag was inferred (inference off, a frame the converter does not simulate, the ``default``
-    lag source), for a respawned car until its first packet, and for a slot with no car.
+    lag source), for a respawned car until its first packet, and for a slot with no car. At a fresh frame they
+    are normally 0 to 4, larger when the frame gap exceeds 4 ticks (train maximum 9 for cars, 5 for the ball).
     """
     import numpy as np
 
@@ -175,14 +192,16 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     label_episode_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
     label_next_scoring_team = np.full(count, -1, dtype=np.int8)
     label_seconds_until_next_goal = np.full(count, np.nan, dtype=np.float32)
-    label_update_age_seconds = np.full((count, car_count), np.nan, dtype=np.float32)
     ping_raw = np.full((count, car_count), -1, dtype=np.int16)
-    ball_fresh = np.zeros(count, dtype=np.bool_)
-    car_fresh = np.zeros((count, car_count), dtype=np.bool_)
+    ping_age_seconds = np.full((count, car_count), np.nan, dtype=np.float32)
+    ball_fresh = np.full(count, -1, dtype=np.int8)
+    car_fresh = np.full((count, car_count), -1, dtype=np.int8)
     ball_update_age_seconds = np.full(count, np.nan, dtype=np.float32)
+    car_update_age_seconds = np.full((count, car_count), np.nan, dtype=np.float32)
     ball_packet_age_ticks = np.full(count, -1, dtype=np.int32)
     car_packet_age_ticks = np.full((count, car_count), -1, dtype=np.int32)
     created_slots: set[int] = set()
+    times: list[float] = []
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -220,18 +239,25 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
             dead_shell_held[row, slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
         for slot in frame.get("spawn_pose_held", ()):
             spawn_pose_held[row, slot_columns[slot]] = True
-        for column, ping in enumerate(slot_pings(frame, slots, created_slots)):
+        times.append(f32(frame["replay_time"]))
+        pings, ping_ages = slot_pings(frame, slots, created_slots, times)
+        for column, ping in enumerate(pings):
             if ping is not None:
                 ping_raw[row, column] = ping
+                ping_age_seconds[row, column] = ping_ages[column]
         freshness = frame.get("freshness")
         if freshness is not None:
-            ball_fresh[row] = freshness["ball_fresh"]
+            ball_fresh[row] = int(freshness["ball_fresh"])
             if freshness["ball_update_age_seconds"] is not None:
                 ball_update_age_seconds[row] = freshness["ball_update_age_seconds"]
             if freshness["ball_packet_age_ticks"] is not None:
                 ball_packet_age_ticks[row] = freshness["ball_packet_age_ticks"]
             for column, fresh in enumerate(freshness["car_fresh"]):
-                car_fresh[row, column] = bool(fresh)  # null (no car) reads False
+                if fresh is not None:
+                    car_fresh[row, column] = int(fresh)
+            for column, age in enumerate(freshness["car_update_age_seconds"]):
+                if age is not None:
+                    car_update_age_seconds[row, column] = age
             for column, age in enumerate(freshness["car_packet_age_ticks"]):
                 if age is not None:
                     car_packet_age_ticks[row, column] = age
@@ -245,9 +271,6 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
                 label_next_scoring_team[row] = labels["next_scoring_team"]
             if labels["seconds_until_next_goal"] is not None:
                 label_seconds_until_next_goal[row] = labels["seconds_until_next_goal"]
-            for column, age in enumerate(labels["update_age_seconds"]):
-                if age is not None:
-                    label_update_age_seconds[row, column] = age
         board = frame.get("scoreboard")
         if board is not None:
             scoreboard_period[row] = board["period"]
@@ -292,11 +315,12 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "label_episode_seconds_remaining": label_episode_seconds_remaining,
         "label_next_scoring_team": label_next_scoring_team,
         "label_seconds_until_next_goal": label_seconds_until_next_goal,
-        "label_update_age_seconds": label_update_age_seconds,
         "ping_raw": ping_raw,
+        "ping_age_seconds": ping_age_seconds,
         "ball_fresh": ball_fresh,
         "car_fresh": car_fresh,
         "ball_update_age_seconds": ball_update_age_seconds,
+        "car_update_age_seconds": car_update_age_seconds,
         "ball_packet_age_ticks": ball_packet_age_ticks,
         "car_packet_age_ticks": car_packet_age_ticks,
     }

@@ -539,11 +539,13 @@ pub struct ConvertedFrame {
     /// Slots whose car is known only from its spawn pose in this frame (no rigid-body packet yet): the exported
     /// pose is the inferred spawn pose, and the car is kept out of the simulation's collisions.
     pub spawn_pose_held: Vec<usize>,
-    /// The frame carries a fresh ball rigid-body packet, which the correction step applied (the same test as
-    /// the ball's `packet_lags` record: the ball's position was updated in this frame). Observed.
+    /// The frame carries a fresh ball rigid-body packet (the ball's position was updated in this frame), which
+    /// the correction step applied. Observed. A superset of the ball's `packet_lags` records: those exist
+    /// only with `infer_packet_lag` and in frames the converter simulates, a fresh packet in a goal pause,
+    /// countdown or first kickoff frame has no record.
     pub ball_fresh: bool,
-    /// Slots whose primary car has a fresh rigid-body packet in this frame, applied by the correction step
-    /// (the same test as the car's `packet_lags` record), ascending. Observed.
+    /// Slots whose primary car has a fresh rigid-body packet in this frame, applied by the correction step,
+    /// ascending. Observed. A superset of the cars' `packet_lags` records, for the same reason.
     pub fresh_car_slots: Vec<usize>,
 }
 
