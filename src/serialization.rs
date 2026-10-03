@@ -366,6 +366,10 @@ struct FrameLine<'a> {
     /// Training labels (`labels.rs`): episode and next-goal labels are future-derived outputs, the per-slot
     /// update age is observed. Never an input of the conversion.
     labels: &'a crate::labels::FrameLabels,
+    /// Packet freshness (`freshness.rs`): which bodies got a fresh packet at this frame and the age of the last
+    /// one. Observed, or inferred with the offline lag inference (the tick ages); never an input of the
+    /// conversion, and not a label.
+    freshness: &'a crate::freshness::FrameFreshness,
 }
 
 pub(crate) fn header_json(
@@ -396,8 +400,9 @@ pub(crate) fn frame_json(
     observed: &observations::Frame,
     residuals: &[PositionResidual],
     labels: &crate::labels::FrameLabels,
+    freshness: &crate::freshness::FrameFreshness,
 ) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(&frame_line(converted, observed, residuals, labels))
+    serde_json::to_vec(&frame_line(converted, observed, residuals, labels, freshness))
 }
 
 fn frame_line<'a>(
@@ -405,6 +410,7 @@ fn frame_line<'a>(
     observed: &'a observations::Frame,
     residuals: &'a [PositionResidual],
     labels: &'a crate::labels::FrameLabels,
+    freshness: &'a crate::freshness::FrameFreshness,
 ) -> FrameLine<'a> {
     FrameLine {
         record_type: "frame",
@@ -426,6 +432,7 @@ fn frame_line<'a>(
         dead_shell_held: &converted.dead_shells_held,
         spawn_pose_held: &converted.spawn_pose_held,
         labels,
+        freshness,
     }
 }
 
@@ -457,6 +464,7 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
     )?;
     writer.write_all(b"\n")?;
     let replay_labels = crate::labels::ReplayLabels::new(&output.observations);
+    let mut freshness = crate::freshness::FreshnessTracker::new(output.car_slots.len());
     let mut residual_index = 0;
     for (converted, observed) in output.frames.iter().zip(&output.observations.frames) {
         let start = residual_index;
@@ -471,11 +479,13 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
             converted,
             output.car_slots.len(),
         );
+        let fresh = freshness.frame(&output.observations, converted.replay_frame, converted);
         let line = frame_line(
             converted,
             observed,
             &output.position_residuals[start..residual_index],
             &labels,
+            &fresh,
         );
         write_line(&mut writer, &line)?;
     }

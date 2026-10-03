@@ -539,6 +539,12 @@ pub struct ConvertedFrame {
     /// Slots whose car is known only from its spawn pose in this frame (no rigid-body packet yet): the exported
     /// pose is the inferred spawn pose, and the car is kept out of the simulation's collisions.
     pub spawn_pose_held: Vec<usize>,
+    /// The frame carries a fresh ball rigid-body packet, which the correction step applied (the same test as
+    /// the ball's `packet_lags` record: the ball's position was updated in this frame). Observed.
+    pub ball_fresh: bool,
+    /// Slots whose primary car has a fresh rigid-body packet in this frame, applied by the correction step
+    /// (the same test as the car's `packet_lags` record), ascending. Observed.
+    pub fresh_car_slots: Vec<usize>,
 }
 
 /// A slot held demolished as a dead pawn shell (`ConvertedFrame::dead_shells_held`).
@@ -6824,6 +6830,18 @@ pub fn convert_observations_with(
                 Some((car.actor_id, slot))
             })
             .collect();
+        let ball_fresh = frame
+            .ball
+            .as_ref()
+            .and_then(|body| body.position.as_ref())
+            .is_some_and(|p| p.frame == frame.index);
+        let mut fresh_car_slots: Vec<usize> = observations::primary_linked_cars(frame)
+            .into_iter()
+            .filter(|car| car.body.position.as_ref().is_some_and(|p| p.frame == frame.index))
+            .filter_map(|car| slots.get(car.player_key.as_ref()?).copied())
+            .collect();
+        fresh_car_slots.sort_unstable();
+        fresh_car_slots.dedup();
         let converted = ConvertedFrame {
             replay_frame: frame.index,
             replay_time: frame.time,
@@ -6879,6 +6897,8 @@ pub fn convert_observations_with(
                 held.sort_by_key(|h| h.slot);
                 held
             },
+            ball_fresh,
+            fresh_car_slots,
         };
         on_frame(&converted, frame, &frame_residuals).map_err(ConvertError::Output)?;
     }

@@ -207,6 +207,50 @@ class LoaderTest(unittest.TestCase):
                 # A ping of 0 is a value; a player with no slot shows nowhere.
                 self.assertEqual(loaded["ping_raw"].tolist(), [[-1], [0], [7], [-1]])
 
+    def test_freshness_masks_and_ages_with_their_null_kinds(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+
+        def with_freshness(index, freshness):
+            return dict(SAMPLE_FRAME, frame=index, freshness=freshness)
+
+        frames = [
+            # Before any packet: nothing fresh, every age unknown.
+            with_freshness(0, {
+                "ball_fresh": False, "car_fresh": [False], "ball_update_age_seconds": None,
+                "ball_packet_age_ticks": None, "car_packet_age_ticks": [None],
+            }),
+            # A fresh packet with a lag of 0 ticks: the ages are values (0), not unknown.
+            with_freshness(1, {
+                "ball_fresh": True, "car_fresh": [True], "ball_update_age_seconds": 0.0,
+                "ball_packet_age_ticks": 0, "car_packet_age_ticks": [3],
+            }),
+            # The slot has no car: car_fresh is null.
+            with_freshness(2, {
+                "ball_fresh": False, "car_fresh": [None], "ball_update_age_seconds": 0.5,
+                "ball_packet_age_ticks": 64, "car_packet_age_ticks": [None],
+            }),
+            dict(SAMPLE_FRAME, frame=3),  # an export without freshness: unknown
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "fresh.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, *frames))) + "\n", encoding="utf-8")
+            parquet = directory / "fresh.parquet"
+            write_columnar(jsonl, parquet, batch_size=3)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                self.assertEqual(loaded["ball_fresh"].tolist(), [False, True, False, False])
+                self.assertEqual(loaded["car_fresh"].tolist(), [[False], [True], [False], [False]])
+                np.testing.assert_equal(
+                    loaded["ball_update_age_seconds"], np.array([np.nan, 0.0, 0.5, np.nan], dtype=np.float32)
+                )
+                self.assertEqual(loaded["ball_packet_age_ticks"].tolist(), [-1, 0, 64, -1])
+                self.assertEqual(loaded["car_packet_age_ticks"].tolist(), [[-1], [3], [-1], [-1]])
+                self.assertEqual(loaded["ball_packet_age_ticks"].dtype, np.int32)
+
     def test_record_tables_beside_the_main_file(self):
         try:
             import pyarrow as pa

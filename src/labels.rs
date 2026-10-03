@@ -25,7 +25,7 @@
 use serde::Serialize;
 
 use crate::conversion::ConvertedFrame;
-use crate::observations::{Event, Frame, ObservedReplay, primary_linked_cars};
+use crate::observations::{Car, Event, Frame, ObservedReplay, primary_linked_cars};
 
 /// The labels of one replay frame (`labels` in a JSONL frame, `label_*` columns in Parquet).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -218,22 +218,35 @@ fn update_ages(
     present: &[bool],
 ) -> Vec<Option<f32>> {
     let frame = &frames[index];
-    let mut ages = vec![None; present.len()];
+    slot_primary_cars(frame, car_actor_slots, present)
+        .into_iter()
+        .map(|car| {
+            car?.body
+                .position
+                .as_ref()
+                .filter(|packet| packet.frame <= index)
+                .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32)
+        })
+        .collect()
+}
+
+/// The car each slot shows in a frame: the primary linked car whose actor maps to the slot in
+/// `car_actor_slots`. `None` for a slot that is not `present` in the state or has no such car.
+pub(crate) fn slot_primary_cars<'a>(
+    frame: &'a Frame,
+    car_actor_slots: &[(i32, usize)],
+    present: &[bool],
+) -> Vec<Option<&'a Car>> {
+    let mut cars = vec![None; present.len()];
     for car in primary_linked_cars(frame) {
         let Some(&(_, slot)) = car_actor_slots.iter().find(|(actor, _)| *actor == car.actor_id) else {
             continue;
         };
-        if !present.get(slot).copied().unwrap_or(false) {
-            continue;
+        if present.get(slot).copied().unwrap_or(false) {
+            cars[slot] = Some(car);
         }
-        ages[slot] = car
-            .body
-            .position
-            .as_ref()
-            .filter(|packet| packet.frame <= index)
-            .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32);
     }
-    ages
+    cars
 }
 
 /// The header labels: final score and winner from the replay's last observed scoreboard.
