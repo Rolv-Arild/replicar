@@ -2,7 +2,6 @@
 
 use std::env;
 use std::error::Error;
-use std::fs;
 
 use replay_to_rocketsim::parse_replay;
 
@@ -16,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("usage: replay_inspect <file> <name-substring> [limit]")?;
     let exact = needle.strip_prefix('=');
     let limit: usize = args.next().unwrap_or_else(|| "20".into()).parse()?;
-    let replay = parse_replay(&fs::read(path)?)?;
+    let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
     let frames = replay
         .network_frames
         .as_ref()

@@ -98,6 +98,13 @@ fn live_car_wins_over_retired_car_with_same_player() {
         &fs::read(path).unwrap(),
         &ConvertOptions {
             collision_meshes: meshes,
+            // This checks which actor wins, by requiring the state to equal its packet; packet lag
+            // inference deliberately advances a packet to the frame time.
+            infer_packet_lag: false,
+            // The demolition-correction counter below counts RocketSim's own demolitions that the
+            // replay contradicts; by default the simulator's rule is off and the replay's
+            // demolitions are applied, so that path is exercised with the simulator's rule on.
+            disable_simulated_demolitions: false,
             ..ConvertOptions::default()
         },
     )
@@ -203,4 +210,73 @@ fn replay_loadout_products_select_hitboxes_and_preserve_nonplaying_ids() {
             );
         }
     }
+}
+
+/// Simulated pad pickups are blocked from the first tick of every interval: a car's exported boost does not
+/// jump to a big pad's worth with neither a fresh replay boost value nor a reported pickup in that frame.
+/// The replay is the one where the pickup rule used to fire (frame 3055: boost 0 to 100 with the replay's
+/// value still 0). Skipped when the local replay or meshes are missing.
+#[test]
+fn a_car_does_not_pick_up_a_pad_the_replay_never_reported() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mesh_path = root.join("collision_meshes");
+    let Some(path) = fs::read_dir(root.join("replays/train/1v1"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("0000a984")))
+    else {
+        eprintln!("skipping pad blocking test: replay missing");
+        return;
+    };
+    if !mesh_path.join("soccar").is_dir() {
+        eprintln!("skipping pad blocking test: meshes missing");
+        return;
+    }
+    let output = convert_bytes(
+        &fs::read(path).unwrap(),
+        &ConvertOptions {
+            collision_meshes: mesh_path,
+            ..ConvertOptions::default()
+        },
+    )
+    .unwrap();
+    let mut previous: std::collections::HashMap<usize, f32> = Default::default();
+    let mut unsupported = Vec::new();
+    for (index, frame) in output.frames.iter().enumerate() {
+        let observed = &output.observations.frames[index];
+        for (info, car) in &frame.state.cars {
+            let before = previous.insert(info.idx, car.boost);
+            let Some(before) = before else { continue };
+            if car.boost - before <= 50.0 {
+                continue;
+            }
+            let key = output
+                .car_slots
+                .iter()
+                .find(|s| s.slot == info.idx)
+                .map(|s| s.player_key.as_str());
+            let observed_car = observed
+                .cars
+                .iter()
+                .find(|c| c.player_key.as_deref() == key);
+            let fresh = observed_car
+                .and_then(|c| c.boost.as_ref())
+                .is_some_and(|b| b.frame == index);
+            let picked = observed_car.is_some_and(|c| {
+                observed
+                    .pad_pickups
+                    .iter()
+                    .any(|p| p.instigator_car_id == Some(c.actor_id))
+            });
+            if !fresh && !picked {
+                unsupported.push((index, info.idx, before, car.boost));
+            }
+        }
+    }
+    assert!(
+        unsupported.is_empty(),
+        "boost jumped without a replay value or a reported pickup: {unsupported:?}"
+    );
 }

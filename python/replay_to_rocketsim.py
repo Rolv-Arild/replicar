@@ -6,16 +6,21 @@ NumPy is imported only when that function is called.
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from typing import Any, Iterator
+
+# Codes of `load_numpy`'s `dead_shell_held` array (0: not held).
+DEAD_SHELL_CODES = {"observed": 1, "inferred": 2}
 
 
 SCHEMA_VERSION = 1
 
 
 def _lines(path: str | Path) -> Iterator[dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as source:
+    opener = gzip.open if Path(path).suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
                 continue
@@ -57,6 +62,21 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     finer lifecycle meaning. Score and clock use NaN when missing from replay.
     Control arrays contain the inputs passed to RocketSim, including inferred
     boost; use ``iter_frames`` for original action counters and provenance.
+
+    The ``scoreboard_*`` entries are the reconstructed match clock: ``scoreboard_period``
+    (``regulation``/``overtime``) and ``scoreboard_clock_state`` (``pregame``, ``countdown``,
+    ``kickoff``, ``running``, ``expired``, ``decided``, ``goal_pause``, ``other``) are object arrays
+    with ``None`` where the frame has no scoreboard; the two clock arrays use NaN for unknown.
+
+    ``dead_shell_held`` (frames x car slots, uint8) marks the frames in which a slot is held
+    demolished as a dead pawn shell: 0 not held, 1 by an observed goal-explosion demolition, 2 by an
+    inference from a sleeping packet of a car with no active pawn link (``DEAD_SHELL_CODES``). Whether
+    a car sleeps (``sleeping_velocity_inferred``) and the start of an inferred hold
+    (``demolition_inferred``) are in the rich frame only (``iter_frames``).
+
+    ``spawn_pose_held`` (frames x car slots, bool) marks the frames in which a slot's car is known only from
+    its spawn pose (no rigid-body packet yet in its lifetime): the pose is inferred and the car takes no part
+    in collisions.
     """
     import numpy as np
 
@@ -94,6 +114,12 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     boost_pad_cooldown = np.full((count, pad_count), np.nan, dtype=np.float32)
     scores = np.full((count, 2), np.nan, dtype=np.float32)
     seconds_remaining = np.full(count, np.nan, dtype=np.float32)
+    scoreboard_period = np.full(count, None, dtype=object)
+    scoreboard_clock_state = np.full(count, None, dtype=object)
+    scoreboard_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
+    scoreboard_overtime_seconds = np.full(count, np.nan, dtype=np.float32)
+    dead_shell_held = np.zeros((count, car_count), dtype=np.uint8)
+    spawn_pose_held = np.zeros((count, car_count), dtype=np.bool_)
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -127,6 +153,18 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         clock = observed["seconds_remaining"]
         if clock is not None:
             seconds_remaining[row] = clock["value"]
+        for held in frame.get("dead_shell_held", ()):
+            dead_shell_held[row, slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
+        for slot in frame.get("spawn_pose_held", ()):
+            spawn_pose_held[row, slot_columns[slot]] = True
+        board = frame.get("scoreboard")
+        if board is not None:
+            scoreboard_period[row] = board["period"]
+            scoreboard_clock_state[row] = board["clock_state"]
+            if board["seconds_remaining"] is not None:
+                scoreboard_seconds_remaining[row] = board["seconds_remaining"]
+            if board["overtime_seconds"] is not None:
+                scoreboard_overtime_seconds[row] = board["overtime_seconds"]
     return {
         "header": header,
         "time": time,
@@ -153,4 +191,10 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "boost_pad_cooldown": boost_pad_cooldown,
         "scores": scores,
         "seconds_remaining": seconds_remaining,
+        "scoreboard_period": scoreboard_period,
+        "scoreboard_clock_state": scoreboard_clock_state,
+        "scoreboard_seconds_remaining": scoreboard_seconds_remaining,
+        "scoreboard_overtime_seconds": scoreboard_overtime_seconds,
+        "dead_shell_held": dead_shell_held,
+        "spawn_pose_held": spawn_pose_held,
     }

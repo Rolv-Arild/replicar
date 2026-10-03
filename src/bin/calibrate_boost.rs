@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     paths.sort();
     let mut by_transition = std::array::from_fn::<_, 4, _>(|_| Counts::default());
     for path in &paths {
-        let replay = parse_replay(&fs::read(path)?)?;
+        let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
         let observed = observations::extract(&replay).ok_or("network frames absent")?;
         let mut previous = HashMap::<(i32, usize), Sample>::new();
         for frame in &observed.frames {

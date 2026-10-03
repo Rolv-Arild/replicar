@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut car_frames = 0;
     let mut action_component_updates = [0usize; 5];
     for path in &paths {
-        let replay = parse_replay(&fs::read(path)?)?;
+        let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
         let observed = observations::extract(&replay).ok_or("network frames missing")?;
         let last = observed.frames.last().ok_or("replay has no frames")?;
         let final_scores = last

@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut counts = std::array::from_fn::<_, 6, _>(|_| Counts::default());
     let mut fresh_updates = [0usize; 3];
     for path in &replay_paths {
-        let observed = observations::extract(&parse_replay(&fs::read(path)?)?)
+        let observed = observations::extract(&parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?)
             .ok_or("network frames absent")?;
         let mut traces: HashMap<(i32, usize), Trace> = HashMap::new();
         for frame in &observed.frames {

@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: replay_audit <directory> [output.json]".into());
     }
 
+    replay_to_rocketsim::ensure_unsealed(Path::new(&root), false)?;
     let audit = audit_directory(Path::new(&root))?;
     eprintln!(
         "audited {} files: {} parsed, {} failed, {} frames",
