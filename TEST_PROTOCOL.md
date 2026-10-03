@@ -1,7 +1,6 @@
 # Test-split assessment protocol (for approval, 2026-10-03)
 
-Status: **ready for approval; the test split has not been touched.** `replays/test` stays sealed until the
-user approves this document and the frozen commit below is tagged. The test split is run once.
+Status: **approved by the user on 2026-10-03 and run once** (tag `test-assessment-1` = `99f0a9d`; results in RESULTS.md, "Test-split assessment"). The test split is no longer unseen; any further run is a second, labelled run.
 
 ## 1. What the assessment is for
 
