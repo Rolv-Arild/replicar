@@ -150,6 +150,11 @@ pub struct Player {
     /// Blue and orange car-body product IDs; the selected body can differ by team.
     pub body_product_ids: [Option<Value<u32>>; 2],
     pub stats: PlayerStats,
+    /// The player's `Engine.PlayerReplicationInfo:Ping` as the replay sends it: the raw byte, kept as is
+    /// (its unit is not calibrated here; probably milliseconds divided by 4), with the frame of its last
+    /// update. Null until the first update: the host and bots of a host or LAN replay never have one.
+    /// An observation only; the conversion does not read it.
+    pub ping_raw: Option<Value<u8>>,
 }
 
 /// Seconds within which a second report of one victim is a repeat.
@@ -385,6 +390,7 @@ struct TrackedPlayer {
     team_actor: Option<ActorId>,
     body_product_ids: [Option<Value<u32>>; 2],
     stats: PlayerStats,
+    ping_raw: Option<Value<u8>>,
 }
 
 #[derive(Default)]
@@ -848,6 +854,11 @@ impl Tracker {
                     });
                 }
             }
+            "Engine.PlayerReplicationInfo:Ping" => {
+                if let (Some(player), Attribute::Byte(ping)) = (self.players.get_mut(&actor), attribute) {
+                    player.ping_raw = Some(Value::replay(*ping, frame));
+                }
+            }
             "TAGame.PRI_TA:MatchScore" => {
                 self.player_stat(actor, attribute, frame, |s| &mut s.match_score)
             }
@@ -958,6 +969,7 @@ impl Tracker {
                     team,
                     body_product_ids: tracked.body_product_ids.clone(),
                     stats: tracked.stats.clone(),
+                    ping_raw: tracked.ping_raw.clone(),
                 }
             })
             .collect();
@@ -1284,5 +1296,49 @@ mod event_tests {
         );
         tracker.delete(ActorId(9));
         assert!(!pickup(&mut tracker));
+    }
+
+    /// The raw ping byte of a player's replication info is kept with the frame of its last update; a player
+    /// that never gets one stays null (not zero), and a ping update for a non-player actor is ignored.
+    #[test]
+    fn the_players_raw_ping_is_kept_with_its_source_frame() {
+        let mut tracker = Tracker::default();
+        for (actor, key) in [(6, "a"), (15, "b")] {
+            tracker.players.insert(
+                ActorId(actor),
+                TrackedPlayer { unique_id: Some(key.to_owned()), ..TrackedPlayer::default() },
+            );
+        }
+        let ping = |tracker: &mut Tracker, actor: i32, attribute: Attribute, frame: usize| {
+            tracker.observe(
+                ActorId(actor),
+                "Engine.PlayerReplicationInfo:Ping",
+                &attribute,
+                &[],
+                frame,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            );
+        };
+        let ping_of = |frame: &Frame, key: &str| {
+            let player = frame.players.iter().find(|player| player.key == key).unwrap();
+            player.ping_raw.as_ref().map(|ping| (ping.value, ping.frame, ping.source))
+        };
+        let before = tracker.snapshot(0, 0.0, 0.0, Vec::new(), Vec::new());
+        assert_eq!((ping_of(&before, "a"), ping_of(&before, "b")), (None, None));
+        ping(&mut tracker, 6, Attribute::Byte(9), 1);
+        ping(&mut tracker, 99, Attribute::Byte(77), 1); // not a player
+        ping(&mut tracker, 15, Attribute::Int(5), 1); // not a byte
+        let first = tracker.snapshot(1, 0.0, 0.0, Vec::new(), Vec::new());
+        assert_eq!(ping_of(&first, "a"), Some((9, 1, Source::Replay)));
+        assert_eq!(ping_of(&first, "b"), None);
+        // A later update replaces the value and its frame; a ping of 0 is a value.
+        ping(&mut tracker, 6, Attribute::Byte(10), 4);
+        ping(&mut tracker, 15, Attribute::Byte(0), 5);
+        let later = tracker.snapshot(6, 0.0, 0.0, Vec::new(), Vec::new());
+        assert_eq!(ping_of(&later, "a"), Some((10, 4, Source::Replay)));
+        assert_eq!(ping_of(&later, "b"), Some((0, 5, Source::Replay)));
+        // The earlier snapshot keeps what it saw.
+        assert_eq!(ping_of(&first, "a"), Some((9, 1, Source::Replay)));
     }
 }

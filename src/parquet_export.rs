@@ -20,6 +20,7 @@ use rocketsim::Mat3A;
 use sha2::{Digest, Sha256};
 
 use crate::conversion::{self, ConvertOptions, ConvertedFrame, PositionResidual};
+use crate::labels::{FrameLabels, ReplayLabels};
 use crate::observations;
 use crate::parquet_tables::{BATCH_SIZE, ExportSummary, Tables, dict, dict_type};
 use crate::scoreboard::ScoreboardFrame;
@@ -55,6 +56,40 @@ struct Row {
     dead_shell_held: Vec<Option<u8>>,
     /// Per car slot: the slot's car is known only from its spawn pose in this frame (no rigid-body packet yet).
     spawn_pose_held: Vec<bool>,
+    /// Training labels (`labels.rs`), written as the `label_*` columns.
+    labels: FrameLabels,
+    /// Per car slot: the raw ping byte of the slot's player (`observations::Player::ping_raw`); `None` until the
+    /// player's first update, and for a slot not created yet. An observation, not a label.
+    ping_raw: Vec<Option<u8>>,
+}
+
+/// The raw ping of each slot's player in this frame. `slot_players` holds each slot's player key, learned from
+/// the frame's car actors (`ConvertedFrame::car_actor_slots`) the frame the slot is created in and kept after.
+fn slot_pings(
+    car_actor_slots: &[(i32, usize)],
+    observed: &observations::Frame,
+    slot_players: &mut [Option<String>],
+) -> Vec<Option<u8>> {
+    for &(actor, slot) in car_actor_slots {
+        let key = observed
+            .cars
+            .iter()
+            .find(|car| car.actor_id == actor)
+            .and_then(|car| car.player_key.as_ref());
+        if let (Some(key), Some(known)) = (key, slot_players.get_mut(slot)) {
+            known.get_or_insert_with(|| key.clone());
+        }
+    }
+    let mut ping_of: HashMap<&str, u8> = HashMap::new();
+    for player in &observed.players {
+        if let Some(ping) = &player.ping_raw {
+            ping_of.insert(player.key.as_str(), ping.value);
+        }
+    }
+    slot_players
+        .iter()
+        .map(|key| key.as_deref().and_then(|key| ping_of.get(key).copied()))
+        .collect()
 }
 
 fn rotation(rot: Mat3A) -> Vec<f32> {
@@ -72,6 +107,8 @@ fn row(
     converted: &ConvertedFrame,
     observed: &observations::Frame,
     residuals: &[PositionResidual],
+    labels: FrameLabels,
+    ping_raw: Vec<Option<u8>>,
     slot_index: &HashMap<usize, usize>,
     cars: usize,
     pad_count: usize,
@@ -120,11 +157,13 @@ fn row(
             .seconds_remaining
             .as_ref()
             .map_or(f32::NAN, |v| v.value as f32),
-        frame_json: serialization::frame_json(converted, observed, residuals)
+        frame_json: serialization::frame_json(converted, observed, residuals, &labels)
             .map_err(io::Error::other)?,
         scoreboard: converted.scoreboard.clone(),
         dead_shell_held: vec![None; cars],
         spawn_pose_held: vec![false; cars],
+        labels,
+        ping_raw,
     };
     for &slot in &converted.spawn_pose_held {
         let Some(&index) = slot_index.get(&slot) else {
@@ -227,6 +266,18 @@ fn schema(cars: usize, pads: usize, pad_json: Vec<u8>) -> io::Result<SchemaRef> 
         list_field("dead_shell_held", DataType::UInt8, cars),
         // Per car slot: the car is known only from its spawn pose (no rigid-body packet yet); false otherwise.
         list_field("spawn_pose_held", DataType::Boolean, cars),
+        // Training labels (`labels.rs`), always separate from the state and observations. Future-derived
+        // (read from later frames): label_episode, label_episode_seconds_remaining, label_next_scoring_team
+        // and label_seconds_until_next_goal; null when not applicable (outside play, no further goal).
+        // Observed: label_update_age_seconds, per car slot (null: no car, or no packet yet).
+        Field::new("label_episode", DataType::UInt32, true),
+        Field::new("label_episode_seconds_remaining", DataType::Float32, true),
+        Field::new("label_next_scoring_team", DataType::UInt8, true),
+        Field::new("label_seconds_until_next_goal", DataType::Float32, true),
+        list_field("label_update_age_seconds", DataType::Float32, cars),
+        // Per car slot, an observation (not a label): the raw `Engine.PlayerReplicationInfo:Ping` byte of the
+        // slot's player (null until its first update, never 0 for unknown).
+        list_field("ping_raw", DataType::UInt8, cars),
     ];
     let metadata = HashMap::from([
         ("columnar_version".to_owned(), "1".to_owned()),
@@ -271,6 +322,20 @@ fn small_ints(rows: &[Row], width: usize, field: fn(&Row) -> &Vec<Option<u8>>) -
             Arc::new(Field::new("item", DataType::UInt8, true)),
             width as i32,
             Arc::new(UInt8Array::from(values)),
+            None,
+        )
+        .map_err(io::Error::other)?,
+    ))
+}
+
+/// A fixed-width list of nullable floats (an item is null when unknown).
+fn nullable_floats(rows: &[Row], width: usize, field: fn(&Row) -> &Vec<Option<f32>>) -> io::Result<ArrayRef> {
+    let values: Vec<Option<f32>> = rows.iter().flat_map(|r| field(r).iter().copied()).collect();
+    Ok(Arc::new(
+        FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            width as i32,
+            Arc::new(Float32Array::from(values)),
             None,
         )
         .map_err(io::Error::other)?,
@@ -330,6 +395,18 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
         )),
         small_ints(rows, cars, |r| &r.dead_shell_held)?,
         bools(rows, cars, |r| &r.spawn_pose_held)?,
+        Arc::new(UInt32Array::from(rows.iter().map(|r| r.labels.episode).collect::<Vec<_>>())),
+        Arc::new(Float32Array::from(
+            rows.iter().map(|r| r.labels.episode_seconds_remaining).collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt8Array::from(
+            rows.iter().map(|r| r.labels.next_scoring_team).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float32Array::from(
+            rows.iter().map(|r| r.labels.seconds_until_next_goal).collect::<Vec<_>>(),
+        )),
+        nullable_floats(rows, cars, |r| &r.labels.update_age_seconds)?,
+        small_ints(rows, cars, |r| &r.ping_raw)?,
     ];
     RecordBatch::try_new(schema, columns).map_err(io::Error::other)
 }
@@ -391,6 +468,8 @@ pub fn write_parquet_with_tables(
             )
         })
         .transpose()?;
+    let replay_labels = ReplayLabels::new(&observed);
+    let mut slot_players: Vec<Option<String>> = vec![None; cars];
     let mut file = Some(file);
     let mut writer: Option<(ArrowWriter<File>, SchemaRef, usize)> = None;
     let mut rows = Vec::with_capacity(BATCH_SIZE);
@@ -428,7 +507,9 @@ pub fn write_parquet_with_tables(
             if let Some(tables) = tables.as_mut() {
                 tables.add_frame(frame, observation)?;
             }
-            rows.push(row(frame, observation, residuals, &slot_index, cars, *pad_count)?);
+            let labels = replay_labels.frame(&observed, frame.replay_frame, frame, cars);
+            let ping_raw = slot_pings(&frame.car_actor_slots, observation, &mut slot_players);
+            rows.push(row(frame, observation, residuals, labels, ping_raw, &slot_index, cars, *pad_count)?);
             count += 1;
             if rows.len() == BATCH_SIZE {
                 arrow_writer
@@ -500,6 +581,14 @@ mod tests {
             scoreboard,
             dead_shell_held: vec![None; 1],
             spawn_pose_held: vec![false; 1],
+            labels: FrameLabels {
+                episode: None,
+                episode_seconds_remaining: None,
+                next_scoring_team: None,
+                seconds_until_next_goal: None,
+                update_age_seconds: vec![None],
+            },
+            ping_raw: vec![None],
         }
     }
 
@@ -543,6 +632,12 @@ mod tests {
                 "scoreboard_overtime_seconds",
                 "dead_shell_held",
                 "spawn_pose_held",
+                "label_episode",
+                "label_episode_seconds_remaining",
+                "label_next_scoring_team",
+                "label_seconds_until_next_goal",
+                "label_update_age_seconds",
+                "ping_raw",
             ]
         );
         assert_eq!(schema.metadata()["columnar_version"], "1");
@@ -605,5 +700,159 @@ mod tests {
         assert!(overtime.is_null(0) && overtime.is_null(2));
         // An overtime clock of exactly 0 s is a value, distinct from unknown.
         assert!(overtime.is_valid(1) && overtime.value(1) == 0.0);
+    }
+
+    /// A one-slot blank row widened to `cars` slots.
+    fn wide_row(frame: u32, cars: usize, labels: FrameLabels) -> Row {
+        let mut row = blank_row(frame, None);
+        row.car_position = vec![f32::NAN; 3 * cars];
+        row.car_rotation_columns = vec![f32::NAN; 9 * cars];
+        row.car_velocity = vec![f32::NAN; 3 * cars];
+        row.car_angular_velocity = vec![f32::NAN; 3 * cars];
+        row.car_boost = vec![f32::NAN; cars];
+        row.car_present = vec![false; cars];
+        row.car_demoed = vec![false; cars];
+        row.control_axes = vec![f32::NAN; 5 * cars];
+        row.control_buttons = vec![false; 3 * cars];
+        row.dead_shell_held = vec![None; cars];
+        row.spawn_pose_held = vec![false; cars];
+        row.ping_raw = vec![None; cars];
+        row.labels = labels;
+        row
+    }
+
+    #[test]
+    fn unknown_labels_are_null_and_known_ones_keep_their_values() {
+        let schema = schema(2, 1, b"[]".to_vec()).unwrap();
+        let known = wide_row(
+            0,
+            2,
+            FrameLabels {
+                episode: Some(0),
+                episode_seconds_remaining: Some(0.0),
+                next_scoring_team: Some(0),
+                seconds_until_next_goal: Some(0.0),
+                update_age_seconds: vec![Some(0.0), None],
+            },
+        );
+        let unknown = wide_row(
+            1,
+            2,
+            FrameLabels {
+                episode: None,
+                episode_seconds_remaining: None,
+                next_scoring_team: None,
+                seconds_until_next_goal: None,
+                update_age_seconds: vec![None, None],
+            },
+        );
+        let batch = batch(&[known, unknown], schema, 2, 1).unwrap();
+        let column = |name: &str| batch.column_by_name(name).unwrap().clone();
+        // Episode 0, 0.0 s, team 0 (blue) are values, distinct from unknown.
+        let episode = column("label_episode");
+        let episode = episode.as_primitive::<arrow_array::types::UInt32Type>();
+        assert!(episode.is_valid(0) && episode.value(0) == 0 && episode.is_null(1));
+        for name in ["label_episode_seconds_remaining", "label_seconds_until_next_goal"] {
+            let array = column(name);
+            let array = array.as_primitive::<Float32Type>();
+            assert!(array.is_valid(0) && array.value(0) == 0.0 && array.is_null(1), "{name}");
+        }
+        let team = column("label_next_scoring_team");
+        let team = team.as_primitive::<UInt8Type>();
+        assert!(team.is_valid(0) && team.value(0) == 0 && team.is_null(1));
+        let ages = column("label_update_age_seconds");
+        let values = ages.as_fixed_size_list().values().as_primitive::<Float32Type>().clone();
+        assert_eq!(values.len(), 4);
+        assert!(values.is_valid(0) && values.value(0) == 0.0);
+        assert!(values.is_null(1) && values.is_null(2) && values.is_null(3));
+    }
+
+    fn player(actor_id: i32, key: &str, ping: Option<(u8, usize)>) -> observations::Player {
+        observations::Player {
+            actor_id,
+            key: key.to_owned(),
+            name: None,
+            team: Some(0),
+            body_product_ids: [None, None],
+            stats: Default::default(),
+            ping_raw: ping.map(|(value, frame)| observations::Value {
+                value,
+                frame,
+                source: observations::Source::Replay,
+            }),
+        }
+    }
+
+    fn car(actor_id: i32, key: Option<&str>) -> observations::Car {
+        observations::Car {
+            actor_id,
+            actor_created_frame: 0,
+            player_key: key.map(str::to_owned),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: Default::default(),
+            boost: None,
+            boost_raw: None,
+            inputs: Default::default(),
+            spawn_pose: None,
+        }
+    }
+
+    fn frame(cars: Vec<observations::Car>, players: Vec<observations::Player>) -> observations::Frame {
+        observations::Frame {
+            index: 0,
+            time: 0.0,
+            delta: 0.0,
+            ball: None,
+            cars,
+            players,
+            team_scores: [None, None],
+            seconds_remaining: None,
+            overtime: None,
+            game_state: None,
+            events: Vec::new(),
+            pad_pickups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_slots_ping_is_its_players_raw_byte_and_null_until_there_is_one() {
+        let mut slot_players = vec![None; 3];
+        // Slots 0 and 1 exist (cars of players "a" and "b"); slot 2 is not created yet. Only "a" has a ping.
+        let first = frame(
+            vec![car(10, Some("a")), car(11, Some("b")), car(12, None)],
+            vec![player(1, "a", Some((0, 3))), player(2, "b", None), player(3, "c", Some((9, 1)))],
+        );
+        let pings = slot_pings(&[(10, 0), (11, 1)], &first, &mut slot_players);
+        // A ping of 0 is a value; no update is null; a player without a slot yet shows nowhere.
+        assert_eq!(pings, [Some(0), None, None]);
+        // The slot keeps its player once learned, also in a frame without its car.
+        let later = frame(
+            vec![car(12, Some("c"))],
+            vec![player(1, "a", Some((7, 8))), player(2, "b", Some((6, 9))), player(3, "c", Some((9, 1)))],
+        );
+        let pings = slot_pings(&[(12, 2)], &later, &mut slot_players);
+        assert_eq!(pings, [Some(7), Some(6), Some(9)]);
+        // And it is a typed, nullable UInt8 list in the file.
+        let schema = schema(3, 1, b"[]".to_vec()).unwrap();
+        let mut row = wide_row(
+            0,
+            3,
+            FrameLabels {
+                episode: None,
+                episode_seconds_remaining: None,
+                next_scoring_team: None,
+                seconds_until_next_goal: None,
+                update_age_seconds: vec![None; 3],
+            },
+        );
+        row.ping_raw = vec![Some(0), None, Some(255)];
+        let batch = batch(&[row], schema, 3, 1).unwrap();
+        let column = batch.column_by_name("ping_raw").unwrap().clone();
+        let values = column.as_fixed_size_list().values().as_primitive::<UInt8Type>().clone();
+        assert!(values.is_valid(0) && values.value(0) == 0);
+        assert!(values.is_null(1));
+        assert!(values.is_valid(2) && values.value(2) == 255);
     }
 }

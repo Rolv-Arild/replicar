@@ -61,6 +61,10 @@ SAMPLE_FRAME = {
         "period": "regulation", "clock_state": "countdown",
         "seconds_remaining": 300.0, "overtime_seconds": None,
     },
+    "labels": {
+        "episode": 0, "episode_seconds_remaining": 1.5, "next_scoring_team": None,
+        "seconds_until_next_goal": None, "update_age_seconds": [0.25],
+    },
 }
 
 
@@ -95,6 +99,15 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual(arrays["scoreboard_clock_state"].tolist(), ["countdown"])
             self.assertEqual(arrays["scoreboard_seconds_remaining"].tolist(), [300.0])
             self.assertTrue(__import__("numpy").isnan(arrays["scoreboard_overtime_seconds"][0]))
+            # Labels: a known value is kept (episode 0 is a value), an unknown one is -1 or NaN.
+            np_ = __import__("numpy")
+            self.assertEqual(arrays["label_episode"].tolist(), [0])
+            self.assertEqual(arrays["label_episode"].dtype, np_.int32)
+            self.assertEqual(arrays["label_episode_seconds_remaining"].tolist(), [1.5])
+            self.assertEqual(arrays["label_next_scoring_team"].tolist(), [-1])
+            self.assertTrue(np_.isnan(arrays["label_seconds_until_next_goal"][0]))
+            self.assertEqual(arrays["label_update_age_seconds"].shape, (1, 1))
+            self.assertEqual(arrays["label_update_age_seconds"].tolist(), [[0.25]])
             compressed = Path(directory) / "sample.jsonl.gz"
             with gzip.open(compressed, "wt", encoding="utf-8") as output:
                 output.write(path.read_text(encoding="utf-8"))
@@ -123,6 +136,76 @@ class LoaderTest(unittest.TestCase):
                         np.testing.assert_equal(loaded[key], expected)
                     else:
                         self.assertEqual(loaded[key], expected)
+
+    def test_labels_of_an_older_export_and_of_every_null_kind(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+        older = {key: value for key, value in SAMPLE_FRAME.items() if key != "labels"}
+        outside = dict(SAMPLE_FRAME, labels={
+            "episode": None, "episode_seconds_remaining": None, "next_scoring_team": 1,
+            "seconds_until_next_goal": 0.0, "update_age_seconds": [None],
+        })
+        outside["frame"] = 1
+        older_only = dict(older)
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "labels.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, SAMPLE_FRAME, outside))) + "\n", encoding="utf-8")
+            old = directory / "older.jsonl"
+            old.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, older_only))) + "\n", encoding="utf-8")
+            parquet = directory / "labels.parquet"
+            write_columnar(jsonl, parquet, batch_size=1)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                self.assertEqual(loaded["label_episode"].tolist(), [0, -1])
+                np.testing.assert_equal(loaded["label_episode_seconds_remaining"], np.array([1.5, np.nan], dtype=np.float32))
+                self.assertEqual(loaded["label_next_scoring_team"].tolist(), [-1, 1])
+                # 0.0 s until the goal is a value, not unknown.
+                np.testing.assert_equal(loaded["label_seconds_until_next_goal"], np.array([np.nan, 0.0], dtype=np.float32))
+                np.testing.assert_equal(loaded["label_update_age_seconds"], np.array([[0.25], [np.nan]], dtype=np.float32))
+            # A frame of an export without labels reads as unknown throughout.
+            unknown = load_numpy(old)
+            self.assertEqual(unknown["label_episode"].tolist(), [-1])
+            self.assertEqual(unknown["label_next_scoring_team"].tolist(), [-1])
+            self.assertTrue(np.isnan(unknown["label_update_age_seconds"]).all())
+            old_parquet = directory / "older.parquet"
+            write_columnar(old, old_parquet, batch_size=1)
+            from_parquet = load_columnar_numpy(old_parquet)
+            self.assertEqual(from_parquet["label_episode"].tolist(), [-1])
+            self.assertTrue(np.isnan(from_parquet["label_seconds_until_next_goal"]).all())
+
+    def test_ping_raw_is_the_players_byte_and_unknown_is_minus_one(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+
+        def with_players(index, players):
+            observations = dict(SAMPLE_FRAME["observations"], players=players)
+            return dict(SAMPLE_FRAME, frame=index, observations=observations)
+
+        def ping(value):
+            return {"value": value, "frame": 0, "source": "replay"}
+
+        frames = [
+            with_players(0, [{"key": "player", "ping_raw": None}]),  # no update yet: unknown
+            with_players(1, [{"key": "player", "ping_raw": ping(0)}, {"key": "other", "ping_raw": ping(9)}]),
+            with_players(2, [{"key": "player", "ping_raw": ping(7)}]),
+            dict(SAMPLE_FRAME, frame=3),  # an export without players: unknown
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "ping.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, *frames))) + "\n", encoding="utf-8")
+            parquet = directory / "ping.parquet"
+            write_columnar(jsonl, parquet, batch_size=2)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                self.assertEqual(loaded["ping_raw"].dtype, np.int16)
+                # A ping of 0 is a value; a player with no slot shows nowhere.
+                self.assertEqual(loaded["ping_raw"].tolist(), [[-1], [0], [7], [-1]])
 
     def test_record_tables_beside_the_main_file(self):
         try:

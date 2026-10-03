@@ -312,6 +312,8 @@ struct HeaderLine<'a> {
     car_slots: &'a [crate::conversion::CarSlot],
     observation_diagnostics: &'a observations::Diagnostics,
     conversion_diagnostics: &'a crate::conversion::Diagnostics,
+    /// Final, future-derived: the replay's own last observed score and winner (never a per-frame value).
+    labels: crate::labels::HeaderLabels,
 }
 
 #[derive(Serialize)]
@@ -361,6 +363,9 @@ struct FrameLine<'a> {
     /// inferred, and the car takes no part in collisions.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     spawn_pose_held: &'a [usize],
+    /// Training labels (`labels.rs`): episode and next-goal labels are future-derived outputs, the per-slot
+    /// update age is observed. Never an input of the conversion.
+    labels: &'a crate::labels::FrameLabels,
 }
 
 pub(crate) fn header_json(
@@ -382,6 +387,7 @@ pub(crate) fn header_json(
         car_slots: &summary.car_slots,
         observation_diagnostics: &observations.diagnostics,
         conversion_diagnostics: &summary.diagnostics,
+        labels: crate::labels::header_labels(observations),
     })
 }
 
@@ -389,14 +395,16 @@ pub(crate) fn frame_json(
     converted: &ConvertedFrame,
     observed: &observations::Frame,
     residuals: &[PositionResidual],
+    labels: &crate::labels::FrameLabels,
 ) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(&frame_line(converted, observed, residuals))
+    serde_json::to_vec(&frame_line(converted, observed, residuals, labels))
 }
 
 fn frame_line<'a>(
     converted: &'a ConvertedFrame,
     observed: &'a observations::Frame,
     residuals: &'a [PositionResidual],
+    labels: &'a crate::labels::FrameLabels,
 ) -> FrameLine<'a> {
     FrameLine {
         record_type: "frame",
@@ -417,6 +425,7 @@ fn frame_line<'a>(
         demolition_inferred: &converted.demolition_inferred,
         dead_shell_held: &converted.dead_shells_held,
         spawn_pose_held: &converted.spawn_pose_held,
+        labels,
     }
 }
 
@@ -447,6 +456,7 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
         .map_err(io::Error::other)?,
     )?;
     writer.write_all(b"\n")?;
+    let replay_labels = crate::labels::ReplayLabels::new(&output.observations);
     let mut residual_index = 0;
     for (converted, observed) in output.frames.iter().zip(&output.observations.frames) {
         let start = residual_index;
@@ -455,10 +465,17 @@ pub fn write_jsonl(output: &ConversionOutput, mut writer: impl Write) -> io::Res
         {
             residual_index += 1;
         }
+        let labels = replay_labels.frame(
+            &output.observations,
+            converted.replay_frame,
+            converted,
+            output.car_slots.len(),
+        );
         let line = frame_line(
             converted,
             observed,
             &output.position_residuals[start..residual_index],
+            &labels,
         );
         write_line(&mut writer, &line)?;
     }

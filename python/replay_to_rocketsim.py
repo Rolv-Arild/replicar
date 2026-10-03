@@ -54,6 +54,29 @@ def iter_frames(path: str | Path) -> Iterator[dict[str, Any]]:
         yield record
 
 
+def slot_pings(
+    frame: dict[str, Any], slots: list[dict[str, Any]], created: set[int]
+) -> list[int | None]:
+    """The raw ping byte of each car slot's player in one frame, ``None`` where unknown.
+
+    ``slots`` is the header's ``car_slots`` (the column of a slot is its index). A slot counts as created from
+    the first frame its car is in the state (``created`` holds the columns seen so far; keep it across
+    frames); before that, and until the player's first ``ping_raw`` update, the ping is unknown (a ping of 0
+    is a value).
+    """
+    slot_columns = {slot["slot"]: index for index, slot in enumerate(slots)}
+    slot_by_key = {slot["player_key"]: index for index, slot in enumerate(slots)}
+    for car in frame["state"]["cars"]:
+        created.add(slot_columns[car["slot"]])
+    pings: list[int | None] = [None] * len(slots)
+    for player in frame["observations"].get("players", ()):
+        column = slot_by_key.get(player["key"])
+        ping = player.get("ping_raw")
+        if column is not None and ping is not None and column in created:
+            pings[column] = ping["value"]
+    return pings
+
+
 def load_numpy(path: str | Path) -> dict[str, Any]:
     """Load dense per-frame arrays. Missing cars use NaNs and a false ``car_present`` mask.
 
@@ -77,6 +100,22 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     ``spawn_pose_held`` (frames x car slots, bool) marks the frames in which a slot's car is known only from
     its spawn pose (no rigid-body packet yet in its lifetime): the pose is inferred and the car takes no part
     in collisions.
+
+    The ``label_*`` entries are the training labels (the frame's ``labels`` object; see ``src/labels.rs``).
+    They are kept apart from the state and observations, and four of them are FUTURE-DERIVED (read from
+    later frames of the same replay): ``label_episode`` (int32, the goal-to-goal segment, -1 outside play),
+    ``label_episode_seconds_remaining`` (float32, replay time to the end of the episode, NaN outside one),
+    ``label_next_scoring_team`` (int8, 0 blue / 1 orange from the observed goal events, -1 when no goal
+    follows) and ``label_seconds_until_next_goal`` (float32, NaN when none). ``label_update_age_seconds``
+    (frames x car slots, float32) is observed: the frame time minus the time of the frame with the car's
+    last rigid-body packet, NaN with no car or before the first packet. A frame without a ``labels`` object
+    (an older export) reads as unknown throughout. The replay's final score and winning team are in
+    ``header["labels"]`` (final, future-derived; not per frame).
+
+    ``ping_raw`` (frames x car slots, int16) is an observation, not a label: the raw
+    ``Engine.PlayerReplicationInfo:Ping`` byte of the slot's player (probably milliseconds / 4; the unit is
+    not calibrated), -1 until the player's first update (a ping of 0 is a value) and for a slot whose car does
+    not exist yet. Host and bot players of a host or LAN replay never have one.
     """
     import numpy as np
 
@@ -120,6 +159,13 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     scoreboard_overtime_seconds = np.full(count, np.nan, dtype=np.float32)
     dead_shell_held = np.zeros((count, car_count), dtype=np.uint8)
     spawn_pose_held = np.zeros((count, car_count), dtype=np.bool_)
+    label_episode = np.full(count, -1, dtype=np.int32)
+    label_episode_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
+    label_next_scoring_team = np.full(count, -1, dtype=np.int8)
+    label_seconds_until_next_goal = np.full(count, np.nan, dtype=np.float32)
+    label_update_age_seconds = np.full((count, car_count), np.nan, dtype=np.float32)
+    ping_raw = np.full((count, car_count), -1, dtype=np.int16)
+    created_slots: set[int] = set()
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -157,6 +203,22 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
             dead_shell_held[row, slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
         for slot in frame.get("spawn_pose_held", ()):
             spawn_pose_held[row, slot_columns[slot]] = True
+        for column, ping in enumerate(slot_pings(frame, slots, created_slots)):
+            if ping is not None:
+                ping_raw[row, column] = ping
+        labels = frame.get("labels")
+        if labels is not None:
+            if labels["episode"] is not None:
+                label_episode[row] = labels["episode"]
+            if labels["episode_seconds_remaining"] is not None:
+                label_episode_seconds_remaining[row] = labels["episode_seconds_remaining"]
+            if labels["next_scoring_team"] is not None:
+                label_next_scoring_team[row] = labels["next_scoring_team"]
+            if labels["seconds_until_next_goal"] is not None:
+                label_seconds_until_next_goal[row] = labels["seconds_until_next_goal"]
+            for column, age in enumerate(labels["update_age_seconds"]):
+                if age is not None:
+                    label_update_age_seconds[row, column] = age
         board = frame.get("scoreboard")
         if board is not None:
             scoreboard_period[row] = board["period"]
@@ -197,4 +259,10 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_overtime_seconds": scoreboard_overtime_seconds,
         "dead_shell_held": dead_shell_held,
         "spawn_pose_held": spawn_pose_held,
+        "label_episode": label_episode,
+        "label_episode_seconds_remaining": label_episode_seconds_remaining,
+        "label_next_scoring_team": label_next_scoring_team,
+        "label_seconds_until_next_goal": label_seconds_until_next_goal,
+        "label_update_age_seconds": label_update_age_seconds,
+        "ping_raw": ping_raw,
     }
