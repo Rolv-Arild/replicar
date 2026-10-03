@@ -53,6 +53,8 @@ struct Row {
     /// Per car slot: `Some(1)` while the slot is held demolished as a dead pawn shell by an observed goal
     /// explosion, `Some(2)` by an inference from a sleeping packet of an unlinked car, `None` otherwise.
     dead_shell_held: Vec<Option<u8>>,
+    /// Per car slot: the slot's car is known only from its spawn pose in this frame (no rigid-body packet yet).
+    spawn_pose_held: Vec<bool>,
 }
 
 fn rotation(rot: Mat3A) -> Vec<f32> {
@@ -122,7 +124,14 @@ fn row(
             .map_err(io::Error::other)?,
         scoreboard: converted.scoreboard.clone(),
         dead_shell_held: vec![None; cars],
+        spawn_pose_held: vec![false; cars],
     };
+    for &slot in &converted.spawn_pose_held {
+        let Some(&index) = slot_index.get(&slot) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "spawn pose hold on an unlisted car slot"));
+        };
+        result.spawn_pose_held[index] = true;
+    }
     for held in &converted.dead_shells_held {
         let Some(&index) = slot_index.get(&held.slot) else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "dead shell on an unlisted car slot"));
@@ -216,6 +225,8 @@ fn schema(cars: usize, pads: usize, pad_json: Vec<u8>) -> io::Result<SchemaRef> 
         // Per car slot (null: not held): 1 held as a dead pawn shell by an observed goal explosion, 2 by an
         // inference from a sleeping packet of a car with no active link.
         list_field("dead_shell_held", DataType::UInt8, cars),
+        // Per car slot: the car is known only from its spawn pose (no rigid-body packet yet); false otherwise.
+        list_field("spawn_pose_held", DataType::Boolean, cars),
     ];
     let metadata = HashMap::from([
         ("columnar_version".to_owned(), "1".to_owned()),
@@ -318,6 +329,7 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
                 .collect::<Vec<_>>(),
         )),
         small_ints(rows, cars, |r| &r.dead_shell_held)?,
+        bools(rows, cars, |r| &r.spawn_pose_held)?,
     ];
     RecordBatch::try_new(schema, columns).map_err(io::Error::other)
 }
@@ -487,6 +499,7 @@ mod tests {
             frame_json: b"{}".to_vec(),
             scoreboard,
             dead_shell_held: vec![None; 1],
+            spawn_pose_held: vec![false; 1],
         }
     }
 
@@ -529,6 +542,7 @@ mod tests {
                 "scoreboard_seconds_remaining",
                 "scoreboard_overtime_seconds",
                 "dead_shell_held",
+                "spawn_pose_held",
             ]
         );
         assert_eq!(schema.metadata()["columnar_version"], "1");

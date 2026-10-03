@@ -54,6 +54,14 @@ pub fn ensure_unsealed(path: &Path, final_assessment: bool) -> Result<(), Box<dy
     Ok(())
 }
 
+/// `std::fs::read` for a replay file, refusing one that resolves into the sealed test split
+/// (`ensure_unsealed`); a drop-in for the tools that read replays.
+pub fn read_replay_file(path: &Path, final_assessment: bool) -> std::io::Result<Vec<u8>> {
+    ensure_unsealed(path, final_assessment)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string()))?;
+    std::fs::read(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

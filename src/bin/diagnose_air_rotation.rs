@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for path in &replay_paths {
         let rotation_start = scale_by_gap[4].len();
         let translation_start = translation_scale_by_gap[4].len();
-        let bytes = fs::read(path)?;
+        let bytes = replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?;
         let parsed = replay_to_rocketsim::parse_replay(&bytes)?;
         let replay = observations::extract(&parsed).ok_or("network observations unavailable")?;
         let mut clock_gaps = Vec::new();

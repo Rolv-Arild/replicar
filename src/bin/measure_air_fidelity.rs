@@ -76,7 +76,7 @@ fn evaluate(
     let mut ang_errors = Vec::new();
 
     for p in replay_paths {
-        let bytes = fs::read(p)?;
+        let bytes = replay_to_rocketsim::read_replay_file(std::path::Path::new(&p), false)?;
         let parsed = replay_to_rocketsim::parse_replay(&bytes)?;
         let observed = observations::extract(&parsed).unwrap();
 

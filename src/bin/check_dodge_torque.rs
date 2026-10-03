@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: check_dodge_torque <train or validation dir or replay>")?,
     );
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let mut radii: Vec<f32> = Vec::new();

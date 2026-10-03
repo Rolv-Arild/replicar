@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .split(',')
         .map(|p| p.to_lowercase())
         .collect();
-    if path.contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(std::path::Path::new(&path), false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let trace = args.next().is_some_and(|a| a == "--trace");

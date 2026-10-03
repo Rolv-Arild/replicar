@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut yaw_steer_comparisons = 0usize;
 
     for p in &replay_paths {
-        let replay = parse_replay(&fs::read(p)?)?;
+        let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&p), false)?)?;
         let observed = observations::extract(&replay).ok_or("network frames absent")?;
         let num_frames = observed.frames.len();
 

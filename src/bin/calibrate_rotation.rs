@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut air = Errors::default();
     let replay_paths = paths(&path)?;
     for path in &replay_paths {
-        let replay = parse_replay(&fs::read(&path)?)?;
+        let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
         let observed = observations::extract(&replay).ok_or("network frames absent")?;
         let mut previous: HashMap<(i32, usize), Sample> = HashMap::new();
         for frame in &observed.frames {

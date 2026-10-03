@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut files = Vec::new();
     for arg in &args {
-        if arg.contains("test") {
+        if replay_to_rocketsim::sealed_path_refused(std::path::Path::new(&arg), false) {
             return Err("refusing to inspect a path containing 'test'".into());
         }
         collect(Path::new(arg), &mut files)?;

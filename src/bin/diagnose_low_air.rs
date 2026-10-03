@@ -354,7 +354,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut replay_sha256 = BTreeMap::new();
     let mut succeeded = 0;
     for (n, (size, path)) in replay_paths.iter().enumerate() {
-        match fs::read(path)
+        match replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)
             .map_err(|e| e.to_string())
             .and_then(|b| convert_bytes(&b, &options).map_err(|e| e.to_string()))
         {

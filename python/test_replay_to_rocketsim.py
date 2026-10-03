@@ -56,6 +56,7 @@ SAMPLE_FRAME = {
         "seconds_remaining": None,
     },
     "dead_shell_held": [{"slot": 3, "source": "inferred"}],
+    "spawn_pose_held": [3],
     "scoreboard": {
         "period": "regulation", "clock_state": "countdown",
         "seconds_remaining": 300.0, "overtime_seconds": None,
@@ -89,6 +90,7 @@ class LoaderTest(unittest.TestCase):
             self.assertTrue(__import__("numpy").isnan(arrays["scores"][0, 1]))
             # The only car slot is held as a dead shell by an inference (code 2).
             self.assertEqual(arrays["dead_shell_held"].tolist(), [[2]])
+            self.assertEqual(arrays["spawn_pose_held"].tolist(), [[True]])
             self.assertEqual(arrays["scoreboard_period"].tolist(), ["regulation"])
             self.assertEqual(arrays["scoreboard_clock_state"].tolist(), ["countdown"])
             self.assertEqual(arrays["scoreboard_seconds_remaining"].tolist(), [300.0])

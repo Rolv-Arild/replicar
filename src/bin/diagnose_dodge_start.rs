@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: diagnose_dodge_start <train dir or replay>")?,
     );
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let max_events: usize = env::args_os()

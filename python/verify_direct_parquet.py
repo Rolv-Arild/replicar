@@ -211,10 +211,12 @@ def main() -> None:
     )
     args = parser.parse_args()
     frames = verify(args.jsonl, args.parquet)
-    held = load_columnar_numpy(args.parquet)["dead_shell_held"]
+    arrays = load_columnar_numpy(args.parquet)
+    held = arrays["dead_shell_held"]
     print(
-        f"Verified {frames} frames, header, and all NumPy arrays (dead-shell column against the JSONL's per-frame "
-        f"list: {int((held == 1).sum())} observed and {int((held == 2).sum())} inferred slot-frames)"
+        f"Verified {frames} frames, header, and all NumPy arrays (dead-shell and spawn-pose columns against the "
+        f"JSONL's per-frame lists: {int((held == 1).sum())} observed and {int((held == 2).sum())} inferred "
+        f"dead-shell slot-frames, {int(arrays['spawn_pose_held'].sum())} spawn-pose slot-frames)"
     )
     if not args.no_tables:
         counts = verify_tables(args.jsonl, args.parquet)

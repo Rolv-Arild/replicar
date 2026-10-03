@@ -7,7 +7,7 @@ use std::fs;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args().nth(1).ok_or("usage: list_demolish_attributes <replay>")?;
-    if path.contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(std::path::Path::new(&path), false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let bytes = fs::read(path)?;

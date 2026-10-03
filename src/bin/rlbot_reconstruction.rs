@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: rlbot_reconstruction <replay> <states.jsonl> [--zero-lag]".into());
     }
     let (replay_path, states_path) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
-    if replay_path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let zero_lag = args.iter().any(|a| a == "--zero-lag");

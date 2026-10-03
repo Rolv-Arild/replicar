@@ -1384,7 +1384,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if files.is_empty() {
         return Err("usage: benchmark_rlcis [options] <states.jsonl>...".into());
     }
-    if files.iter().any(|p| p.to_string_lossy().contains("test")) {
+    if files.iter().any(|p| replay_to_rocketsim::sealed_path_refused(&p, false)) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     if strides.len() < spans.len() {

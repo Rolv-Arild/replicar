@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
-use std::fs;
 
 use replay_to_rocketsim::{observations, parse_replay};
 
@@ -34,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args_os()
         .nth(1)
         .ok_or("usage: calibrate_units <replay>")?;
-    let replay = parse_replay(&fs::read(path)?)?;
+    let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
     let observed = observations::extract(&replay).ok_or("network frames absent")?;
     let mut previous: HashMap<i32, Sample> = HashMap::new();
     let mut linear_ratios = Vec::new();

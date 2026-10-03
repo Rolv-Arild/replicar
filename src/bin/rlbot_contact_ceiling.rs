@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or("usage: rlbot_contact_ceiling <states.jsonl> [meshes]")?);
     let meshes = args.next().unwrap_or_else(|| "collision_meshes".to_string());
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new(&meshes), true)?;

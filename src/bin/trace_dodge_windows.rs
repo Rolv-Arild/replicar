@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: trace_dodge_windows <dir or replay> [count]")?,
     );
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let per_percentile: usize = env::args().nth(2).and_then(|v| v.parse().ok()).unwrap_or(2);

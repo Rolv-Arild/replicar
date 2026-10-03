@@ -1,6 +1,5 @@
 use std::env;
 use std::error::Error;
-use std::fs;
 use std::time::Instant;
 
 use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
@@ -18,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args_os()
         .nth(1)
         .ok_or("usage: convert_preview <replay>")?;
-    let bytes = fs::read(path)?;
+    let bytes = replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?;
     let start = Instant::now();
     let output = convert_bytes(&bytes, &ConvertOptions::default())?;
     let first = output.frames.first().ok_or("empty replay")?;

@@ -9,7 +9,7 @@ use replay_to_rocketsim::conversion::{ConvertOptions, convert_observations};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args().nth(1).ok_or("usage: profile_conversion <replay>")?;
-    if path.contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(std::path::Path::new(&path), false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let bytes = fs::read(&path)?;

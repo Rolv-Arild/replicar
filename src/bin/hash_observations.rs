@@ -25,7 +25,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut files = Vec::new();
     for dir in std::env::args().skip(1) {
-        if dir.contains("test") {
+        if replay_to_rocketsim::sealed_path_refused(std::path::Path::new(&dir), false) {
             return Err("refusing to inspect a path containing 'test'".into());
         }
         let path = Path::new(&dir);

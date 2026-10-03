@@ -679,7 +679,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let (replay_path, states_path, out_path) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]), PathBuf::from(&args[2]));
     for p in [&replay_path, &states_path] {
-        if p.to_string_lossy().contains("test") {
+        if replay_to_rocketsim::sealed_path_refused(&p, false) {
             return Err("refusing to inspect a path containing 'test'".into());
         }
     }

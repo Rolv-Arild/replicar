@@ -4980,6 +4980,8 @@ pub fn convert_observations_with(
     // the demolished state, so the car is held demolished internally; the exported state shows it as not
     // demolished at the spawn pose (`ConvertedFrame::spawn_pose_held`).
     let mut spawn_held: HashSet<usize> = HashSet::new();
+    // Car lifetimes whose spawn-pose hold ended in an observed demolition: a normal demolition from then on.
+    let mut spawn_demolished: HashSet<(i32, usize)> = HashSet::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
     let mut last_dodge_raw: HashMap<(i32, usize), u8> = HashMap::new();
     let mut last_double_raw: HashMap<(i32, usize), u8> = HashMap::new();
@@ -5600,14 +5602,21 @@ pub fn convert_observations_with(
                 // The spawn pose is an inference, not a body: the car it stands for must not hit the ball or other
                 // cars before its first packet (a respawned car whose real self already hit the ball before the
                 // pose was taken would hit it a second time).
-                if car.body.position.is_none() && car.spawn_pose.is_some() {
+                // The hold is kept for as long as the car has no body in this frame's observations, also when it
+                // already has no spawn pose: in a withheld frame the observations hide a first packet (the body
+                // is masked) but not the spawn pose's disappearance, so the release must not follow it.
+                let spawn_lifetime = (car.actor_id, car.actor_created_frame);
+                if car.body.position.is_none()
+                    && (car.spawn_pose.is_some() || spawn_held.contains(&slot))
+                    && !spawn_demolished.contains(&spawn_lifetime)
+                {
                     spawn_held.insert(slot);
                     if !state.is_demoed || state.demo_respawn_timer < 3.0 {
                         state.is_demoed = true;
                         state.demo_respawn_timer = 3.0;
                         dirty = true;
                     }
-                } else if spawn_held.remove(&slot) && state.is_demoed {
+                } else if car.body.position.is_some() && spawn_held.remove(&slot) && state.is_demoed {
                     state.is_demoed = false;
                     state.demo_respawn_timer = 0.0;
                     dirty = true;
@@ -5628,7 +5637,8 @@ pub fn convert_observations_with(
                 if let Some(&(held_actor, held_created, _)) = dead_shells.get(&slot) {
                     if (held_actor, held_created) != lifetime_key || live_packet {
                         dead_shells.remove(&slot);
-                        if state.is_demoed {
+                        // (A new car held on its spawn pose, just above, stays held out of collisions.)
+                        if state.is_demoed && !spawn_held.contains(&slot) {
                             state.is_demoed = false;
                             state.demo_respawn_timer = 0.0;
                             dirty = true;
@@ -5639,11 +5649,15 @@ pub fn convert_observations_with(
                 // A shell whose sleeping packet comes with the report of the demolition that killed it is not held
                 // from its packet time on: the hold would take the body out of the simulation before the bump
                 // (RocketSim's own demolition rule in the masked runs) that also slows the attacker. The
-                // demolition is applied after the frame's interval, and the hold starts there.
-                let demolished_this_frame = frame.events.iter().any(|event| {
-                    matches!(event, observations::Event::Demolish { source, victim_car: Some(v), repeat: false, .. }
-                        if *source != "goal_explosion" && *v == car.actor_id)
-                });
+                // demolition is applied after the frame's interval, and the hold starts there. That handler runs
+                // only in a simulated, non-withheld frame with `apply_observed_demolitions`; in any other frame
+                // (a goal replay, a countdown) nothing would start the hold, so the sleeping packet does.
+                let demolition_handler_runs = options.apply_observed_demolitions && simulated && !frame_withheld;
+                let demolished_this_frame = demolition_handler_runs
+                    && frame.events.iter().any(|event| {
+                        matches!(event, observations::Event::Demolish { source, victim_car: Some(v), repeat: false, .. }
+                            if *source != "goal_explosion" && *v == car.actor_id)
+                    });
                 if sleeping_now.is_some()
                     && !car.player_link_active
                     && !frame_withheld
@@ -6381,6 +6395,11 @@ pub fn convert_observations_with(
                 let sleeping = victim_car.body.sleeping.as_ref().is_some_and(|s| s.value);
                 if goal_explosion && victim_car.player_link_active && !sleeping {
                     continue;
+                }
+                // An observed demolition of a car still held on its spawn pose is a normal demolition: exported as
+                // demolished, with the normal hold rules.
+                if spawn_held.remove(&slot) {
+                    spawn_demolished.insert((*victim, created));
                 }
                 let mut state = *arena.get_car_state(slot);
                 if !state.is_demoed || goal_explosion {
@@ -7320,6 +7339,7 @@ mod tests {
     /// after the frame's interval and the hold starts there, observed, until the live packet.
     #[test]
     fn a_demolished_shell_is_held_after_the_interval_not_from_its_packet() {
+        for (shell_frame_state, expected_source) in [("Active", "observed"), ("PostGoalScored", "inferred")] {
         fn value<T>(value: T, frame: usize) -> Value<T> {
             Value { value, frame, source: Source::Replay }
         }
@@ -7367,7 +7387,7 @@ mod tests {
                 team_scores: [None, None],
                 seconds_remaining: None,
                 overtime: None,
-                game_state: Some(value("Active".to_string(), index)),
+                game_state: Some(value(if index == 1 { shell_frame_state } else { "Active" }.to_string(), index)),
                 events: if index == 1 { vec![demolish.clone()] } else { Vec::new() },
                 pad_pickups: Vec::new(),
             })
@@ -7387,13 +7407,21 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        // Held (observed) from the end of frame 1 through frame 2, not inferred, released by the live packet.
+        // Held from the end of frame 1 through frame 2, released by the live packet. In a simulated frame the
+        // demolition handler holds it after the interval (observed); in a frame that is not simulated (a goal
+        // replay, here `PostGoalScored`) no handler runs, so the sleeping packet starts the hold (inferred).
         let held: Vec<usize> = converted.iter().map(|f| f.dead_shells_held.len()).collect();
-        assert_eq!(held, [0, 1, 1, 0]);
-        assert_eq!(converted[1].dead_shells_held[0].source, "observed");
-        assert!(converted.iter().all(|f| f.demolition_inferred.is_empty()));
-        assert_eq!(summary.diagnostics.dead_shells_after_demolition, 1);
-        assert_eq!(summary.diagnostics.dead_shells_inferred, 0);
+        assert_eq!(held, [0, 1, 1, 0], "{shell_frame_state}");
+        assert_eq!(converted[1].dead_shells_held[0].source, expected_source);
+        if expected_source == "observed" {
+            assert!(converted.iter().all(|f| f.demolition_inferred.is_empty()));
+            assert_eq!(summary.diagnostics.dead_shells_after_demolition, 1);
+            assert_eq!(summary.diagnostics.dead_shells_inferred, 0);
+        } else {
+            assert_eq!(converted[1].demolition_inferred, vec![1]);
+            assert_eq!(summary.diagnostics.dead_shells_inferred, 1);
+        }
+        }
     }
 
     /// A car known only from its spawn pose is kept out of collisions until its first packet (RocketSim's
@@ -7472,6 +7500,197 @@ mod tests {
         // The ball resting on the spawn pose is not hit by it before the first packet.
         assert!(output.frames[..2].iter().all(|f| f.touches.is_empty()));
         assert!(!output.frames[2].state.cars[0].1.is_demoed);
+    }
+
+    /// The spawn-pose hold is not released in a withheld frame (the evaluator masks the body but the spawn pose
+    /// disappears with the first packet, which would reveal it), and an observed demolition of a car still held
+    /// on its spawn pose makes it a normal demolition (exported as demolished).
+    #[test]
+    fn the_spawn_pose_hold_survives_a_withheld_frame_and_ends_in_a_demolition() {
+        fn value<T>(value: T, frame: usize) -> Value<T> {
+            Value { value, frame, source: Source::Replay }
+        }
+        let car = |packet: Option<usize>, spawn: bool| observations::Car {
+            actor_id: 1,
+            actor_created_frame: 0,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: match packet {
+                Some(frame) => Body {
+                    position: Some(value([0.0, 0.0, 17.0], frame)),
+                    rotation_xyzw: Some(value([0.0, 0.0, 0.0, 1.0], frame)),
+                    linear_velocity: Some(value([0.0, 0.0, 0.0], frame)),
+                    ..Body::default()
+                },
+                None => Body::default(),
+            },
+            boost: None,
+            boost_raw: None,
+            spawn_pose: spawn.then(|| observations::SpawnPose {
+                position: [0.0, 0.0, 36.0],
+                rotation_xyzw: Some([0.0, 0.0, 0.0, 1.0]),
+                frame: 0,
+            }),
+            inputs: observations::Inputs::default(),
+        };
+        let demolish = observations::Event::Demolish {
+            source: "extended",
+            attacker_car: Some(2),
+            victim_car: Some(1),
+            attacker_pri: None,
+            self_demolish: false,
+            attacker_velocity: [0.0; 3],
+            victim_velocity: [0.0; 3],
+            repeat: false,
+        };
+        let replay = |cars: Vec<observations::Car>, events: Vec<Vec<observations::Event>>| {
+            let frames = cars
+                .into_iter()
+                .zip(events)
+                .enumerate()
+                .map(|(index, (car, events))| observations::Frame {
+                    index,
+                    time: index as f32 * 0.033,
+                    delta: 0.033,
+                    ball: None,
+                    cars: vec![car],
+                    players: Vec::new(),
+                    team_scores: [None, None],
+                    seconds_remaining: None,
+                    overtime: None,
+                    game_state: Some(value("Active".to_string(), index)),
+                    events,
+                    pad_pickups: Vec::new(),
+                })
+                .collect();
+            ObservedReplay {
+                header: observations::Header {
+                    game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                    levels: Vec::new(),
+                    final_team_scores: [None, None],
+                },
+                frames,
+                diagnostics: Default::default(),
+            }
+        };
+        // Frames 0-1 on the spawn pose; frame 2 is withheld and shows the masked car (no body, and no spawn
+        // pose because the real first packet came in that frame); frame 3 shows the packet.
+        let mut options = ConvertOptions::default();
+        options.withheld_frames = Some(Arc::new(vec![false, false, true, false]));
+        let held = |output: &ConversionOutput| -> Vec<Vec<usize>> {
+            output.frames.iter().map(|f| f.spawn_pose_held.clone()).collect()
+        };
+        let output = convert_observations(
+            replay(
+                vec![car(None, true), car(None, true), car(None, false), car(Some(3), false)],
+                vec![vec![], vec![], vec![], vec![]],
+            ),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(held(&output), [vec![0], vec![0], vec![0], vec![]]);
+        // A demolition of the car on the spawn pose (frame 1): demolished from then on, no longer held.
+        let output = convert_observations(
+            replay(
+                vec![car(None, true), car(None, true), car(None, true), car(Some(3), false)],
+                vec![vec![], vec![demolish], vec![], vec![]],
+            ),
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        let demoed: Vec<bool> = output.frames.iter().map(|f| f.state.cars[0].1.is_demoed).collect();
+        assert_eq!(demoed, [false, true, true, true]);
+        assert_eq!(held(&output), [vec![0], vec![], vec![], vec![]]);
+    }
+
+    /// A respawned car on its spawn pose, replacing a dead shell held on the same slot, is itself held out of
+    /// collisions: ending the shell's hold at the new lifetime must not undo the spawn hold (the car would fall
+    /// and collide from its first frame).
+    #[test]
+    fn a_spawn_pose_hold_survives_the_end_of_the_previous_shells_hold() {
+        fn value<T>(value: T, frame: usize) -> Value<T> {
+            Value { value, frame, source: Source::Replay }
+        }
+        let live_body = |frame: usize, sleeping: bool| Body {
+            position: Some(value([0.0, 0.0, 300.0], frame)),
+            rotation_xyzw: Some(value([0.0, 0.0, 0.0, 1.0], frame)),
+            linear_velocity: (!sleeping).then(|| value([200.0, 0.0, 0.0], frame)),
+            sleeping: Some(value(sleeping, frame)),
+            ..Body::default()
+        };
+        let car = |actor: i32, created: usize, link: bool, body: Body, spawn: bool| observations::Car {
+            actor_id: actor,
+            actor_created_frame: created,
+            player_key: Some("p1".to_string()),
+            player_link_active: link,
+            team: Some(0),
+            body_product_id: None,
+            body,
+            boost: None,
+            boost_raw: None,
+            spawn_pose: spawn.then(|| observations::SpawnPose {
+                position: [0.0, 0.0, 36.0],
+                rotation_xyzw: Some([0.0, 0.0, 0.0, 1.0]),
+                frame: 2,
+            }),
+            inputs: observations::Inputs::default(),
+        };
+        let cars = vec![
+            car(1, 0, true, live_body(0, false), false),
+            car(1, 0, false, live_body(1, true), false),
+            car(2, 2, true, Body::default(), true),
+            car(2, 2, true, Body::default(), true),
+            car(
+                2,
+                2,
+                true,
+                Body {
+                    position: Some(value([0.0, 0.0, 17.0], 4)),
+                    rotation_xyzw: Some(value([0.0, 0.0, 0.0, 1.0], 4)),
+                    linear_velocity: Some(value([0.0, 0.0, 0.0], 4)),
+                    ..Body::default()
+                },
+                false,
+            ),
+        ];
+        let frames = cars
+            .into_iter()
+            .enumerate()
+            .map(|(index, car)| observations::Frame {
+                index,
+                time: index as f32 * 0.033,
+                delta: 0.033,
+                ball: None,
+                cars: vec![car],
+                players: Vec::new(),
+                team_scores: [None, None],
+                seconds_remaining: None,
+                overtime: None,
+                game_state: Some(value("Active".to_string(), index)),
+                events: Vec::new(),
+                pad_pickups: Vec::new(),
+            })
+            .collect();
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let output = convert_observations(replay, &ConvertOptions::default()).unwrap();
+        // Frame 1: the shell is held; frames 2-3: the new car is held on its spawn pose (not falling).
+        assert_eq!(output.frames[1].dead_shells_held.len(), 1);
+        for frame in &output.frames[2..4] {
+            assert_eq!(frame.spawn_pose_held, vec![0]);
+            assert!(frame.dead_shells_held.is_empty());
+            assert!((frame.state.cars[0].1.phys.pos.z - 36.0).abs() < 1e-3, "{}", frame.state.cars[0].1.phys.pos.z);
+        }
+        assert!(output.frames[4].spawn_pose_held.is_empty());
     }
 
     #[test]

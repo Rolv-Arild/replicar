@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: align_dump <replay> <dump.json>")?,
     );
-    if replay_path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new("collision_meshes"), true)?;

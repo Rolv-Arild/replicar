@@ -113,6 +113,8 @@ def _schema(pa: Any, header: dict[str, Any], pads: list[dict[str, Any]]):
         # Per car slot, null when the slot is not held as a dead pawn shell: 1 observed (goal explosion),
         # 2 inferred (sleeping packet of an unlinked car).
         pa.field("dead_shell_held", pa.list_(pa.uint8(), cars)),
+        # Per car slot: the car is known only from its spawn pose (no rigid-body packet yet).
+        pa.field("spawn_pose_held", pa.list_(boolean, cars)),
     ))
     metadata = {
         b"columnar_version": str(COLUMNAR_VERSION).encode(),
@@ -141,6 +143,9 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
     car_demoed = [False] * cars
     control_axes = [missing] * (cars * 5)
     control_buttons = [False] * (cars * 3)
+    spawn_pose_held = [False] * cars
+    for slot in frame.get("spawn_pose_held", ()):
+        spawn_pose_held[slot_columns[slot]] = True
     dead_shell_held: list[int | None] = [None] * cars
     for held in frame.get("dead_shell_held", ()):
         dead_shell_held[slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
@@ -193,6 +198,7 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
         "scoreboard_seconds_remaining": None if board is None else board["seconds_remaining"],
         "scoreboard_overtime_seconds": None if board is None else board["overtime_seconds"],
         "dead_shell_held": dead_shell_held,
+        "spawn_pose_held": spawn_pose_held,
     }
 
 
@@ -320,6 +326,17 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         dead_shell_held = np.nan_to_num(held_values.astype(np.float64), nan=0.0).astype(np.uint8).reshape((count, cars))
     else:
         dead_shell_held = np.zeros((count, cars), dtype=np.uint8)
+    if "spawn_pose_held" in available:
+        if _kind(path) == "parquet":
+            spawn_table = pq.read_table(str(path), columns=["spawn_pose_held"])
+        else:
+            spawn_table = ipc.open_file(str(path)).read_all().select(["spawn_pose_held"])
+        spawn_pose_held = (
+            spawn_table["spawn_pose_held"].combine_chunks().values.to_numpy(zero_copy_only=False)
+            .astype(np.bool_).reshape((count, cars))
+        )
+    else:
+        spawn_pose_held = np.zeros((count, cars), dtype=np.bool_)
 
     def label(name: str):
         if board is None:
@@ -364,6 +381,7 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_seconds_remaining": clock("scoreboard_seconds_remaining"),
         "scoreboard_overtime_seconds": clock("scoreboard_overtime_seconds"),
         "dead_shell_held": dead_shell_held,
+        "spawn_pose_held": spawn_pose_held,
     }
 
 

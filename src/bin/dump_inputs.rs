@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let replay_path = PathBuf::from(args.remove(0));
     let dump_path = PathBuf::from(args.remove(0));
-    if replay_path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let mut player_name = "Vync62".to_string();

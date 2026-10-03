@@ -44,6 +44,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let mut mesh_path = None;
     let mut event_tables = true;
+    // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
+    let mut final_assessment = false;
     while let Some(arg) = args.next() {
         if arg == "--no-inferred-boost" {
             options.infer_boost_from_active = false;
@@ -63,6 +65,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             options.lag_boundary =
                 replay_to_rocketsim::conversion::LagBoundary::from_name(&name.to_string_lossy())
                     .ok_or("--lag-boundary: later or earlier")?;
+        } else if arg == "--final-assessment" {
+            final_assessment = true;
         } else if arg == "--no-event-tables" {
             event_tables = false;
         } else if arg == "--octane-hitbox" {
@@ -75,7 +79,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables] [--final-assessment]".into());
         }
     }
     if let Some(path) = mesh_path {
@@ -95,7 +99,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
-    let bytes = fs::read(&input)?;
+    let bytes = replay_to_rocketsim::read_replay_file(&input, final_assessment)?;
     // Everything is written under temporary names beside the output and published only when the whole export
     // succeeded: a failed run leaves an existing output (and its tables) as it was.
     let temp = temp_path(&output_path);
@@ -123,24 +127,57 @@ fn run() -> Result<(), Box<dyn Error>> {
             return Err(error);
         }
     };
-    // Publish: the tables first, the main file last. If a rename fails part-way, the tables already published
-    // by this run are deleted again (no mixed set of new and old files is left; a table it replaced is gone
-    // with it, which is the lesser evil next to a main file that no longer matches its tables).
+    // Publish. Existing outputs (the main file and the tables this run writes) are first moved to `.bak` names;
+    // then the tables and the main file are renamed into place. If anything fails, what this run published is
+    // deleted again and the backups are restored, so an old export stays complete (old main with its old
+    // tables); on success the backups are deleted. A failed backup removal is a warning.
+    let mut targets: Vec<PathBuf> = table_rows.iter().map(|(table, _)| table_path(&output_path, table)).collect();
+    targets.push(output_path.clone());
+    let backup_of = |target: &std::path::Path| -> PathBuf {
+        let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        target.with_file_name(format!(".{name}.bak-{}", std::process::id()))
+    };
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut published: Vec<PathBuf> = Vec::new();
     let publish = (|| -> std::io::Result<()> {
+        for target in &targets {
+            if target.exists() {
+                let backup = backup_of(target);
+                fs::rename(target, &backup)?;
+                backups.push((target.clone(), backup));
+            }
+        }
         for (table, _) in &table_rows {
             let target = table_path(&output_path, table);
             fs::rename(table_path(&temp, table), &target)?;
             published.push(target);
         }
-        fs::rename(&temp, &output_path)
+        fs::rename(&temp, &output_path)?;
+        published.push(output_path.clone());
+        Ok(())
     })();
     if let Err(error) = publish {
         for target in &published {
-            let _ = fs::remove_file(target);
+            if let Err(remove_error) = fs::remove_file(target) {
+                eprintln!("warning: could not remove {} while rolling back: {remove_error}", target.display());
+            }
+        }
+        for (target, backup) in &backups {
+            if let Err(restore_error) = fs::rename(backup, target) {
+                eprintln!(
+                    "warning: could not restore {} from {}: {restore_error}",
+                    target.display(),
+                    backup.display()
+                );
+            }
         }
         discard(&temp);
         return Err(error.into());
+    }
+    for (_, backup) in &backups {
+        if let Err(error) = fs::remove_file(backup) {
+            eprintln!("warning: could not remove the backup {}: {error}", backup.display());
+        }
     }
     // The stale tables a run without tables leaves behind would be read next to the new main file. The export
     // is complete by now: failing to remove one is a warning.

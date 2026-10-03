@@ -488,7 +488,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "single".to_owned());
-        let parsed = replay_to_rocketsim::parse_replay(&fs::read(path)?)?;
+        let parsed = replay_to_rocketsim::parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&path), false)?)?;
         let replay = observations::extract(&parsed).ok_or("network frames unavailable")?;
         let stats = by_size.entry(size.clone()).or_default();
         let mut replay_stats = Stats::default();

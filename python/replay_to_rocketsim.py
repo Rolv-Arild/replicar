@@ -73,6 +73,10 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     inference from a sleeping packet of a car with no active pawn link (``DEAD_SHELL_CODES``). Whether
     a car sleeps (``sleeping_velocity_inferred``) and the start of an inferred hold
     (``demolition_inferred``) are in the rich frame only (``iter_frames``).
+
+    ``spawn_pose_held`` (frames x car slots, bool) marks the frames in which a slot's car is known only from
+    its spawn pose (no rigid-body packet yet in its lifetime): the pose is inferred and the car takes no part
+    in collisions.
     """
     import numpy as np
 
@@ -115,6 +119,7 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     scoreboard_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
     scoreboard_overtime_seconds = np.full(count, np.nan, dtype=np.float32)
     dead_shell_held = np.zeros((count, car_count), dtype=np.uint8)
+    spawn_pose_held = np.zeros((count, car_count), dtype=np.bool_)
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -150,6 +155,8 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
             seconds_remaining[row] = clock["value"]
         for held in frame.get("dead_shell_held", ()):
             dead_shell_held[row, slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
+        for slot in frame.get("spawn_pose_held", ()):
+            spawn_pose_held[row, slot_columns[slot]] = True
         board = frame.get("scoreboard")
         if board is not None:
             scoreboard_period[row] = board["period"]
@@ -189,4 +196,5 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_seconds_remaining": scoreboard_seconds_remaining,
         "scoreboard_overtime_seconds": scoreboard_overtime_seconds,
         "dead_shell_held": dead_shell_held,
+        "spawn_pose_held": spawn_pose_held,
     }

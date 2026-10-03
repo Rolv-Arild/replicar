@@ -309,7 +309,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a_path = PathBuf::from(args.next().ok_or("usage: dual_perspective <a> <b>")?);
     let b_path = PathBuf::from(args.next().ok_or("usage: dual_perspective <a> <b>")?);
     for path in [&a_path, &b_path] {
-        if path.to_string_lossy().contains("test") {
+        if replay_to_rocketsim::sealed_path_refused(&path, false) {
             return Err("refusing to inspect a path containing 'test'".into());
         }
     }

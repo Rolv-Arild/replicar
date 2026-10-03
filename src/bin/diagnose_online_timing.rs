@@ -33,7 +33,7 @@ fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or("usage: diagnose_online_timing <dir or replay> [max]")?);
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let max: usize = args.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);

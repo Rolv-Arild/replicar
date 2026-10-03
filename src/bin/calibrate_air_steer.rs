@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut steer_roll_opposite_sign = 0usize;
 
     for p in &replay_paths {
-        let replay = parse_replay(&fs::read(p)?)?;
+        let replay = parse_replay(&replay_to_rocketsim::read_replay_file(std::path::Path::new(&p), false)?)?;
         let observed = observations::extract(&replay).ok_or("network frames absent")?;
         for frame in &observed.frames {
             if !frame

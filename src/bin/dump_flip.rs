@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: dump_flip <dump.json>")?,
     );
-    if path.to_string_lossy().contains("test") {
+    if replay_to_rocketsim::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new("collision_meshes"), true)?;
