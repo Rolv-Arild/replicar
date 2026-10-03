@@ -8,7 +8,7 @@ Next action (2026-10-03): the single test-split assessment is done (tag `test-as
 
 Convert Rocket League replay network frames into timestamp-aligned RocketSim game states, plus match information such as players, teams, score, clock, events, and provenance. Replay observations are the primary evidence. RocketSim supplies physically plausible states between observations and estimates of fields absent from the replay. Expose a Rust API and a stable, Python-readable serialized dataset.
 
-The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Other modes, mutators, unusual arenas, and replay versions must be detected and reported; add support only after the soccar pipeline is measured. Do not consult the existing `rlgym-tools` Python converter or `rust-carball` implementation until the user provides them for comparison.
+The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Other modes, mutators, unusual arenas, and replay versions must be detected and reported; add support only after the soccar pipeline is measured. The user supplied the `rlgym-tools` converter and its `rust-carball` backend for comparison on 2026-10-03 (AGENTS.md has the paths).
 
 ## Current repository and data
 
@@ -295,6 +295,8 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-02 (orchestration): the main session now orchestrates three persistent Sonnet 5.5 workers (implementer, evaluator, reviewer; AGENTS.md updated). Branch `audit-and-leftovers` from `07e0bb6` for the audit and the review leftovers. Record fixes: stale RocketSim and boxcars pins in this file, the next action, and the stale regeneration note in `TEST_PROTOCOL.md` section 4.
 
 - 2026-10-03 (test assessment): `TEST_PROTOCOL.md` approved by the user; tagged `test-assessment-1` (`99f0a9d`) and run once (RESULTS 'Test-split assessment'). Merged `audit-and-leftovers` into `master` (the 'happy' definition of 2026-10-02 met).
+
+- 2026-10-03 (after the test run): compared with the user's `rlgym-tools` converter and `rust-carball` (read-only); per-player ping measured against the fitted timing (explains part of the recorder's lead, no converter change; RESULTS 'Per-player ping'); export gained future-derived training labels (`labels` / `label_*`), the observed ping with its age, and freshness columns (fresh masks, update ages, packet ages in ticks); reviewed and merged into `master`. Action picking not ported (user decision).
 
 ## Backlog (kept current; 2026-10-02)
 

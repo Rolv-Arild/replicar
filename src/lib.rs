@@ -122,6 +122,8 @@ pub mod audit;
 pub mod ball_evidence;
 pub mod contact_alignment;
 pub mod conversion;
+pub mod freshness;
+pub mod labels;
 pub mod observations;
 pub mod parquet_export;
 pub mod parquet_tables;

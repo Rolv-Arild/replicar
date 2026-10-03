@@ -61,6 +61,11 @@ SAMPLE_FRAME = {
         "period": "regulation", "clock_state": "countdown",
         "seconds_remaining": 300.0, "overtime_seconds": None,
     },
+    "labels": {
+        "future_derived": True,
+        "episode": 0, "episode_seconds_remaining": 1.5, "next_scoring_team": None,
+        "seconds_until_next_goal": None,
+    },
 }
 
 
@@ -95,6 +100,15 @@ class LoaderTest(unittest.TestCase):
             self.assertEqual(arrays["scoreboard_clock_state"].tolist(), ["countdown"])
             self.assertEqual(arrays["scoreboard_seconds_remaining"].tolist(), [300.0])
             self.assertTrue(__import__("numpy").isnan(arrays["scoreboard_overtime_seconds"][0]))
+            # Labels: a known value is kept (episode 0 is a value), an unknown one is -1 or NaN.
+            np_ = __import__("numpy")
+            self.assertEqual(arrays["label_episode"].tolist(), [0])
+            self.assertEqual(arrays["label_episode"].dtype, np_.int32)
+            self.assertEqual(arrays["label_episode_seconds_remaining"].tolist(), [1.5])
+            self.assertEqual(arrays["label_next_scoring_team"].tolist(), [-1])
+            self.assertTrue(np_.isnan(arrays["label_seconds_until_next_goal"][0]))
+            # The observed ages are not labels.
+            self.assertNotIn("label_update_age_seconds", arrays)
             compressed = Path(directory) / "sample.jsonl.gz"
             with gzip.open(compressed, "wt", encoding="utf-8") as output:
                 output.write(path.read_text(encoding="utf-8"))
@@ -123,6 +137,132 @@ class LoaderTest(unittest.TestCase):
                         np.testing.assert_equal(loaded[key], expected)
                     else:
                         self.assertEqual(loaded[key], expected)
+
+    def test_labels_of_an_older_export_and_of_every_null_kind(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+        older = {key: value for key, value in SAMPLE_FRAME.items() if key != "labels"}
+        outside = dict(SAMPLE_FRAME, labels={
+            "future_derived": True,
+            "episode": None, "episode_seconds_remaining": None, "next_scoring_team": 1,
+            "seconds_until_next_goal": 0.0,
+        })
+        outside["frame"] = 1
+        older_only = dict(older)
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "labels.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, SAMPLE_FRAME, outside))) + "\n", encoding="utf-8")
+            old = directory / "older.jsonl"
+            old.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, older_only))) + "\n", encoding="utf-8")
+            parquet = directory / "labels.parquet"
+            write_columnar(jsonl, parquet, batch_size=1)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                self.assertEqual(loaded["label_episode"].tolist(), [0, -1])
+                np.testing.assert_equal(loaded["label_episode_seconds_remaining"], np.array([1.5, np.nan], dtype=np.float32))
+                self.assertEqual(loaded["label_next_scoring_team"].tolist(), [-1, 1])
+                # 0.0 s until the goal is a value, not unknown.
+                np.testing.assert_equal(loaded["label_seconds_until_next_goal"], np.array([np.nan, 0.0], dtype=np.float32))
+            # A frame of an export without labels reads as unknown throughout.
+            unknown = load_numpy(old)
+            self.assertEqual(unknown["label_episode"].tolist(), [-1])
+            self.assertEqual(unknown["label_next_scoring_team"].tolist(), [-1])
+            old_parquet = directory / "older.parquet"
+            write_columnar(old, old_parquet, batch_size=1)
+            from_parquet = load_columnar_numpy(old_parquet)
+            self.assertEqual(from_parquet["label_episode"].tolist(), [-1])
+            self.assertTrue(np.isnan(from_parquet["label_seconds_until_next_goal"]).all())
+
+    def test_ping_raw_is_the_players_byte_and_unknown_is_minus_one(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+
+        def with_players(index, players):
+            observations = dict(SAMPLE_FRAME["observations"], players=players)
+            # frame times 1.5, 2.0, 2.5, 3.0
+            return dict(SAMPLE_FRAME, frame=index, replay_time=1.5 + 0.5 * index, observations=observations)
+
+        def ping(value, frame=0):
+            return {"value": value, "frame": frame, "source": "replay"}
+
+        frames = [
+            with_players(0, [{"key": "player", "ping_raw": None}]),  # no update yet: unknown
+            with_players(1, [{"key": "player", "ping_raw": ping(0)}, {"key": "other", "ping_raw": ping(9)}]),
+            with_players(2, [{"key": "player", "ping_raw": ping(7, 1)}]),  # updated one frame ago
+            dict(SAMPLE_FRAME, frame=3, replay_time=3.0),  # an export without players: unknown
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "ping.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, *frames))) + "\n", encoding="utf-8")
+            parquet = directory / "ping.parquet"
+            write_columnar(jsonl, parquet, batch_size=2)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                self.assertEqual(loaded["ping_raw"].dtype, np.int16)
+                # A ping of 0 is a value; a player with no slot shows nowhere.
+                self.assertEqual(loaded["ping_raw"].tolist(), [[-1], [0], [7], [-1]])
+                # The age of the value (frame time minus its source frame's time); NaN with the ping.
+                np.testing.assert_equal(
+                    loaded["ping_age_seconds"], np.array([[np.nan], [0.5], [0.5], [np.nan]], dtype=np.float32)
+                )
+
+    def test_freshness_masks_and_ages_with_their_null_kinds(self):
+        try:
+            import numpy as np
+            import pyarrow  # noqa: F401
+        except ImportError:
+            self.skipTest("NumPy or pyarrow is not installed")
+
+        def with_freshness(index, freshness):
+            return dict(SAMPLE_FRAME, frame=index, freshness=freshness)
+
+        frames = [
+            # Before any packet: nothing fresh, every age unknown.
+            with_freshness(0, {
+                "ball_fresh": False, "car_fresh": [False], "ball_update_age_seconds": None,
+                "car_update_age_seconds": [None],
+                "ball_packet_age_ticks": None, "car_packet_age_ticks": [None],
+            }),
+            # A fresh packet with a lag of 0 ticks: the ages are values (0), not unknown.
+            with_freshness(1, {
+                "ball_fresh": True, "car_fresh": [True], "ball_update_age_seconds": 0.0,
+                "car_update_age_seconds": [0.0],
+                "ball_packet_age_ticks": 0, "car_packet_age_ticks": [3],
+            }),
+            # The slot has no resolved car: car_fresh and the car's ages are null (unknown, not stale).
+            with_freshness(2, {
+                "ball_fresh": False, "car_fresh": [None], "ball_update_age_seconds": 0.5,
+                "car_update_age_seconds": [None],
+                "ball_packet_age_ticks": 64, "car_packet_age_ticks": [None],
+            }),
+            dict(SAMPLE_FRAME, frame=3),  # an export without freshness: unknown
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            jsonl = directory / "fresh.jsonl"
+            jsonl.write_text("\n".join(map(json.dumps, (SAMPLE_HEADER, *frames))) + "\n", encoding="utf-8")
+            parquet = directory / "fresh.parquet"
+            write_columnar(jsonl, parquet, batch_size=3)
+            for loaded in (load_numpy(jsonl), load_columnar_numpy(parquet)):
+                # 1 fresh, 0 not fresh, -1 unknown (an unresolved slot, an export without freshness).
+                self.assertEqual(loaded["ball_fresh"].tolist(), [0, 1, 0, -1])
+                self.assertEqual(loaded["ball_fresh"].dtype, np.int8)
+                self.assertEqual(loaded["car_fresh"].tolist(), [[0], [1], [-1], [-1]])
+                np.testing.assert_equal(
+                    loaded["car_update_age_seconds"], np.array([[np.nan], [0.0], [np.nan], [np.nan]], dtype=np.float32)
+                )
+                np.testing.assert_equal(
+                    loaded["ball_update_age_seconds"], np.array([np.nan, 0.0, 0.5, np.nan], dtype=np.float32)
+                )
+                self.assertEqual(loaded["ball_packet_age_ticks"].tolist(), [-1, 0, 64, -1])
+                self.assertEqual(loaded["car_packet_age_ticks"].tolist(), [[-1], [3], [-1], [-1]])
+                self.assertEqual(loaded["ball_packet_age_ticks"].dtype, np.int32)
 
     def test_record_tables_beside_the_main_file(self):
         try:

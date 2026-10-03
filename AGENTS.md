@@ -7,7 +7,7 @@ These instructions apply throughout this repository. The user wants a reliable c
 - Read `README.md` for the current workflow, the top of `PLAN.md` for the next action, and the recent sections of `RESULTS.md` for evidence and limitations. Inspect `git status` and recent commits before changing anything.
 - Treat `PLAN.md` as the handoff record. Keep its next action and work log current when a logical step finishes. Put protocols, numbers, negative results, and limitations in `RESULTS.md`.
 - The Rust API lives mainly in `src/observations.rs`, `src/conversion.rs`, and `src/serialization.rs`. `boxcars` parses network frames; the pinned native `rocketsim` crate fills intermediate active-play ticks. Preserve the dependency pins unless a measured change justifies updating them (RocketSim was updated on 2026-09-29 to `0b02051`; re-run the logged issues in `ROCKETSIM_NOTES.md` after any update).
-- Do not inspect the user's existing `rlgym-tools` Python converter or `rust-carball` implementation until the user supplies them for comparison.
+- The user's `rlgym-tools` converter (`C:/Users/Rolv/PycharmProjects/rlgym-tools`, `rlgym_tools/rocket_league/replays/`) and its `rust-carball` backend (`../rust-carball`, branch `rolv`) may be read for comparison since 2026-10-03; do not copy code from them without saying so.
 
 ## Replay and evaluation rules
 

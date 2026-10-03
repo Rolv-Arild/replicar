@@ -14,7 +14,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Iterator
 
-from replay_to_rocketsim import DEAD_SHELL_CODES, iter_frames, read_header
+from replay_to_rocketsim import DEAD_SHELL_CODES, f32, iter_frames, read_header, slot_pings
 
 
 COLUMNAR_VERSION = 1
@@ -45,6 +45,29 @@ SCOREBOARD_COLUMNS = (
     "scoreboard_clock_state",
     "scoreboard_seconds_remaining",
     "scoreboard_overtime_seconds",
+)
+# Appended after ``spawn_pose_held`` by the Rust writer (and by ``write_columnar``): the training labels
+# (``labels`` in a JSONL frame). All future-derived.
+# A file written before they existed lacks them; the loader then reports unknown.
+LABEL_COLUMNS = (
+    "label_episode",
+    "label_episode_seconds_remaining",
+    "label_next_scoring_team",
+    "label_seconds_until_next_goal",
+)
+# Appended after the label columns: per car slot, the raw ping byte of the slot's player (an observation,
+# not a label); null until the player's first update.
+PING_COLUMN = "ping_raw"
+PING_AGE_COLUMN = "ping_age_seconds"  # per slot: frame time minus the time of the ping's source frame
+# Appended after ``ping_raw``: packet freshness (``freshness`` in a JSONL frame), observed or inferred (the tick
+# ages use the offline lag inference), not labels.
+FRESHNESS_COLUMNS = (
+    "ball_fresh",
+    "car_fresh",
+    "ball_update_age_seconds",
+    "car_update_age_seconds",
+    "ball_packet_age_ticks",
+    "car_packet_age_ticks",
 )
 # Side tables written beside the main file by the Rust writer as ``<stem>.<table>.parquet``.
 RECORD_TABLES = (
@@ -115,6 +138,19 @@ def _schema(pa: Any, header: dict[str, Any], pads: list[dict[str, Any]]):
         pa.field("dead_shell_held", pa.list_(pa.uint8(), cars)),
         # Per car slot: the car is known only from its spawn pose (no rigid-body packet yet).
         pa.field("spawn_pose_held", pa.list_(boolean, cars)),
+        # Training labels, null when unknown or not applicable (see LABEL_COLUMNS).
+        pa.field("label_episode", pa.uint32()),
+        pa.field("label_episode_seconds_remaining", f32),
+        pa.field("label_next_scoring_team", pa.uint8()),
+        pa.field("label_seconds_until_next_goal", f32),
+        pa.field(PING_COLUMN, pa.list_(pa.uint8(), cars)),
+        pa.field(PING_AGE_COLUMN, pa.list_(f32, cars)),
+        pa.field("ball_fresh", boolean),
+        pa.field("car_fresh", pa.list_(boolean, cars)),
+        pa.field("ball_update_age_seconds", f32),
+        pa.field("car_update_age_seconds", pa.list_(f32, cars)),
+        pa.field("ball_packet_age_ticks", pa.uint32()),
+        pa.field("car_packet_age_ticks", pa.list_(pa.uint32(), cars)),
     ))
     metadata = {
         b"columnar_version": str(COLUMNAR_VERSION).encode(),
@@ -128,7 +164,10 @@ def _flatten(matrix: list[list[Any]]) -> list[Any]:
     return [item for row in matrix for item in row]
 
 
-def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> dict[str, Any]:
+def _row(
+    frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int, created_slots: set[int],
+    times: list[float],
+) -> dict[str, Any]:
     state = frame["state"]
     ball = state["ball"]["physics"]
     cars = len(slots)
@@ -164,6 +203,10 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
     pads = state["boost_pads"]
     if len(pads) != pad_count:
         raise ValueError(f"boost pad count changed at frame {frame['frame']}")
+    labels = frame.get("labels") or {}
+    freshness = frame.get("freshness") or {}
+    times.append(f32(frame["replay_time"]))
+    pings, ping_ages = slot_pings(frame, slots, created_slots, times)
     scores = [
         missing if score is None else score["value"]
         for score in frame["observations"]["team_scores"]
@@ -199,6 +242,18 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
         "scoreboard_overtime_seconds": None if board is None else board["overtime_seconds"],
         "dead_shell_held": dead_shell_held,
         "spawn_pose_held": spawn_pose_held,
+        "label_episode": labels.get("episode"),
+        "label_episode_seconds_remaining": labels.get("episode_seconds_remaining"),
+        "label_next_scoring_team": labels.get("next_scoring_team"),
+        "label_seconds_until_next_goal": labels.get("seconds_until_next_goal"),
+        PING_COLUMN: pings,
+        PING_AGE_COLUMN: ping_ages,
+        "ball_fresh": freshness.get("ball_fresh"),
+        "car_fresh": freshness.get("car_fresh") or [None] * cars,
+        "ball_update_age_seconds": freshness.get("ball_update_age_seconds"),
+        "car_update_age_seconds": freshness.get("car_update_age_seconds") or [None] * cars,
+        "ball_packet_age_ticks": freshness.get("ball_packet_age_ticks"),
+        "car_packet_age_ticks": freshness.get("car_packet_age_ticks") or [None] * cars,
     }
 
 
@@ -222,14 +277,16 @@ def write_columnar(jsonl_path: str | Path, output_path: str | Path, batch_size: 
     )
     count = 0
     batch: list[dict[str, Any]] = []
+    created_slots: set[int] = set()
+    times: list[float] = []
     try:
         if first is not None:
-            batch.append(_row(first, header["car_slots"], len(pads)))
+            batch.append(_row(first, header["car_slots"], len(pads), created_slots, times))
             count = 1
         for frame in frames:
             if frame["frame"] != count:
                 raise ValueError(f"unexpected frame index {frame['frame']}; expected {count}")
-            batch.append(_row(frame, header["car_slots"], len(pads)))
+            batch.append(_row(frame, header["car_slots"], len(pads), created_slots, times))
             count += 1
             if len(batch) >= batch_size:
                 writer.write_table(pa.Table.from_pylist(batch, schema=schema))
@@ -338,6 +395,91 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
     else:
         spawn_pose_held = np.zeros((count, cars), dtype=np.bool_)
 
+    # Training labels (optional, older files): null is unknown, read as -1 (integers) or NaN (floats).
+    label_names = set(LABEL_COLUMNS) & available
+    if label_names:
+        read = list(label_names)
+        label_table = (
+            pq.read_table(str(path), columns=read) if _kind(path) == "parquet"
+            else ipc.open_file(str(path)).read_all().select(read)
+        )
+    else:
+        label_table = None
+
+    def label_ints(name: str, dtype: Any):
+        if label_table is None or name not in label_names:
+            return np.full(count, -1, dtype=dtype)
+        values = label_table[name].combine_chunks().to_numpy(zero_copy_only=False).astype(np.float64)
+        return np.nan_to_num(values, nan=-1.0).astype(dtype)
+
+    def label_floats(name: str):
+        if label_table is None or name not in label_names:
+            return np.full(count, np.nan, dtype=np.float32)
+        return label_table[name].combine_chunks().to_numpy(zero_copy_only=False).astype(np.float32, copy=True)
+
+    # The raw ping per slot (optional, older files): null is unknown, read as -1.
+    if PING_COLUMN in available:
+        ping_table = (
+            pq.read_table(str(path), columns=[PING_COLUMN]) if _kind(path) == "parquet"
+            else ipc.open_file(str(path)).read_all().select([PING_COLUMN])
+        )
+        ping_values = ping_table[PING_COLUMN].combine_chunks().values.to_numpy(zero_copy_only=False)
+        ping_raw = np.nan_to_num(ping_values.astype(np.float64), nan=-1.0).astype(np.int16).reshape((count, cars))
+    else:
+        ping_raw = np.full((count, cars), -1, dtype=np.int16)
+    if PING_AGE_COLUMN in available:
+        age_table = (
+            pq.read_table(str(path), columns=[PING_AGE_COLUMN]) if _kind(path) == "parquet"
+            else ipc.open_file(str(path)).read_all().select([PING_AGE_COLUMN])
+        )
+        ping_age_seconds = (
+            age_table[PING_AGE_COLUMN].combine_chunks().values
+            .to_numpy(zero_copy_only=False).astype(np.float32, copy=True).reshape((count, cars))
+        )
+    else:
+        ping_age_seconds = np.full((count, cars), np.nan, dtype=np.float32)
+
+    # Packet freshness (optional, older files): unknown reads as -1 (masks and tick ages) or NaN.
+    fresh_names = set(FRESHNESS_COLUMNS) & available
+    if fresh_names:
+        read = list(fresh_names)
+        fresh_table = (
+            pq.read_table(str(path), columns=read) if _kind(path) == "parquet"
+            else ipc.open_file(str(path)).read_all().select(read)
+        )
+
+    def fresh_flat(name: str):
+        return fresh_table[name].combine_chunks().to_numpy(zero_copy_only=False)
+
+    def fresh_list(name: str):
+        return fresh_table[name].combine_chunks().values.to_numpy(zero_copy_only=False)
+
+    if "ball_fresh" in fresh_names:
+        ball_fresh = np.array([-1 if v is None else int(v) for v in fresh_flat("ball_fresh")], dtype=np.int8)
+    else:
+        ball_fresh = np.full(count, -1, dtype=np.int8)
+    if "car_fresh" in fresh_names:
+        # A null item (no car, or an unresolved car) reads -1.
+        car_fresh = np.array([-1 if v is None else int(v) for v in fresh_list("car_fresh")], dtype=np.int8).reshape((count, cars))
+    else:
+        car_fresh = np.full((count, cars), -1, dtype=np.int8)
+    if "ball_update_age_seconds" in fresh_names:
+        ball_update_age_seconds = fresh_flat("ball_update_age_seconds").astype(np.float32, copy=True)
+    else:
+        ball_update_age_seconds = np.full(count, np.nan, dtype=np.float32)
+    if "car_update_age_seconds" in fresh_names:
+        car_update_age_seconds = fresh_list("car_update_age_seconds").astype(np.float32, copy=True).reshape((count, cars))
+    else:
+        car_update_age_seconds = np.full((count, cars), np.nan, dtype=np.float32)
+    if "ball_packet_age_ticks" in fresh_names:
+        ball_packet_age_ticks = np.nan_to_num(fresh_flat("ball_packet_age_ticks").astype(np.float64), nan=-1.0).astype(np.int32)
+    else:
+        ball_packet_age_ticks = np.full(count, -1, dtype=np.int32)
+    if "car_packet_age_ticks" in fresh_names:
+        car_packet_age_ticks = np.nan_to_num(fresh_list("car_packet_age_ticks").astype(np.float64), nan=-1.0).astype(np.int32).reshape((count, cars))
+    else:
+        car_packet_age_ticks = np.full((count, cars), -1, dtype=np.int32)
+
     def label(name: str):
         if board is None:
             return np.full(count, None, dtype=object)
@@ -382,6 +524,18 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_overtime_seconds": clock("scoreboard_overtime_seconds"),
         "dead_shell_held": dead_shell_held,
         "spawn_pose_held": spawn_pose_held,
+        "label_episode": label_ints("label_episode", np.int32),
+        "label_episode_seconds_remaining": label_floats("label_episode_seconds_remaining"),
+        "label_next_scoring_team": label_ints("label_next_scoring_team", np.int8),
+        "label_seconds_until_next_goal": label_floats("label_seconds_until_next_goal"),
+        "ping_raw": ping_raw,
+        "ping_age_seconds": ping_age_seconds,
+        "ball_fresh": ball_fresh,
+        "car_fresh": car_fresh,
+        "ball_update_age_seconds": ball_update_age_seconds,
+        "car_update_age_seconds": car_update_age_seconds,
+        "ball_packet_age_ticks": ball_packet_age_ticks,
+        "car_packet_age_ticks": car_packet_age_ticks,
     }
 
 

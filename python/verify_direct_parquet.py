@@ -51,6 +51,276 @@ def verify(jsonl: str, parquet: str) -> int:
     return count
 
 
+IN_PLAY_CLOCK_STATES = ("kickoff", "running", "expired", "decided")
+
+
+def expected_labels(jsonl: str) -> dict:
+    """Re-derive the training labels from the JSONL frames' scoreboard, goal events and car observations
+    (a second implementation of the rule in ``src/labels.rs``), as arrays in ``load_numpy``'s layout, plus
+    the header-level values."""
+    header = read_header(jsonl)
+    slot_by_key = {slot["player_key"]: index for index, slot in enumerate(header["car_slots"])}
+    slot_index = {slot["slot"]: index for index, slot in enumerate(header["car_slots"])}
+    cars = len(slot_by_key)
+    frames = list(iter_frames(jsonl))
+    count = len(frames)
+    # float32 times, as the Rust side reads them from the frames
+    time = [float(np.float32(frame["replay_time"])) for frame in frames]
+    goals = []  # (frame, scoring team) of each goal frame
+    for index, frame in enumerate(frames):
+        for event in frame["observations"]["events"]:
+            if event["kind"] == "goal_scored_on":
+                goals.append((index, 1 - event["team"]))
+                break
+    goal_frames = dict(goals)
+    episode = [-1] * count
+    end = [None] * count
+    open_frames: list[int] = []
+    next_episode = 0
+    blocked = False
+
+    def close(last: int) -> None:
+        for member in open_frames:
+            end[member] = last
+        open_frames.clear()
+
+    for index, frame in enumerate(frames):
+        board = frame.get("scoreboard")
+        play = board is not None and board["clock_state"] in IN_PLAY_CLOCK_STATES
+        if index in goal_frames:
+            if open_frames or (play and not blocked):
+                if not open_frames:
+                    next_episode += 1
+                episode[index] = next_episode - 1
+                open_frames.append(index)
+                close(index)
+            blocked = True
+        elif play:
+            if blocked:
+                continue
+            if not open_frames:
+                next_episode += 1
+            episode[index] = next_episode - 1
+            open_frames.append(index)
+        else:
+            if open_frames:
+                close(open_frames[-1])
+            blocked = False
+    if open_frames:
+        close(open_frames[-1])
+    episode_remaining = np.full(count, np.nan, dtype=np.float32)
+    next_team = np.full(count, -1, dtype=np.int8)
+    until_goal = np.full(count, np.nan, dtype=np.float32)
+    upcoming = None
+    for index in range(count - 1, -1, -1):
+        if index in goal_frames:
+            upcoming = index
+        if end[index] is not None:
+            episode_remaining[index] = time[end[index]] - time[index]
+        if upcoming is not None:
+            next_team[index] = goal_frames[upcoming]
+            until_goal[index] = time[upcoming] - time[index]
+    # Every label is future-derived and says so; the observed ages are in the freshness object.
+    for index, frame in enumerate(frames):
+        labels = frame["labels"]
+        if labels.get("future_derived") is not True or "update_age_seconds" in labels:
+            raise AssertionError(f"frame {index}: labels must be all future-derived (future_derived true, no ages)")
+    last = frames[-1]["observations"]["team_scores"] if frames else [None, None]
+    scores = [None if score is None else score["value"] for score in last]
+    winner = None
+    if None not in scores and scores[0] != scores[1]:
+        winner = 0 if scores[0] > scores[1] else 1
+    return {
+        "label_episode": np.array(episode, dtype=np.int32),
+        "label_episode_seconds_remaining": episode_remaining,
+        "label_next_scoring_team": next_team,
+        "label_seconds_until_next_goal": until_goal,
+        "final_score": scores,
+        "winning_team": winner,
+        "episodes": next_episode,
+        "observed_goals": [sum(1 for _, team in goals if team == side) for side in (0, 1)],
+    }
+
+
+def _slot_cars(frame: dict, index: int, slot_by_key: dict) -> dict:
+    """The car each slot shows in a frame: of the observed cars with the slot's player key, the one with
+    the highest (link active, creation frame, has a packet in this frame) priority."""
+    best = {}
+    for car in frame["observations"]["cars"]:
+        key = car.get("player_key")
+        if key not in slot_by_key:
+            continue
+        position = car["body"]["position"]
+        priority = (car["player_link_active"], car["actor_created_frame"],
+                    position is not None and position["frame"] == index)
+        if key not in best or priority > best[key][0]:
+            best[key] = (priority, car)
+    return {slot_by_key[key]: car for key, (_, car) in best.items()}
+
+
+def verify_freshness(jsonl: str, parquet: str) -> dict:
+    """Check the packet-freshness columns against a re-derivation from the JSONL: the masks from the
+    observed bodies' packet frames, the frame-time age from the frame times, and the tick ages from the
+    frames' timeline ticks and `packet_lag_ticks` records (inferred server tick = timeline tick of the
+    packet's frame minus its lag, carried forward; no `default` source). Also reports the tick ages
+    at fresh frames (0..4 except rare larger chained lags) and compares the `car_fresh` count per slot with the slot's `packet_lags`
+    rows (differences are expected only where the converter records no lag: frames it does not simulate)."""
+    header = read_header(jsonl)
+    slot_by_key = {slot["player_key"]: index for index, slot in enumerate(header["car_slots"])}
+    column_of_slot = {slot["slot"]: index for index, slot in enumerate(header["car_slots"])}
+    cars = len(slot_by_key)
+    frames = list(iter_frames(jsonl))
+    count = len(frames)
+    time = [float(np.float32(frame["replay_time"])) for frame in frames]
+    ball_fresh = np.zeros(count, dtype=np.int8)
+    car_fresh = np.full((count, cars), -1, dtype=np.int8)
+    car_exists = np.zeros((count, cars), dtype=np.bool_)
+    ball_age = np.full(count, np.nan, dtype=np.float32)
+    car_age = np.full((count, cars), np.nan, dtype=np.float32)
+    ball_ticks = np.full(count, -1, dtype=np.int32)
+    car_ticks = np.full((count, cars), -1, dtype=np.int32)
+    ball_server = None  # (known, tick): the ball's last packet; None before the first
+    last_car = {}  # slot -> ((actor id, creation frame), server tick or None)
+    lag_rows = np.zeros(cars, dtype=np.int64)
+    for index, frame in enumerate(frames):
+        tick = frame["timeline_tick"]
+        lags = frame.get("packet_lag_ticks", [])
+        ball = frame["observations"]["ball"]
+        ball_position = None if ball is None else ball["position"]
+        ball_fresh[index] = ball_position is not None and ball_position["frame"] == index
+        if ball_position is not None:
+            ball_age[index] = time[index] - time[ball_position["frame"]]
+        if ball_fresh[index]:
+            record = next((lag for lag in lags if lag["actor_id"] is None), None)
+            ball_server = None if record is None or record["source"] == "default" else tick - record["ticks"]
+            ball_server = (True, ball_server)
+        if ball_server is not None and ball_server[1] is not None:
+            ball_ticks[index] = tick - ball_server[1]
+        present = {column_of_slot[car["slot"]] for car in frame["state"]["cars"]}
+        slot_cars = _slot_cars(frame, index, slot_by_key)
+        for slot in present:
+            car_exists[index, slot] = True
+        for slot, car in slot_cars.items():
+            if slot not in present:
+                continue
+            lifetime = (car["actor_id"], car["actor_created_frame"])
+            if slot in last_car and last_car[slot][0] != lifetime:
+                del last_car[slot]
+            position = car["body"]["position"]
+            fresh = position is not None and position["frame"] == index
+            car_fresh[index, slot] = fresh
+            if position is not None:
+                car_age[index, slot] = time[index] - time[position["frame"]]
+            if fresh:
+                record = next((lag for lag in lags if lag["actor_id"] == car["actor_id"]), None)
+                server = None if record is None or record["source"] == "default" else tick - record["ticks"]
+                last_car[slot] = (lifetime, server)
+                lag_rows[slot] += record is not None
+            if slot in last_car and last_car[slot][1] is not None:
+                car_ticks[index, slot] = tick - last_car[slot][1]
+    actual = load_columnar_numpy(parquet)
+    np.testing.assert_array_equal(actual["ball_fresh"], ball_fresh, err_msg="ball_fresh")
+    np.testing.assert_array_equal(actual["car_fresh"], car_fresh, err_msg="car_fresh")
+    np.testing.assert_array_equal(actual["ball_update_age_seconds"], ball_age, err_msg="ball_update_age_seconds")
+    np.testing.assert_array_equal(actual["car_update_age_seconds"], car_age, err_msg="car_update_age_seconds")
+    np.testing.assert_array_equal(actual["ball_packet_age_ticks"], ball_ticks, err_msg="ball_packet_age_ticks")
+    np.testing.assert_array_equal(actual["car_packet_age_ticks"], car_ticks, err_msg="car_packet_age_ticks")
+    # An unknown `car_fresh` (-1) is a slot with no car in the state or whose primary car cannot be resolved
+    # in the frame; a slot with a resolved car is 0 or 1 and its ages are unknown only before its first packet.
+    present_array = actual["car_present"]
+    if not np.array_equal(present_array, car_exists):
+        raise AssertionError("car_present differs from the slots with a car in the state")
+    if np.any((actual["car_fresh"] >= 0) & ~present_array):
+        raise AssertionError("a slot with no car has a car_fresh value")
+    unresolved = int(((actual["car_fresh"] < 0) & present_array).sum())
+    if np.any((actual["car_fresh"] < 0) & (actual["car_packet_age_ticks"] >= 0)):
+        raise AssertionError("a tick age for a slot whose car is unknown")
+    if np.any((actual["car_fresh"] < 0) & ~np.isnan(actual["car_update_age_seconds"])):
+        raise AssertionError("an update age for a slot whose car is unknown")
+    fresh_cars = actual["car_fresh"] == 1
+    ages_at_fresh = actual["car_packet_age_ticks"][fresh_cars & (actual["car_packet_age_ticks"] >= 0)]
+    ball_at_fresh = actual["ball_packet_age_ticks"][(actual["ball_fresh"] == 1) & (actual["ball_packet_age_ticks"] >= 0)]
+    # The chained lags are 0..4 almost always; a rare larger one (a lag limited only by the frame gap) is reported.
+    for name, values in (("car", ages_at_fresh), ("ball", ball_at_fresh)):
+        if values.size and values.min() < 0:
+            raise AssertionError(f"negative {name} tick age at a fresh frame")
+    return {
+        "car_fresh_per_slot": fresh_cars.sum(axis=0).tolist(),
+        "unresolved_slot_frames": unresolved,
+        "packet_lag_rows_per_slot": lag_rows.tolist(),
+        "ball_fresh": int((actual["ball_fresh"] == 1).sum()),
+        "car_age_at_fresh_max": int(ages_at_fresh.max()) if ages_at_fresh.size else None,
+        "car_ages_over_4": int((ages_at_fresh > 4).sum()),
+        "car_ages_at_fresh": int(ages_at_fresh.size),
+        "ball_age_at_fresh_max": int(ball_at_fresh.max()) if ball_at_fresh.size else None,
+        "car_age_known_fraction": float((actual["car_packet_age_ticks"] >= 0)[present_array].mean()),
+    }
+
+
+def verify_labels(jsonl: str, parquet: str) -> dict:
+    """Check the Parquet label columns and the header labels against a re-derivation from the JSONL, and
+    the label invariants (null outside play, episode ids contiguous, 0 s at the goal frame)."""
+    want = expected_labels(jsonl)
+    actual = load_columnar_numpy(parquet)
+    for name in (key for key in want if key.startswith("label_")):
+        np.testing.assert_array_equal(actual[name], want[name], err_msg=name)
+    header = read_columnar_header(parquet)["labels"]
+    if not header["future_derived"]:
+        raise AssertionError("header labels are not marked future-derived")
+    if header["final_score"] != want["final_score"]:
+        raise AssertionError(f"final_score {header['final_score']} != {want['final_score']}")
+    for key in ("winning_team", "episodes", "observed_goals"):
+        if header[key] != want[key]:
+            raise AssertionError(f"header labels {key}: {header[key]!r}, expected {want[key]!r}")
+    episode = actual["label_episode"]
+    in_episode = episode >= 0
+    if not np.array_equal(in_episode, ~np.isnan(actual["label_episode_seconds_remaining"])):
+        raise AssertionError("episode and episode_seconds_remaining are not null together")
+    ids = episode[in_episode]
+    if len(ids) and (ids[0] != 0 or np.any(np.diff(ids) < 0) or np.any(np.diff(ids) > 1) or ids[-1] + 1 != header["episodes"]):
+        raise AssertionError("episode ids are not contiguous from 0")
+    if np.any(actual["label_episode_seconds_remaining"][in_episode] < 0):
+        raise AssertionError("negative episode_seconds_remaining")
+    return {"episodes": header["episodes"], "goals": header["observed_goals"], "frames_in_episode": int(in_episode.sum())}
+
+
+def verify_ping(jsonl: str, parquet: str) -> dict:
+    """Check the ``ping_raw`` column against the raw ping bytes of the JSONL's players, resolved through the
+    car slots of each frame (a second implementation of `slot_pings`)."""
+    header = read_header(jsonl)
+    slot_by_key = {slot["player_key"]: index for index, slot in enumerate(header["car_slots"])}
+    column_of_slot = {slot["slot"]: index for index, slot in enumerate(header["car_slots"])}
+    expected = []
+    expected_age = []
+    created = set()
+    time = []
+    for frame in iter_frames(jsonl):
+        time.append(float(np.float32(frame["replay_time"])))
+        created.update(column_of_slot[car["slot"]] for car in frame["state"]["cars"])
+        row = [-1] * len(slot_by_key)
+        age_row = [np.nan] * len(slot_by_key)
+        for player in frame["observations"]["players"]:
+            column = slot_by_key.get(player["key"])
+            if column in created and player["ping_raw"] is not None:
+                row[column] = player["ping_raw"]["value"]
+                age_row[column] = time[-1] - time[player["ping_raw"]["frame"]]
+        expected.append(row)
+        expected_age.append(age_row)
+    expected = np.array(expected, dtype=np.int16).reshape(len(expected), len(slot_by_key))
+    expected_age = np.array(expected_age, dtype=np.float32).reshape(len(expected), len(slot_by_key))
+    arrays = load_columnar_numpy(parquet)
+    np.testing.assert_array_equal(arrays["ping_raw"], expected, err_msg="ping_raw")
+    np.testing.assert_array_equal(arrays["ping_age_seconds"], expected_age, err_msg="ping_age_seconds")
+    seen = expected[expected >= 0]
+    return {
+        "median_age_seconds": float(np.median(expected_age[expected >= 0])) if seen.size else None,
+        "max_age_seconds": float(np.max(expected_age[expected >= 0])) if seen.size else None,
+        "slots_with_ping": int((expected >= 0).any(axis=0).sum()),
+        "slots": expected.shape[1],
+        "median": float(np.median(seen)) if seen.size else None,
+    }
+
+
 def _same(left, right) -> bool:
     """Equality of a table cell and its JSONL value: None only equals None, floats compare as float32
     (the tables store f32; the JSON holds the shortest decimal of the same f32), lists elementwise."""
@@ -217,6 +487,26 @@ def main() -> None:
         f"Verified {frames} frames, header, and all NumPy arrays (dead-shell and spawn-pose columns against the "
         f"JSONL's per-frame lists: {int((held == 1).sum())} observed and {int((held == 2).sum())} inferred "
         f"dead-shell slot-frames, {int(arrays['spawn_pose_held'].sum())} spawn-pose slot-frames)"
+    )
+    labels = verify_labels(args.jsonl, args.parquet)
+    print(
+        f"Verified the label columns and header labels against a re-derivation from the JSONL: "
+        f"{labels['episodes']} episodes, {labels['frames_in_episode']} frames in an episode, "
+        f"goals (blue, orange) {labels['goals']}"
+    )
+    ping = verify_ping(args.jsonl, args.parquet)
+    print(
+        f"Verified ping_raw and ping_age_seconds: {ping['slots_with_ping']} of {ping['slots']} slots ever have a ping, "
+        f"median raw byte {ping['median']}, ping age median {ping['median_age_seconds']:.2f} s, max {ping['max_age_seconds']:.2f} s"
+    )
+    fresh = verify_freshness(args.jsonl, args.parquet)
+    print(
+        f"Verified the freshness columns against a re-derivation from the JSONL: ball fresh in {fresh['ball_fresh']} "
+        f"frames; car_fresh per slot {fresh['car_fresh_per_slot']} against packet_lags rows per slot "
+        f"{fresh['packet_lag_rows_per_slot']} (a superset: it includes frames the converter does not simulate); "
+        f"{fresh['unresolved_slot_frames']} slot-frames with an unresolved car (unknown); tick age at a fresh frame at most {fresh['car_age_at_fresh_max']} (cars; {fresh['car_ages_over_4']} of "
+        f"{fresh['car_ages_at_fresh']} above 4) and {fresh['ball_age_at_fresh_max']} (ball); the car tick age is known in "
+        f"{fresh['car_age_known_fraction']:.3f} of the slot-frames with a car"
     )
     if not args.no_tables:
         counts = verify_tables(args.jsonl, args.parquet)
