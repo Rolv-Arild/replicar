@@ -353,6 +353,14 @@ struct FrameLine<'a> {
     /// car with no active player link).
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     demolition_inferred: &'a [i32],
+    /// Every frame in which a slot is held demolished as a dead pawn shell, with the reason (`observed`: a
+    /// goal-explosion report; `inferred`: a sleeping packet of a car with no active pawn link).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    dead_shell_held: &'a [crate::conversion::DeadShellHold],
+    /// Slots whose car is known only from its spawn pose (no rigid-body packet yet): the exported pose is
+    /// inferred, and the car takes no part in collisions.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    spawn_pose_held: &'a [usize],
 }
 
 pub(crate) fn header_json(
@@ -407,6 +415,8 @@ fn frame_line<'a>(
         fitted_inputs: &converted.fitted_inputs,
         sleeping_velocity_inferred: &converted.sleeping_velocity_inferred,
         demolition_inferred: &converted.demolition_inferred,
+        dead_shell_held: &converted.dead_shells_held,
+        spawn_pose_held: &converted.spawn_pose_held,
     }
 }
 

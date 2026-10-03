@@ -210,7 +210,12 @@ def main() -> None:
         "--no-tables", action="store_true", help="skip the record tables (a --no-event-tables export)"
     )
     args = parser.parse_args()
-    print(f"Verified {verify(args.jsonl, args.parquet)} frames, header, and all NumPy arrays")
+    frames = verify(args.jsonl, args.parquet)
+    held = load_columnar_numpy(args.parquet)["dead_shell_held"]
+    print(
+        f"Verified {frames} frames, header, and all NumPy arrays (dead-shell column against the JSONL's per-frame "
+        f"list: {int((held == 1).sum())} observed and {int((held == 2).sum())} inferred slot-frames)"
+    )
     if not args.no_tables:
         counts = verify_tables(args.jsonl, args.parquet)
         print("Verified record tables: " + ", ".join(f"{name} {rows}" for name, rows in counts.items()))

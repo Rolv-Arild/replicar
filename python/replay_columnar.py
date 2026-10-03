@@ -14,7 +14,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Iterator
 
-from replay_to_rocketsim import iter_frames, read_header
+from replay_to_rocketsim import DEAD_SHELL_CODES, iter_frames, read_header
 
 
 COLUMNAR_VERSION = 1
@@ -110,6 +110,9 @@ def _schema(pa: Any, header: dict[str, Any], pads: list[dict[str, Any]]):
         pa.field("scoreboard_clock_state", pa.string()),
         pa.field("scoreboard_seconds_remaining", f32),
         pa.field("scoreboard_overtime_seconds", f32),
+        # Per car slot, null when the slot is not held as a dead pawn shell: 1 observed (goal explosion),
+        # 2 inferred (sleeping packet of an unlinked car).
+        pa.field("dead_shell_held", pa.list_(pa.uint8(), cars)),
     ))
     metadata = {
         b"columnar_version": str(COLUMNAR_VERSION).encode(),
@@ -138,6 +141,9 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
     car_demoed = [False] * cars
     control_axes = [missing] * (cars * 5)
     control_buttons = [False] * (cars * 3)
+    dead_shell_held: list[int | None] = [None] * cars
+    for held in frame.get("dead_shell_held", ()):
+        dead_shell_held[slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
     for car in state["cars"]:
         index = slot_columns[car["slot"]]
         physics = car["physics"]
@@ -186,6 +192,7 @@ def _row(frame: dict[str, Any], slots: list[dict[str, Any]], pad_count: int) -> 
         "scoreboard_clock_state": None if board is None else board["clock_state"],
         "scoreboard_seconds_remaining": None if board is None else board["seconds_remaining"],
         "scoreboard_overtime_seconds": None if board is None else board["overtime_seconds"],
+        "dead_shell_held": dead_shell_held,
     }
 
 
@@ -303,6 +310,17 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         else:
             board = ipc.open_file(str(path)).read_all().select(list(SCOREBOARD_COLUMNS))
 
+    # Per car slot, null (not held) as 0; a file without the column (older export) has none held.
+    if "dead_shell_held" in available:
+        if _kind(path) == "parquet":
+            held_table = pq.read_table(str(path), columns=["dead_shell_held"])
+        else:
+            held_table = ipc.open_file(str(path)).read_all().select(["dead_shell_held"])
+        held_values = held_table["dead_shell_held"].combine_chunks().values.to_numpy(zero_copy_only=False)
+        dead_shell_held = np.nan_to_num(held_values.astype(np.float64), nan=0.0).astype(np.uint8).reshape((count, cars))
+    else:
+        dead_shell_held = np.zeros((count, cars), dtype=np.uint8)
+
     def label(name: str):
         if board is None:
             return np.full(count, None, dtype=object)
@@ -345,6 +363,7 @@ def load_columnar_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_clock_state": label("scoreboard_clock_state"),
         "scoreboard_seconds_remaining": clock("scoreboard_seconds_remaining"),
         "scoreboard_overtime_seconds": clock("scoreboard_overtime_seconds"),
+        "dead_shell_held": dead_shell_held,
     }
 
 

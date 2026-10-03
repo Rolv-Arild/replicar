@@ -1246,7 +1246,10 @@ fn masked_metrics(
     }
 }
 
-fn paths(root: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
+fn paths(root: &Path, final_assessment: bool) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
+    // Every directory and file opened is resolved and refused when it is in the sealed test split (a link or
+    // junction under another name included).
+    replay_to_rocketsim::ensure_unsealed(root, final_assessment)?;
     if root.is_file() {
         if !root.extension().is_some_and(|ext| ext == "replay") {
             return Err("single-file input must have a .replay extension".into());
@@ -1259,9 +1262,11 @@ fn paths(root: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
     }
     let mut result = Vec::new();
     for size in ["1v1", "2v2", "3v3"] {
+        replay_to_rocketsim::ensure_unsealed(&root.join(size), final_assessment)?;
         for entry in fs::read_dir(root.join(size))? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "replay") {
+                replay_to_rocketsim::ensure_unsealed(&path, final_assessment)?;
                 result.push((size.to_owned(), path));
             }
         }
@@ -1510,12 +1515,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     if replay_to_rocketsim::sealed_path_refused(&root, final_assessment) {
-        return Err("refusing to inspect a path containing 'test' (pass --final-assessment for the frozen run)".into());
+        return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     if let Some(meshes) = meshes {
         options.collision_meshes = meshes;
     }
-    let replay_paths = paths(&root)?;
+    let replay_paths = paths(&root, final_assessment)?;
     let mut rotation_trace = if let Some(path) = rotation_trace_path {
         Some(BufWriter::new(fs::File::create(path)?))
     } else {

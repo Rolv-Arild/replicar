@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow_array::{
     ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, LargeBinaryArray,
-    RecordBatch, UInt32Array, UInt64Array,
+    RecordBatch, UInt8Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
@@ -50,6 +50,9 @@ struct Row {
     frame_json: Vec<u8>,
     /// Reconstructed match clock (`None`: no scoreboard for the frame, so unknown, not zero).
     scoreboard: Option<ScoreboardFrame>,
+    /// Per car slot: `Some(1)` while the slot is held demolished as a dead pawn shell by an observed goal
+    /// explosion, `Some(2)` by an inference from a sleeping packet of an unlinked car, `None` otherwise.
+    dead_shell_held: Vec<Option<u8>>,
 }
 
 fn rotation(rot: Mat3A) -> Vec<f32> {
@@ -118,7 +121,17 @@ fn row(
         frame_json: serialization::frame_json(converted, observed, residuals)
             .map_err(io::Error::other)?,
         scoreboard: converted.scoreboard.clone(),
+        dead_shell_held: vec![None; cars],
     };
+    for held in &converted.dead_shells_held {
+        let Some(&index) = slot_index.get(&held.slot) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "dead shell on an unlisted car slot"));
+        };
+        result.dead_shell_held[index] = Some(match held.source {
+            "observed" => 1,
+            _ => 2,
+        });
+    }
     let mut seen = HashSet::new();
     for (info, car) in &state.cars {
         let Some(&index) = slot_index.get(&info.idx) else {
@@ -200,6 +213,9 @@ fn schema(cars: usize, pads: usize, pad_json: Vec<u8>) -> io::Result<SchemaRef> 
         Field::new("scoreboard_clock_state", dict_type(), true),
         Field::new("scoreboard_seconds_remaining", DataType::Float32, true),
         Field::new("scoreboard_overtime_seconds", DataType::Float32, true),
+        // Per car slot (null: not held): 1 held as a dead pawn shell by an observed goal explosion, 2 by an
+        // inference from a sleeping packet of a car with no active link.
+        list_field("dead_shell_held", DataType::UInt8, cars),
     ];
     let metadata = HashMap::from([
         ("columnar_version".to_owned(), "1".to_owned()),
@@ -231,6 +247,19 @@ fn bools(rows: &[Row], width: usize, field: fn(&Row) -> &Vec<bool>) -> io::Resul
             Arc::new(Field::new("item", DataType::Boolean, true)),
             width as i32,
             Arc::new(BooleanArray::from(values)),
+            None,
+        )
+        .map_err(io::Error::other)?,
+    ))
+}
+
+fn small_ints(rows: &[Row], width: usize, field: fn(&Row) -> &Vec<Option<u8>>) -> io::Result<ArrayRef> {
+    let values: Vec<Option<u8>> = rows.iter().flat_map(|r| field(r).iter().copied()).collect();
+    Ok(Arc::new(
+        FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::UInt8, true)),
+            width as i32,
+            Arc::new(UInt8Array::from(values)),
             None,
         )
         .map_err(io::Error::other)?,
@@ -288,6 +317,7 @@ fn batch(rows: &[Row], schema: SchemaRef, cars: usize, pads: usize) -> io::Resul
                 .map(|r| r.scoreboard.as_ref().and_then(|s| s.overtime_seconds))
                 .collect::<Vec<_>>(),
         )),
+        small_ints(rows, cars, |r| &r.dead_shell_held)?,
     ];
     RecordBatch::try_new(schema, columns).map_err(io::Error::other)
 }
@@ -456,6 +486,7 @@ mod tests {
             seconds_remaining: f32::NAN,
             frame_json: b"{}".to_vec(),
             scoreboard,
+            dead_shell_held: vec![None; 1],
         }
     }
 
@@ -497,6 +528,7 @@ mod tests {
                 "scoreboard_clock_state",
                 "scoreboard_seconds_remaining",
                 "scoreboard_overtime_seconds",
+                "dead_shell_held",
             ]
         );
         assert_eq!(schema.metadata()["columnar_version"], "1");

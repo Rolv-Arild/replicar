@@ -11,6 +11,9 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
+# Codes of `load_numpy`'s `dead_shell_held` array (0: not held).
+DEAD_SHELL_CODES = {"observed": 1, "inferred": 2}
+
 
 SCHEMA_VERSION = 1
 
@@ -64,6 +67,12 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     (``regulation``/``overtime``) and ``scoreboard_clock_state`` (``pregame``, ``countdown``,
     ``kickoff``, ``running``, ``expired``, ``decided``, ``goal_pause``, ``other``) are object arrays
     with ``None`` where the frame has no scoreboard; the two clock arrays use NaN for unknown.
+
+    ``dead_shell_held`` (frames x car slots, uint8) marks the frames in which a slot is held
+    demolished as a dead pawn shell: 0 not held, 1 by an observed goal-explosion demolition, 2 by an
+    inference from a sleeping packet of a car with no active pawn link (``DEAD_SHELL_CODES``). Whether
+    a car sleeps (``sleeping_velocity_inferred``) and the start of an inferred hold
+    (``demolition_inferred``) are in the rich frame only (``iter_frames``).
     """
     import numpy as np
 
@@ -105,6 +114,7 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
     scoreboard_clock_state = np.full(count, None, dtype=object)
     scoreboard_seconds_remaining = np.full(count, np.nan, dtype=np.float32)
     scoreboard_overtime_seconds = np.full(count, np.nan, dtype=np.float32)
+    dead_shell_held = np.zeros((count, car_count), dtype=np.uint8)
     for row, frame in enumerate(iter_frames(path)):
         state = frame["state"]
         time[row] = frame["replay_time"]
@@ -138,6 +148,8 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         clock = observed["seconds_remaining"]
         if clock is not None:
             seconds_remaining[row] = clock["value"]
+        for held in frame.get("dead_shell_held", ()):
+            dead_shell_held[row, slot_columns[held["slot"]]] = DEAD_SHELL_CODES[held["source"]]
         board = frame.get("scoreboard")
         if board is not None:
             scoreboard_period[row] = board["period"]
@@ -176,4 +188,5 @@ def load_numpy(path: str | Path) -> dict[str, Any]:
         "scoreboard_clock_state": scoreboard_clock_state,
         "scoreboard_seconds_remaining": scoreboard_seconds_remaining,
         "scoreboard_overtime_seconds": scoreboard_overtime_seconds,
+        "dead_shell_held": dead_shell_held,
     }

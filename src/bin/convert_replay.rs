@@ -123,27 +123,39 @@ fn run() -> Result<(), Box<dyn Error>> {
             return Err(error);
         }
     };
-    // Publish: the tables first, the main file last, then the stale tables a run without tables leaves behind
-    // (they would be read next to the new main file).
-    let published = (|| -> std::io::Result<()> {
+    // Publish: the tables first, the main file last. If a rename fails part-way, the tables already published
+    // by this run are deleted again (no mixed set of new and old files is left; a table it replaced is gone
+    // with it, which is the lesser evil next to a main file that no longer matches its tables).
+    let mut published: Vec<PathBuf> = Vec::new();
+    let publish = (|| -> std::io::Result<()> {
         for (table, _) in &table_rows {
-            fs::rename(table_path(&temp, table), table_path(&output_path, table))?;
+            let target = table_path(&output_path, table);
+            fs::rename(table_path(&temp, table), &target)?;
+            published.push(target);
         }
-        fs::rename(&temp, &output_path)?;
-        if parquet && !event_tables {
-            for table in TABLE_NAMES {
-                match fs::remove_file(table_path(&output_path, table)) {
-                    Ok(()) => println!("removed stale {}", table_path(&output_path, table).display()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        Ok(())
+        fs::rename(&temp, &output_path)
     })();
-    if let Err(error) = published {
+    if let Err(error) = publish {
+        for target in &published {
+            let _ = fs::remove_file(target);
+        }
         discard(&temp);
         return Err(error.into());
+    }
+    // The stale tables a run without tables leaves behind would be read next to the new main file. The export
+    // is complete by now: failing to remove one is a warning.
+    if parquet && !event_tables {
+        for table in TABLE_NAMES {
+            let stale = table_path(&output_path, table);
+            match fs::remove_file(&stale) {
+                Ok(()) => println!("removed stale {}", stale.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!(
+                    "warning: could not remove the stale table {}: {error} (it belongs to an earlier export; delete it)",
+                    stale.display()
+                ),
+            }
+        }
     }
     for (table, rows) in &table_rows {
         println!("{rows} rows -> {}", table_path(&output_path, table).display());
