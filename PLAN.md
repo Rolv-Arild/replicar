@@ -8,7 +8,7 @@ Next action (2026-10-03): the single test-split assessment is done (tag `test-as
 
 Convert Rocket League replay network frames into timestamp-aligned RocketSim game states, plus match information such as players, teams, score, clock, events, and provenance. Replay observations are the primary evidence. RocketSim supplies physically plausible states between observations and estimates of fields absent from the replay. Expose a Rust API and a stable, Python-readable serialized dataset.
 
-The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Other modes, mutators, unusual arenas, and replay versions must be detected and reported; add support only after the soccar pipeline is measured. Do not consult the existing `rlgym-tools` Python converter or `rust-carball` implementation until the user provides them for comparison.
+The first target is standard soccar in the supplied 1v1, 2v2, and 3v3 corpus. Other modes, mutators, unusual arenas, and replay versions must be detected and reported; add support only after the soccar pipeline is measured. The user supplied the `rlgym-tools` converter and its `rust-carball` backend for comparison on 2026-10-03 (AGENTS.md has the paths).
 
 ## Current repository and data
 
