@@ -296,6 +296,8 @@ Keep this file current after each phase: update the status, dependency revisions
 
 - 2026-10-03 (test assessment): `TEST_PROTOCOL.md` approved by the user; tagged `test-assessment-1` (`99f0a9d`) and run once (RESULTS 'Test-split assessment'). Merged `audit-and-leftovers` into `master` (the 'happy' definition of 2026-10-02 met).
 
+- 2026-10-03 (after the test run): compared with the user's `rlgym-tools` converter and `rust-carball` (read-only); per-player ping measured against the fitted timing (explains part of the recorder's lead, no converter change; RESULTS 'Per-player ping'); export gained future-derived training labels (`labels` / `label_*`), the observed ping with its age, and freshness columns (fresh masks, update ages, packet ages in ticks); reviewed and merged into `master`. Action picking not ported (user decision).
+
 ## Backlog (kept current; 2026-10-02)
 
 Done items are struck through in the work log above; this is what is still open, in rough priority order.
