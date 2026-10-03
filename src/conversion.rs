@@ -4979,7 +4979,8 @@ pub fn convert_observations_with(
     // the simulation's collisions until the first packet. RocketSim has no per-car collision switch other than
     // the demolished state, so the car is held demolished internally; the exported state shows it as not
     // demolished at the spawn pose (`ConvertedFrame::spawn_pose_held`).
-    let mut spawn_held: HashSet<usize> = HashSet::new();
+    // (slot, the car lifetime that holds it)
+    let mut spawn_held: HashMap<usize, (i32, usize)> = HashMap::new();
     // Car lifetimes whose spawn-pose hold ended in an observed demolition: a normal demolition from then on.
     let mut spawn_demolished: HashSet<(i32, usize)> = HashSet::new();
     let mut gated_jump_active: HashMap<(i32, usize), bool> = HashMap::new();
@@ -5606,17 +5607,27 @@ pub fn convert_observations_with(
                 // already has no spawn pose: in a withheld frame the observations hide a first packet (the body
                 // is masked) but not the spawn pose's disappearance, so the release must not follow it.
                 let spawn_lifetime = (car.actor_id, car.actor_created_frame);
+                // A hold belongs to the lifetime that started it: another car on the slot (a new lifetime) ends it,
+                // so it cannot keep holding a later car that has neither a body nor a spawn pose.
+                if spawn_held.get(&slot).is_some_and(|&owner| owner != spawn_lifetime) {
+                    spawn_held.remove(&slot);
+                    if state.is_demoed && !dead_shells.contains_key(&slot) {
+                        state.is_demoed = false;
+                        state.demo_respawn_timer = 0.0;
+                        dirty = true;
+                    }
+                }
                 if car.body.position.is_none()
-                    && (car.spawn_pose.is_some() || spawn_held.contains(&slot))
+                    && (car.spawn_pose.is_some() || spawn_held.get(&slot) == Some(&spawn_lifetime))
                     && !spawn_demolished.contains(&spawn_lifetime)
                 {
-                    spawn_held.insert(slot);
+                    spawn_held.insert(slot, spawn_lifetime);
                     if !state.is_demoed || state.demo_respawn_timer < 3.0 {
                         state.is_demoed = true;
                         state.demo_respawn_timer = 3.0;
                         dirty = true;
                     }
-                } else if car.body.position.is_some() && spawn_held.remove(&slot) && state.is_demoed {
+                } else if car.body.position.is_some() && spawn_held.remove(&slot).is_some() && state.is_demoed {
                     state.is_demoed = false;
                     state.demo_respawn_timer = 0.0;
                     dirty = true;
@@ -5638,7 +5649,7 @@ pub fn convert_observations_with(
                     if (held_actor, held_created) != lifetime_key || live_packet {
                         dead_shells.remove(&slot);
                         // (A new car held on its spawn pose, just above, stays held out of collisions.)
-                        if state.is_demoed && !spawn_held.contains(&slot) {
+                        if state.is_demoed && !spawn_held.contains_key(&slot) {
                             state.is_demoed = false;
                             state.demo_respawn_timer = 0.0;
                             dirty = true;
@@ -5688,7 +5699,7 @@ pub fn convert_observations_with(
                 if car.player_link_active
                     && state.is_demoed
                     && !dead_shells.contains_key(&slot)
-                    && !spawn_held.contains(&slot)
+                    && !spawn_held.contains_key(&slot)
                     && demo_hold_until.get(&slot).is_none_or(|&until| timeline_tick >= until)
                 {
                     state.is_demoed = false;
@@ -6398,7 +6409,7 @@ pub fn convert_observations_with(
                 }
                 // An observed demolition of a car still held on its spawn pose is a normal demolition: exported as
                 // demolished, with the normal hold rules.
-                if spawn_held.remove(&slot) {
+                if spawn_held.remove(&slot).is_some() {
                     spawn_demolished.insert((*victim, created));
                 }
                 let mut state = *arena.get_car_state(slot);
@@ -6821,7 +6832,7 @@ pub fn convert_observations_with(
                 let mut exported = arena.get_arena_state();
                 // A car held out of collisions on its spawn pose is not demolished.
                 for (info, car) in exported.cars.iter_mut() {
-                    if spawn_held.contains(&info.idx) {
+                    if spawn_held.contains_key(&info.idx) {
                         car.is_demoed = false;
                         car.demo_respawn_timer = 0.0;
                     }
@@ -6856,7 +6867,7 @@ pub fn convert_observations_with(
             sleeping_velocity_inferred: sleeping_inferred,
             demolition_inferred,
             spawn_pose_held: {
-                let mut held: Vec<usize> = spawn_held.iter().copied().collect();
+                let mut held: Vec<usize> = spawn_held.keys().copied().collect();
                 held.sort_unstable();
                 held
             },
@@ -7691,6 +7702,79 @@ mod tests {
             assert!((frame.state.cars[0].1.phys.pos.z - 36.0).abs() < 1e-3, "{}", frame.state.cars[0].1.phys.pos.z);
         }
         assert!(output.frames[4].spawn_pose_held.is_empty());
+    }
+
+    /// A spawn-pose hold belongs to the car lifetime that started it: a later car on the slot that has neither a
+    /// body nor a spawn pose is not held by it.
+    #[test]
+    fn a_spawn_pose_hold_ends_with_its_lifetime() {
+        fn value<T>(value: T, frame: usize) -> Value<T> {
+            Value { value, frame, source: Source::Replay }
+        }
+        let car = |actor: i32, created: usize, spawn: bool, packet: Option<usize>| observations::Car {
+            actor_id: actor,
+            actor_created_frame: created,
+            player_key: Some("p1".to_string()),
+            player_link_active: true,
+            team: Some(0),
+            body_product_id: None,
+            body: match packet {
+                Some(frame) => Body {
+                    position: Some(value([0.0, 0.0, 17.0], frame)),
+                    rotation_xyzw: Some(value([0.0, 0.0, 0.0, 1.0], frame)),
+                    linear_velocity: Some(value([0.0, 0.0, 0.0], frame)),
+                    ..Body::default()
+                },
+                None => Body::default(),
+            },
+            boost: None,
+            boost_raw: None,
+            spawn_pose: spawn.then(|| observations::SpawnPose {
+                position: [0.0, 0.0, 36.0],
+                rotation_xyzw: Some([0.0, 0.0, 0.0, 1.0]),
+                frame: 0,
+            }),
+            inputs: observations::Inputs::default(),
+        };
+        // Actor 1 on its spawn pose in frames 0-1; actor 2 (a new lifetime, created in frame 2) shows neither a
+        // body nor a spawn pose in frames 2-3, and a packet in frame 4.
+        let cars = vec![
+            car(1, 0, true, None),
+            car(1, 0, true, None),
+            car(2, 2, false, None),
+            car(2, 2, false, None),
+            car(2, 2, false, Some(4)),
+        ];
+        let frames = cars
+            .into_iter()
+            .enumerate()
+            .map(|(index, car)| observations::Frame {
+                index,
+                time: index as f32 * 0.033,
+                delta: 0.033,
+                ball: None,
+                cars: vec![car],
+                players: Vec::new(),
+                team_scores: [None, None],
+                seconds_remaining: None,
+                overtime: None,
+                game_state: Some(value("Active".to_string(), index)),
+                events: Vec::new(),
+                pad_pickups: Vec::new(),
+            })
+            .collect();
+        let replay = ObservedReplay {
+            header: observations::Header {
+                game_type: "TAGame.Replay_Soccar_TA".to_string(),
+                levels: Vec::new(),
+                final_team_scores: [None, None],
+            },
+            frames,
+            diagnostics: Default::default(),
+        };
+        let output = convert_observations(replay, &ConvertOptions::default()).unwrap();
+        let held: Vec<Vec<usize>> = output.frames.iter().map(|f| f.spawn_pose_held.clone()).collect();
+        assert_eq!(held, [vec![0], vec![0], vec![], vec![], vec![]]);
     }
 
     #[test]

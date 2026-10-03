@@ -9,7 +9,7 @@ use boxcars::{Attribute, Replay};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::parse_replay;
+use crate::{parse_replay, read_replay_file, sealed_path_refused};
 
 #[derive(Debug, Serialize)]
 pub struct CorpusAudit {
@@ -23,6 +23,9 @@ pub struct CorpusAudit {
     pub game_types: BTreeMap<String, usize>,
     pub actor_classes: BTreeMap<String, usize>,
     pub attributes: BTreeMap<String, usize>,
+    /// Paths beneath the root that were not audited because they are in the sealed test split (a component
+    /// named `test`, also when reached through a link or junction), relative to the root.
+    pub skipped_sealed: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,12 +143,18 @@ fn object_name(replay: &Replay, id: i32) -> String {
         .unwrap_or_else(|| format!("<invalid object {id}>"))
 }
 
-fn collect_replays(root: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
+fn collect_replays(root: &Path, paths: &mut Vec<PathBuf>, skipped: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
+        // The sealed test split is never entered or read from a parent directory (the tools refuse such a
+        // root outright; a root above it must not reach it).
+        if sealed_path_refused(&path, false) {
+            skipped.push(path);
+            continue;
+        }
         if entry.file_type()?.is_dir() {
-            collect_replays(&path, paths)?;
+            collect_replays(&path, paths, skipped)?;
         } else if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("replay"))
@@ -165,8 +174,10 @@ fn merge_counts(target: &mut BTreeMap<String, usize>, source: &BTreeMap<String, 
 /// Audit all `.replay` files beneath a directory, in sorted path order.
 pub fn audit_directory(root: &Path) -> io::Result<CorpusAudit> {
     let mut paths = Vec::new();
-    collect_replays(root, &mut paths)?;
+    let mut skipped = Vec::new();
+    collect_replays(root, &mut paths, &mut skipped)?;
     paths.sort();
+    skipped.sort();
 
     let mut result = CorpusAudit {
         files: Vec::with_capacity(paths.len()),
@@ -179,10 +190,14 @@ pub fn audit_directory(root: &Path) -> io::Result<CorpusAudit> {
         game_types: BTreeMap::new(),
         actor_classes: BTreeMap::new(),
         attributes: BTreeMap::new(),
+        skipped_sealed: skipped
+            .iter()
+            .map(|path| path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/"))
+            .collect(),
     };
 
     for path in paths {
-        let bytes = fs::read(&path)?;
+        let bytes = read_replay_file(&path, false)?;
         let name = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -213,4 +228,33 @@ pub fn audit_directory(root: &Path) -> io::Result<CorpusAudit> {
         result.files.push(file);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory above the sealed split audits what is outside it and reports, not reads, what is inside:
+    /// a fake tree under `target/` (never the real split) with `train/a.replay` and `test/b.replay`.
+    #[test]
+    fn a_parent_directory_does_not_audit_the_sealed_split() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("fake-audit-{}", std::process::id()));
+        let (train, sealed) = (root.join("train"), root.join("test"));
+        fs::create_dir_all(&train).unwrap();
+        fs::create_dir_all(&sealed).unwrap();
+        fs::write(train.join("a.replay"), b"not a replay").unwrap();
+        fs::write(sealed.join("b.replay"), b"not a replay").unwrap();
+        let audit = audit_directory(&root).unwrap();
+        let names: Vec<_> = audit.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(names, ["train/a.replay"]);
+        assert_eq!(audit.skipped_sealed, ["test"]);
+        for path in [train.join("a.replay"), sealed.join("b.replay")] {
+            fs::remove_file(path).unwrap();
+        }
+        for dir in [train, sealed, root] {
+            fs::remove_dir(dir).unwrap();
+        }
+    }
 }
