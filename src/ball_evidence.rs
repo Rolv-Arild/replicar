@@ -116,6 +116,7 @@ pub fn ball_intervals(
             continue;
         }
         arena.set_ball_state(a);
+        crate::conversion::reset_scratch_arena_contacts(&mut arena, None, options);
         let mut states: Vec<(f32, f32, [f32; 3])> = Vec::new(); // (velocity residual, position residual, position) per elapsed tick
         for _ in 1..=max_d {
             arena.step_tick();

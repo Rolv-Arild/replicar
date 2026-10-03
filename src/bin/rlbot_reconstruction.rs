@@ -239,6 +239,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let score = |label: &str, options: ConvertOptions| -> Result<(), Box<dyn Error>> {
         let mut options = options;
         options.block_sim_pad_pickups |= env::var_os("BLOCK_PADS").is_some();
+        options.reset_scratch_contacts |= env::var_os("RESET_SCRATCH_CONTACTS").is_some();
         options.boost_pickup_lookahead |= env::var_os("BOOST_LOOKAHEAD").is_some();
         if env::var_os("NO_FIT_NEXT").is_some() {
             options.fit_on_next_packet = false;

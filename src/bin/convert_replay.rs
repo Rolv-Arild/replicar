@@ -71,6 +71,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             event_tables = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
+        } else if arg == "--reset-scratch-contacts" {
+            options.reset_scratch_contacts = true;
         } else if arg == "--gated-low-air-angular" {
             options.hold_low_air_angular = true;
             options.gate_low_air_angular_by_speed = true;
@@ -79,7 +81,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables] [--final-assessment]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--reset-scratch-contacts] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables] [--final-assessment]".into());
         }
     }
     if let Some(path) = mesh_path {
