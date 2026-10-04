@@ -14,7 +14,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Iterator
 
-from replay_to_rocketsim import DEAD_SHELL_CODES, f32, iter_frames, read_header, slot_pings
+from replicar import DEAD_SHELL_CODES, f32, iter_frames, read_header, slot_pings
 
 
 COLUMNAR_VERSION = 1

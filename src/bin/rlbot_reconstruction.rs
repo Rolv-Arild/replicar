@@ -18,8 +18,8 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use glam::{Mat3A, Vec3A};
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_observations};
-use replay_to_rocketsim::observations::{Body, extract};
+use replicar::conversion::{ConvertOptions, convert_observations};
+use replicar::observations::{Body, extract};
 use serde_json::Value;
 
 fn vec3(v: &Value) -> Vec3A {
@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: rlbot_reconstruction <replay> <states.jsonl> [--zero-lag]".into());
     }
     let (replay_path, states_path) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
-    if replay_to_rocketsim::sealed_path_refused(&replay_path, false) {
+    if replicar::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let zero_lag = args.iter().any(|a| a == "--zero-lag");
@@ -1069,7 +1069,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             offsets.push((f, None, tick_of(f) - hits[0] as i64));
         }
     }
-    let mut oracle = replay_to_rocketsim::conversion::PacketLags {
+    let mut oracle = replicar::conversion::PacketLags {
         ball: vec![None; observed.frames.len()],
         cars: vec![None; observed.frames.len()],
         car_actor: HashMap::new(),

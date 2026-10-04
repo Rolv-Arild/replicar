@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replay_to_rocketsim::{observations, parse_replay};
+use replicar::{observations, parse_replay};
 
 fn collect(root: &Path, paths: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(root).unwrap() {

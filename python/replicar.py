@@ -1,4 +1,4 @@
-"""Read schema-v1 replay-to-rocketsim JSON Lines exports.
+"""Read schema-v1 replicar JSON Lines exports.
 
 ``iter_frames`` streams rich records. ``load_numpy`` builds dense arrays for ML;
 NumPy is imported only when that function is called.

@@ -22,7 +22,7 @@ from replay_columnar import (
     read_columnar_header,
     record_table_path,
 )
-from replay_to_rocketsim import iter_frames, load_numpy, read_header
+from replicar import iter_frames, load_numpy, read_header
 
 
 def verify(jsonl: str, parquet: str) -> int:

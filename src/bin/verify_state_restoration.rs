@@ -9,12 +9,12 @@ use arrow_array::LargeBinaryArray;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rocketsim::{Arena, GameMode};
 
-use replay_to_rocketsim::conversion::rebase_tick;
-use replay_to_rocketsim::restoration::{
+use replicar::conversion::rebase_tick;
+use replicar::restoration::{
     apply_soccar_state_to_arena, car_slots_from_header_json, restore_soccar_state,
     state_from_frame_json,
 };
-use replay_to_rocketsim::serialization::StateRecord;
+use replicar::serialization::StateRecord;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);

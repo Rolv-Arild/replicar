@@ -1,6 +1,6 @@
 [package]
-name = "replay-to-rocketsim"
-version = "1.0.0"
+name = "replicar"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.97"
 description = "Converts Rocket League replays into RocketSim game states per network frame, with the scoreboard, controls, events and provenance"

@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::Path;
 
-use replay_to_rocketsim::audit::audit_directory;
+use replicar::audit::audit_directory;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args_os().skip(1);
@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: replay_audit <directory> [output.json]".into());
     }
 
-    replay_to_rocketsim::ensure_unsealed(Path::new(&root), false)?;
+    replicar::ensure_unsealed(Path::new(&root), false)?;
     let audit = audit_directory(Path::new(&root))?;
     eprintln!(
         "audited {} files: {} parsed, {} failed, {} frames",

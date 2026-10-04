@@ -18,7 +18,7 @@ from replay_columnar import (
     load_columnar_numpy,
     write_columnar,
 )
-from replay_to_rocketsim import iter_frames, load_numpy, read_header
+from replicar import iter_frames, load_numpy, read_header
 
 
 def timed(function, repeats: int) -> tuple[float, object]:

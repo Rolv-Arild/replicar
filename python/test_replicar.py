@@ -11,7 +11,7 @@ from replay_columnar import (
     read_record_tables,
     write_columnar,
 )
-from replay_to_rocketsim import iter_frames, load_numpy, read_header
+from replicar import iter_frames, load_numpy, read_header
 
 
 SAMPLE_HEADER = {

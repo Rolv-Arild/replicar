@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
+use replicar::conversion::{ConvertOptions, convert_bytes};
 use rocketsim::{Arena, ArenaConfig, CarBodyConfig, CarControls, CarState, GameMode, Team};
 
 fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: diagnose_jump_timing <train dir or replay> [max events]")?,
     );
-    if replay_to_rocketsim::sealed_path_refused(&path, false) {
+    if replicar::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let max_events: usize = env::args_os()
@@ -87,46 +87,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if !(previous.is_some_and(|p| p % 2 == 0) && jump.value % 2 == 1) {
                     continue;
                 }
-                let packet_at = |f: usize| -> Option<(
-                    Packet,
-                    CarState,
-                    &replay_to_rocketsim::observations::Car,
-                )> {
-                    let c = frames[f].cars.iter().find(|c| {
-                        c.actor_id == car.actor_id
-                            && c.actor_created_frame == car.actor_created_frame
-                    })?;
-                    let b = &c.body;
-                    let p = b.position.as_ref().filter(|x| x.frame == f)?;
-                    let v = b.linear_velocity.as_ref().filter(|x| x.frame == f)?;
-                    let r = b.rotation_xyzw.as_ref().filter(|x| x.frame == f)?;
-                    let w = b
-                        .angular_velocity_replay_units
-                        .as_ref()
-                        .filter(|x| x.frame == f)?;
-                    let lag = output.frames[f]
-                        .packet_lags
-                        .iter()
-                        .find(|l| l.actor_id == Some(c.actor_id))?;
-                    if lag.source != "chain" {
-                        return None;
-                    }
-                    let quat = Quat::from_xyzw(r.value[0], r.value[1], r.value[2], r.value[3]);
-                    let mut state = CarState::default();
-                    state.phys.pos = Vec3A::from_array(p.value);
-                    state.phys.vel = Vec3A::from_array(v.value);
-                    state.phys.ang_vel = Vec3A::from_array(w.value) * 0.01;
-                    state.phys.rot_mat = Mat3A::from_quat(quat.normalize());
-                    Some((
-                        Packet {
-                            tick: frames[f].time * 120.0 - lag.ticks as f32,
-                            pos: state.phys.pos,
-                            vel: state.phys.vel,
-                        },
-                        state,
-                        c,
-                    ))
-                };
+                let packet_at =
+                    |f: usize| -> Option<(Packet, CarState, &replicar::observations::Car)> {
+                        let c = frames[f].cars.iter().find(|c| {
+                            c.actor_id == car.actor_id
+                                && c.actor_created_frame == car.actor_created_frame
+                        })?;
+                        let b = &c.body;
+                        let p = b.position.as_ref().filter(|x| x.frame == f)?;
+                        let v = b.linear_velocity.as_ref().filter(|x| x.frame == f)?;
+                        let r = b.rotation_xyzw.as_ref().filter(|x| x.frame == f)?;
+                        let w = b
+                            .angular_velocity_replay_units
+                            .as_ref()
+                            .filter(|x| x.frame == f)?;
+                        let lag = output.frames[f]
+                            .packet_lags
+                            .iter()
+                            .find(|l| l.actor_id == Some(c.actor_id))?;
+                        if lag.source != "chain" {
+                            return None;
+                        }
+                        let quat = Quat::from_xyzw(r.value[0], r.value[1], r.value[2], r.value[3]);
+                        let mut state = CarState::default();
+                        state.phys.pos = Vec3A::from_array(p.value);
+                        state.phys.vel = Vec3A::from_array(v.value);
+                        state.phys.ang_vel = Vec3A::from_array(w.value) * 0.01;
+                        state.phys.rot_mat = Mat3A::from_quat(quat.normalize());
+                        Some((
+                            Packet {
+                                tick: frames[f].time * 120.0 - lag.ticks as f32,
+                                pos: state.phys.pos,
+                                vel: state.phys.vel,
+                            },
+                            state,
+                            c,
+                        ))
+                    };
                 let Some((pre, mut pre_state, pre_car)) =
                     (index.saturating_sub(6)..index).rev().find_map(packet_at)
                 else {

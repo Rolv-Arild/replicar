@@ -7,11 +7,11 @@ use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use replay_to_rocketsim::conversion::{
+use replicar::conversion::{
     CarSlot, ConversionOutput, ConvertOptions, PositionResidual, convert_bytes,
     convert_observations, quaternion, rotation_error_degrees,
 };
-use replay_to_rocketsim::observations::{Body, Inputs, ObservedReplay, PadPickup};
+use replicar::observations::{Body, Inputs, ObservedReplay, PadPickup};
 use rocketsim::{ArenaEvent, CarControls, CarState, Mat3A, PhysState};
 use serde::Serialize;
 
@@ -300,7 +300,7 @@ struct PriorAngularPacket {
 
 fn prior_angular_packets(
     original: &ObservedReplay,
-    car: &replay_to_rocketsim::observations::Car,
+    car: &replicar::observations::Car,
     before_frame: usize,
 ) -> Vec<PriorAngularPacket> {
     let mut packets = Vec::new();
@@ -387,10 +387,7 @@ struct MaskedRotationTrace {
     position_error_uu: Option<f32>,
 }
 
-fn car_event_kinds(
-    events: &[replay_to_rocketsim::conversion::SimEvent],
-    slot: usize,
-) -> Vec<&'static str> {
+fn car_event_kinds(events: &[replicar::conversion::SimEvent], slot: usize) -> Vec<&'static str> {
     events
         .iter()
         .filter_map(|event| match event.event {
@@ -750,7 +747,7 @@ fn transition_contexts(
         }) else {
             continue;
         };
-        let fresh_odd = |raw: &Option<replay_to_rocketsim::observations::Value<u8>>| {
+        let fresh_odd = |raw: &Option<replicar::observations::Value<u8>>| {
             raw.as_ref()
                 .is_some_and(|value| value.frame == earlier && value.value % 2 == 1)
         };
@@ -777,7 +774,7 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 fn valid_masked_interval(
     index: usize,
     previous_frame: usize,
-    frames: &[replay_to_rocketsim::observations::Frame],
+    frames: &[replicar::observations::Frame],
 ) -> bool {
     if previous_frame >= index {
         return false;
@@ -798,7 +795,7 @@ fn add_masked_kinematics(
     stale: &Body,
     index: usize,
     predicted: &PhysState,
-    frames: &[replay_to_rocketsim::observations::Frame],
+    frames: &[replicar::observations::Frame],
 ) {
     if let (Some(actual), Some(previous)) = (&actual.linear_velocity, &stale.linear_velocity)
         && actual.frame == index
@@ -918,7 +915,7 @@ fn add_masked_error(
     stale: &Body,
     index: usize,
     predicted: [f32; 3],
-    frames: &[replay_to_rocketsim::observations::Frame],
+    frames: &[replicar::observations::Frame],
     // The masked conversion and the actor (None: the ball), for the lag-corrected baseline.
     timing: Option<(&ConversionOutput, Option<i32>)>,
 ) {
@@ -1050,7 +1047,7 @@ fn masked_metrics(
                 &original.frames,
             );
         }
-        for car in replay_to_rocketsim::observations::primary_linked_cars(original_frame) {
+        for car in replicar::observations::primary_linked_cars(original_frame) {
             let Some(stale) = masked_frame
                 .cars
                 .iter()
@@ -1249,7 +1246,7 @@ fn masked_metrics(
 fn paths(root: &Path, final_assessment: bool) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
     // Every directory and file opened is resolved and refused when it is in the sealed test split (a link or
     // junction under another name included).
-    replay_to_rocketsim::ensure_unsealed(root, final_assessment)?;
+    replicar::ensure_unsealed(root, final_assessment)?;
     if root.is_file() {
         if !root.extension().is_some_and(|ext| ext == "replay") {
             return Err("single-file input must have a .replay extension".into());
@@ -1262,11 +1259,11 @@ fn paths(root: &Path, final_assessment: bool) -> Result<Vec<(String, PathBuf)>, 
     }
     let mut result = Vec::new();
     for size in ["1v1", "2v2", "3v3"] {
-        replay_to_rocketsim::ensure_unsealed(&root.join(size), final_assessment)?;
+        replicar::ensure_unsealed(&root.join(size), final_assessment)?;
         for entry in fs::read_dir(root.join(size))? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "replay") {
-                replay_to_rocketsim::ensure_unsealed(&path, final_assessment)?;
+                replicar::ensure_unsealed(&path, final_assessment)?;
                 result.push((size.to_owned(), path));
             }
         }
@@ -1335,7 +1332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--aligned-targets] [--aligned-targets-raw-predictor] [--offline-fits] [--no-infer-packet-lag] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
         }
     }
-    if replay_to_rocketsim::sealed_path_refused(&root, final_assessment) {
+    if replicar::sealed_path_refused(&root, final_assessment) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     if let Some(meshes) = meshes {
@@ -1361,7 +1358,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         masked_metric: "every 100-frame block masks four consecutive ball/car body and car boost frames; default start offset 1 or replay-hash/seed-derived offset when mask_seed is set; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
         mask_seed,
         boxcars_version: "0.12.0",
-        rocketsim_revision: replay_to_rocketsim::serialization::ROCKETSIM_REVISION,
+        rocketsim_revision: replicar::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
         // The boundary-value solve and the next-packet flip fit use the packet being scored: with either on the
         // one-step rows are in sample, whatever else is held out.
@@ -1813,7 +1810,7 @@ mod tests {
             .must_parse_network_data()
             .parse()
             .unwrap();
-        let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
+        let original = replicar::observations::extract(&replay).unwrap();
         let schedule = MaskSchedule {
             seed: None,
             replay_hash: 7,
@@ -1899,7 +1896,7 @@ mod tests {
             .must_parse_network_data()
             .parse()
             .unwrap();
-        let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
+        let original = replicar::observations::extract(&replay).unwrap();
         drop(replay);
         let schedule = MaskSchedule {
             seed: None,
@@ -2059,9 +2056,7 @@ mod tests {
 
     #[test]
     fn prior_angular_trace_excludes_masked_targets_and_other_actor_lifetimes() {
-        use replay_to_rocketsim::observations::{
-            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
-        };
+        use replicar::observations::{Car, Frame, Header, Inputs, ObservedReplay, Source, Value};
 
         let frames = (0..6)
             .map(|index| {
@@ -2125,9 +2120,7 @@ mod tests {
 
     #[test]
     fn masked_observations_withhold_car_boost_while_preserving_activation() {
-        use replay_to_rocketsim::observations::{
-            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
-        };
+        use replicar::observations::{Car, Frame, Header, Inputs, ObservedReplay, Source, Value};
 
         let schedule = MaskSchedule {
             seed: None,
@@ -2146,7 +2139,7 @@ mod tests {
                     player_link_active: true,
                     team: Some(0),
                     body_product_id: None,
-                    body: replay_to_rocketsim::observations::Body::default(),
+                    body: replicar::observations::Body::default(),
                     boost: Some(Value {
                         value: 50.0 + index as f32,
                         frame: index,

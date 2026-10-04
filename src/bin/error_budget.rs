@@ -15,8 +15,8 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
-use replay_to_rocketsim::observations::{Car, Value};
+use replicar::conversion::{ConvertOptions, convert_bytes};
+use replicar::observations::{Car, Value};
 
 #[derive(Default)]
 struct Group {
@@ -37,17 +37,17 @@ fn quantile(values: &mut [f32], q: f64) -> f32 {
 fn replay_paths(path: &Path, final_assessment: bool) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     // Every directory and file opened is resolved and refused when it is in the sealed test split (a link or
     // junction under another name included).
-    replay_to_rocketsim::ensure_unsealed(path, final_assessment)?;
+    replicar::ensure_unsealed(path, final_assessment)?;
     if path.is_file() {
         return Ok(vec![path.to_owned()]);
     }
     let mut result = Vec::new();
     for size in ["1v1", "2v2", "3v3"] {
-        replay_to_rocketsim::ensure_unsealed(&path.join(size), final_assessment)?;
+        replicar::ensure_unsealed(&path.join(size), final_assessment)?;
         for entry in fs::read_dir(path.join(size))? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "replay") {
-                replay_to_rocketsim::ensure_unsealed(&path, final_assessment)?;
+                replicar::ensure_unsealed(&path, final_assessment)?;
                 result.push(path);
             }
         }
@@ -69,10 +69,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--final-assessment]",
     )?);
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replay_to_rocketsim::sealed_path_refused(
-        &path,
-        env::args_os().any(|arg| arg == "--final-assessment"),
-    ) {
+    if replicar::sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let mut options = ConvertOptions::default();

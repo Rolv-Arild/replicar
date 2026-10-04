@@ -12,24 +12,24 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes};
-use replay_to_rocketsim::observations::Event;
+use replicar::conversion::{ConvertOptions, convert_bytes};
+use replicar::observations::Event;
 use rocketsim::ArenaEvent;
 
 fn replay_paths(path: &Path, final_assessment: bool) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     // Every directory and file opened is resolved and refused when it is in the sealed test split (a link or
     // junction under another name included).
-    replay_to_rocketsim::ensure_unsealed(path, final_assessment)?;
+    replicar::ensure_unsealed(path, final_assessment)?;
     if path.is_file() {
         return Ok(vec![path.to_owned()]);
     }
     let mut result = Vec::new();
     for size in ["1v1", "2v2", "3v3"] {
-        replay_to_rocketsim::ensure_unsealed(&path.join(size), final_assessment)?;
+        replicar::ensure_unsealed(&path.join(size), final_assessment)?;
         for entry in fs::read_dir(path.join(size))? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "replay") {
-                replay_to_rocketsim::ensure_unsealed(&path, final_assessment)?;
+                replicar::ensure_unsealed(&path, final_assessment)?;
                 result.push(path);
             }
         }
@@ -45,10 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("usage: count_demolitions <dir or replay> [--final-assessment]")?,
     );
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replay_to_rocketsim::sealed_path_refused(
-        &path,
-        env::args().any(|arg| arg == "--final-assessment"),
-    ) {
+    if replicar::sealed_path_refused(&path, env::args().any(|arg| arg == "--final-assessment")) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let options = ConvertOptions::default();
@@ -157,7 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!(
         "total observed {tot_obs} (linked victim, not a repeat); repeats {tot_repeat} (same victim reported again within {} s; {} of them with no linked car); victims with no linked car in the frame {tot_unlinked} (not in observed); post-goal explosions {tot_goal} (excluded); non-goal events {}",
-        replay_to_rocketsim::observations::DEMOLITION_REPEAT_WINDOW,
+        replicar::observations::DEMOLITION_REPEAT_WINDOW,
         tot_repeat_unlinked,
         tot_obs + tot_repeat + tot_unlinked
     );

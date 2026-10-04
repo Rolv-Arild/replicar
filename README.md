@@ -1,6 +1,6 @@
-# Replay to RocketSim
+# replicar
 
-Converts Rocket League replays into one [RocketSim](https://github.com/ZealanL/RocketSim) game state per replay network frame, with the scoreboard, observed controls, events and provenance alongside. Replay packets are treated as exact server states placed on their true 120 Hz tick; RocketSim simulates every tick in between, and inputs the replay does not record (jump, dodge and control timing, flip cancels, air pitch/yaw/roll) are fitted against later packets.
+*Replica cars from Rocket League replays.* replicar converts Rocket League replays into one [RocketSim](https://github.com/ZealanL/RocketSim) game state per replay network frame, with the scoreboard, observed controls, events and provenance alongside. Replay packets are treated as exact server states placed on their true 120 Hz tick; RocketSim simulates every tick in between, and inputs the replay does not record (jump, dodge and control timing, flip cancels, air pitch/yaw/roll) are fitted against later packets.
 
 On 60 held-out test replays every replay converted, and the car position predicted by RocketSim just before each replay packet is off by 0.04 / 3.5 / 35 UU (median / 90th / 99th percentile). [RESULTS.md](RESULTS.md) has the full evaluation.
 
@@ -37,7 +37,7 @@ tables = read_record_tables("my_match.parquet")
 events = tables["events"].to_pandas()      # needs pandas: goals, demolitions, flip resets
 ```
 
-For JSON Lines, `replay_to_rocketsim.py` offers `read_header`, `iter_frames` (standard library only) and `load_numpy`. Unknown values are NaN for floats and -1 for integers in the arrays, and null in the files, never zero.
+For JSON Lines, `replicar.py` offers `read_header`, `iter_frames` (standard library only) and `load_numpy`. Unknown values are NaN for floats and -1 for integers in the arrays, and null in the files, never zero.
 
 [docs/output-format.md](docs/output-format.md) describes every field: state, observations with their freshness, events, the scoreboard, record tables, training labels and freshness columns.
 
@@ -56,7 +56,7 @@ For JSON Lines, `replay_to_rocketsim.py` offers `read_header`, `iter_frames` (st
 ## Using it from Rust
 
 ```rust
-use replay_to_rocketsim::conversion::{convert_bytes, ConvertOptions};
+use replicar::conversion::{convert_bytes, ConvertOptions};
 
 let bytes = std::fs::read("my_match.replay")?;
 let output = convert_bytes(&bytes, &ConvertOptions::default())?;

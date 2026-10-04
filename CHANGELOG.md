@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 (2026-10-04)
+
+- Renamed from `replay-to-rocketsim` to `replicar` (replica car, replicate, and network replication, which is what a replay records). The Rust crate is now `replicar` and the JSON Lines Python loader `python/replicar.py`; the output format is unchanged.
+
 ## 1.0.0 (2026-10-04)
 
 First release.
