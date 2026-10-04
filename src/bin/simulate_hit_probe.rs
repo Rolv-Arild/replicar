@@ -46,15 +46,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut speed_after = 0.0f32;
         for tick in 1..=120 {
             for event in step_arena_tick(&mut arena) {
-                if let ArenaEvent::CarHitBall(hit) = &event {
-                    if hit_tick.is_none() {
-                        hit_tick = Some(tick);
-                        println!(
-                            "   HIT event at tick {tick}: reported extra_hit_vel {:?} (|v| {:.1})",
-                            hit.extra_hit_vel.to_array().map(|v| v.round()),
-                            hit.extra_hit_vel.length()
-                        );
-                    }
+                if let ArenaEvent::CarHitBall(hit) = &event
+                    && hit_tick.is_none()
+                {
+                    hit_tick = Some(tick);
+                    println!(
+                        "   HIT event at tick {tick}: reported extra_hit_vel {:?} (|v| {:.1})",
+                        hit.extra_hit_vel.to_array().map(|v| v.round()),
+                        hit.extra_hit_vel.length()
+                    );
                 }
             }
             if hit_tick.is_none() && (tick == 1 || tick % 10 == 0) {

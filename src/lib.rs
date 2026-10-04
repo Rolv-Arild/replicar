@@ -32,7 +32,11 @@ pub fn sealed_path_refused(path: &Path, final_assessment: bool) -> bool {
     if final_assessment {
         return false;
     }
-    if has_sealed_component(path) || path.canonicalize().is_ok_and(|resolved| has_sealed_component(&resolved)) {
+    if has_sealed_component(path)
+        || path
+            .canonicalize()
+            .is_ok_and(|resolved| has_sealed_component(&resolved))
+    {
         return true;
     }
     std::env::current_dir()
@@ -42,9 +46,14 @@ pub fn sealed_path_refused(path: &Path, final_assessment: bool) -> bool {
 
 /// For the replay collectors: refuse a directory or file that resolves into the sealed test split, even
 /// when it was reached through a link or junction under another name. `Ok` when allowed.
-pub fn ensure_unsealed(path: &Path, final_assessment: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn ensure_unsealed(
+    path: &Path,
+    final_assessment: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if sealed_path_refused(path, final_assessment) {
-        let resolved = path.canonicalize().map_or_else(|_| path.display().to_string(), |p| p.display().to_string());
+        let resolved = path
+            .canonicalize()
+            .map_or_else(|_| path.display().to_string(), |p| p.display().to_string());
         return Err(format!(
             "refusing to open {} (resolves to {resolved}): it is in the sealed test split (pass --final-assessment for the frozen run)",
             path.display()
@@ -57,8 +66,9 @@ pub fn ensure_unsealed(path: &Path, final_assessment: bool) -> Result<(), Box<dy
 /// `std::fs::read` for a replay file, refusing one that resolves into the sealed test split
 /// (`ensure_unsealed`); a drop-in for the tools that read replays.
 pub fn read_replay_file(path: &Path, final_assessment: bool) -> std::io::Result<Vec<u8>> {
-    ensure_unsealed(path, final_assessment)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string()))?;
+    ensure_unsealed(path, final_assessment).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+    })?;
     std::fs::read(path)
 }
 
@@ -69,18 +79,33 @@ mod tests {
     #[test]
     fn the_sealed_test_split_needs_the_final_assessment_flag() {
         assert!(sealed_path_refused(Path::new("replays/test"), false));
-        assert!(sealed_path_refused(Path::new("replays/test/1v1/a.replay"), false));
+        assert!(sealed_path_refused(
+            Path::new("replays/test/1v1/a.replay"),
+            false
+        ));
         assert!(!sealed_path_refused(Path::new("replays/test"), true));
         assert!(!sealed_path_refused(Path::new("replays/validation"), false));
         assert!(!sealed_path_refused(Path::new("replays/train/3v3"), false));
         assert!(sealed_path_refused(Path::new("replays/TEST"), false));
         assert!(sealed_path_refused(Path::new("replays/Test/1v1"), false));
-        assert!(sealed_path_refused(Path::new("target/no_such_dir/test"), false));
-        assert!(sealed_path_refused(Path::new("replays/train/../test"), false));
+        assert!(sealed_path_refused(
+            Path::new("target/no_such_dir/test"),
+            false
+        ));
+        assert!(sealed_path_refused(
+            Path::new("replays/train/../test"),
+            false
+        ));
         // A component that merely contains the letters is not the sealed split.
         assert!(!sealed_path_refused(Path::new("replays/latest"), false));
-        assert!(!sealed_path_refused(Path::new("replays/contest/1v1"), false));
-        assert!(!sealed_path_refused(Path::new("target/no_such_test_dir"), false));
+        assert!(!sealed_path_refused(
+            Path::new("replays/contest/1v1"),
+            false
+        ));
+        assert!(!sealed_path_refused(
+            Path::new("target/no_such_test_dir"),
+            false
+        ));
         assert!(ensure_unsealed(Path::new("target/no_such_dir/test"), false).is_err());
         assert!(ensure_unsealed(Path::new("target/no_such_dir/test"), true).is_ok());
     }
@@ -92,7 +117,9 @@ mod tests {
     #[test]
     fn a_junction_into_a_sealed_directory_is_refused() {
         use std::process::Command;
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("fake-sealed-{}", std::process::id()));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("fake-sealed-{}", std::process::id()));
         let sealed = root.join("test").join("1v1");
         let junction = root.join("train2");
         std::fs::create_dir_all(&sealed).unwrap();
@@ -103,16 +130,33 @@ mod tests {
             .arg(root.join("test"))
             .output()
             .unwrap();
-        assert!(made.status.success(), "mklink failed: {}", String::from_utf8_lossy(&made.stdout));
+        assert!(
+            made.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&made.stdout)
+        );
         let through = junction.join("1v1");
-        assert!(sealed_path_refused(&through, false), "the junction must resolve to the sealed directory");
+        assert!(
+            sealed_path_refused(&through, false),
+            "the junction must resolve to the sealed directory"
+        );
         assert!(ensure_unsealed(&through, false).is_err());
         assert!(ensure_unsealed(&through, true).is_ok());
         assert!(!sealed_path_refused(&root.join("train").join("1v1"), false));
         // Remove the junction itself, then the directories one by one.
-        let removed = Command::new("cmd").args(["/c", "rmdir"]).arg(&junction).output().unwrap();
+        let removed = Command::new("cmd")
+            .args(["/c", "rmdir"])
+            .arg(&junction)
+            .output()
+            .unwrap();
         assert!(removed.status.success());
-        for dir in [sealed.clone(), root.join("test"), root.join("train").join("1v1"), root.join("train"), root.clone()] {
+        for dir in [
+            sealed.clone(),
+            root.join("test"),
+            root.join("train").join("1v1"),
+            root.join("train"),
+            root.clone(),
+        ] {
             std::fs::remove_dir(dir).unwrap();
         }
     }

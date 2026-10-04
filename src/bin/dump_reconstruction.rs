@@ -7,7 +7,7 @@
 //! frame is compared with the dump's truth, split by whether the frame kept its packet, by frames since
 //! the last packet, and by the car's behaviour in the dump. K = 1 is the unthinned replay.
 //!
-//! usage: dump_reconstruction <replay> <dump.json> [--player name] [K...]
+//! usage: `dump_reconstruction <replay> <dump.json> [--player name] [K...]`
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;

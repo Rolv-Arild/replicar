@@ -1,7 +1,15 @@
 [package]
 name = "replay-to-rocketsim"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.97"
+description = "Converts Rocket League replays into RocketSim game states per network frame, with the scoreboard, controls, events and provenance"
+license = "MIT"
+readme = "README.md"
+keywords = ["rocket-league", "rocketsim", "replay", "simulation"]
+categories = ["simulation", "parser-implementations"]
+# Depends on RocketSim by git revision, which crates.io does not accept.
+publish = false
 
 [dependencies]
 arrow-array = "=60.0.0"
@@ -13,3 +21,12 @@ rocketsim = { git = "https://github.com/ZealanL/RocketSim.git", rev = "9910c58e4
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+[lints.clippy]
+# Frame-indexed loops read several parallel per-frame arrays at the same index.
+needless_range_loop = "allow"
+# The fits take a replay, its lags, a car, a frame and a scratch arena; bundling them would only rename them.
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Options are built from the defaults and then adjusted, which reads better for the evaluators' variants.
+field_reassign_with_default = "allow"

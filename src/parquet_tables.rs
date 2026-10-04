@@ -335,7 +335,10 @@ pub(crate) fn events_fields() -> Vec<Field> {
     ]
 }
 
-pub(crate) fn events_batch(rows: Rows<Slotted<Event>>, schema: &SchemaRef) -> io::Result<RecordBatch> {
+pub(crate) fn events_batch(
+    rows: Rows<Slotted<Event>>,
+    schema: &SchemaRef,
+) -> io::Result<RecordBatch> {
     // A goal row has no demolition fields and a demolition row has no `team`: those are null.
     let columns: Vec<ArrayRef> = vec![
         frames(rows),
@@ -628,7 +631,14 @@ impl Tables {
         provenance: &[(&str, String)],
     ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            touches: Sink::create_with(main, "touches", touches_fields(), touches_batch, properties, provenance)?,
+            touches: Sink::create_with(
+                main,
+                "touches",
+                touches_fields(),
+                touches_batch,
+                properties,
+                provenance,
+            )?,
             ball_contacts: Sink::create_with(
                 main,
                 "ball_contacts",
@@ -661,7 +671,14 @@ impl Tables {
                 properties,
                 provenance,
             )?,
-            events: Sink::create_with(main, "events", events_fields(), events_batch, properties, provenance)?,
+            events: Sink::create_with(
+                main,
+                "events",
+                events_fields(),
+                events_batch,
+                properties,
+                provenance,
+            )?,
             pad_pickups: Sink::create_with(
                 main,
                 "pad_pickups",
@@ -717,21 +734,41 @@ impl Tables {
         };
         for v in packet_lags {
             let slots = [resolve(v.actor_id), None, None];
-            self.packet_lags.push(frame, Slotted { value: v.clone(), slots })?;
+            self.packet_lags.push(
+                frame,
+                Slotted {
+                    value: v.clone(),
+                    slots,
+                },
+            )?;
         }
         for v in &observed.events {
             let slots = match v {
                 Event::GoalScoredOn { .. } => [None; 3],
-                Event::Demolish { victim_car, attacker_car, .. } => {
-                    [resolve(*victim_car), resolve(*attacker_car), None]
-                }
+                Event::Demolish {
+                    victim_car,
+                    attacker_car,
+                    ..
+                } => [resolve(*victim_car), resolve(*attacker_car), None],
                 Event::DodgeRefreshed { car, .. } => [None, None, resolve(Some(*car))],
             };
-            self.events.push(frame, Slotted { value: v.clone(), slots })?;
+            self.events.push(
+                frame,
+                Slotted {
+                    value: v.clone(),
+                    slots,
+                },
+            )?;
         }
         for v in &observed.pad_pickups {
             let slots = [resolve(v.instigator_car_id), None, None];
-            self.pad_pickups.push(frame, Slotted { value: v.clone(), slots })?;
+            self.pad_pickups.push(
+                frame,
+                Slotted {
+                    value: v.clone(),
+                    slots,
+                },
+            )?;
         }
         Ok(())
     }
@@ -829,8 +866,12 @@ mod tests {
             &properties(),
         )
         .unwrap();
-        let unslotted = |value| Slotted { value, slots: [None; 3] };
-        sink.push(7, unslotted(Event::GoalScoredOn { team: 1 })).unwrap();
+        let unslotted = |value| Slotted {
+            value,
+            slots: [None; 3],
+        };
+        sink.push(7, unslotted(Event::GoalScoredOn { team: 1 }))
+            .unwrap();
         sink.push(
             9,
             Slotted {
@@ -884,11 +925,31 @@ mod tests {
     #[test]
     fn actor_ids_resolve_to_car_slots_and_tables_carry_their_provenance() {
         let main = main_path("slots");
-        let mut tables = Tables::create(&main, &properties(), &[("source_sha256", "abc123".to_owned()), ("options_sha256", "def456".to_owned())]).unwrap();
+        let mut tables = Tables::create(
+            &main,
+            &properties(),
+            &[
+                ("source_sha256", "abc123".to_owned()),
+                ("options_sha256", "def456".to_owned()),
+            ],
+        )
+        .unwrap();
         let packet_lags = vec![
-            AppliedPacketLag { actor_id: Some(30), ticks: 2, source: "chain" },
-            AppliedPacketLag { actor_id: None, ticks: 1, source: "chain" },
-            AppliedPacketLag { actor_id: Some(99), ticks: 3, source: "chain" },
+            AppliedPacketLag {
+                actor_id: Some(30),
+                ticks: 2,
+                source: "chain",
+            },
+            AppliedPacketLag {
+                actor_id: None,
+                ticks: 1,
+                source: "chain",
+            },
+            AppliedPacketLag {
+                actor_id: Some(99),
+                ticks: 3,
+                source: "chain",
+            },
         ];
         // Car actor 30 belongs to slot 1 and the shadowed older car 12 to slot 0.
         let car_actor_slots = [(30, 1), (12, 0)];
@@ -926,13 +987,17 @@ mod tests {
                 repeat: false,
             }],
         };
-        tables.add_slotted(4, &packet_lags, &car_actor_slots, &observed).unwrap();
+        tables
+            .add_slotted(4, &packet_lags, &car_actor_slots, &observed)
+            .unwrap();
         let counts = tables.finish(9).unwrap();
         assert_eq!(counts[5], ("events", 4));
 
         let slot_values = |array: &ArrayRef| -> Vec<Option<u32>> {
             let values = array.as_primitive::<UInt32Type>();
-            (0..values.len()).map(|i| values.is_valid(i).then(|| values.value(i))).collect()
+            (0..values.len())
+                .map(|i| values.is_valid(i).then(|| values.value(i)))
+                .collect()
         };
         let (schema, _, batches) = read(&table_path(&main, "events"));
         assert_eq!(schema.metadata()["source_sha256"], "abc123");
@@ -992,7 +1057,11 @@ mod tests {
         let b = &batches[0];
         assert_eq!(
             strings(b.column(2)),
-            [Some("jump".into()), Some("dodge".into()), Some("air".into())]
+            [
+                Some("jump".into()),
+                Some("dodge".into()),
+                Some("air".into())
+            ]
         );
         assert!(b.column(4).is_null(0) && !b.column(4).is_null(1));
         let pitch = b.column(5).as_primitive::<Float32Type>();

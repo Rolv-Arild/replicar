@@ -5,7 +5,7 @@
 //! the summed nearest-car distance over the sample is reported with the residual distribution, and the
 //! per-frame best offsets (they show whether the replay's timeline drifts against the recording's).
 //!
-//! usage: align_rlbot <replay> <states.jsonl>
+//! usage: `align_rlbot <replay> <states.jsonl>`
 
 use std::collections::BTreeMap;
 use std::env;
@@ -138,10 +138,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut best = (f32::INFINITY, 0i64);
         for d in -40..=40i64 {
             let frame = (tick + best_global.1 + d).max(0) as u64;
-            if let Some(dist) = distance(cars, frame) {
-                if dist < best.0 {
-                    best = (dist, d);
-                }
+            if let Some(dist) = distance(cars, frame)
+                && dist < best.0
+            {
+                best = (dist, d);
             }
         }
         per_frame.push((*f, best.1, best.0));

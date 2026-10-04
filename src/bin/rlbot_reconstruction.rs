@@ -8,7 +8,7 @@
 //! mode over neighbouring matched packets is used (one nuisance value per time window, not per frame).
 //! The exported car state of every frame is compared with the truth at `timeline_tick - offset`.
 //!
-//! usage: rlbot_reconstruction <replay> <states.jsonl> [--zero-lag]
+//! usage: `rlbot_reconstruction <replay> <states.jsonl> [--zero-lag]`
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -223,48 +223,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter_map(|s| names.get(&s.player_key).map(|n| (s.slot, n.clone())))
             .collect();
         let frames = &output.observations.frames;
-        if std::env::var_os("AIR_BVP").is_some() && label.starts_with("all fits") {
-            println!(
-                "  air BVP: {} airborne packets planned, {} refused",
-                output.diagnostics.air_bvp_planned, output.diagnostics.air_bvp_refused
-            );
-            println!(
-                "  air BVP refusal reasons (0 flipping, 1 no rotation, 2 low a, 3 inactive, 4 inactive/withheld span, 5 dodge in span, 6 no next packet, 7 low b, 8 span length, 9 ground, 10 no solution): {:?}",
-                replay_to_rocketsim::conversion::AIR_BVP_REFUSALS
-                    .iter()
-                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                    .collect::<Vec<_>>()
-            );
-        }
-        if std::env::var_os("SHIFT_LOG").is_some() && label.starts_with("all fits") {
-            let mut by_actor: HashMap<i32, String> = HashMap::new();
-            for frame in frames {
-                for car in &frame.cars {
-                    if let Some(name) = car.player_key.as_ref().and_then(|k| names.get(k)) {
-                        by_actor.insert(car.actor_id, name.clone());
-                    }
-                }
-            }
-            let log = replay_to_rocketsim::conversion::GROUND_SHIFT_LOG.lock().unwrap();
-            let mut per_name: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-            for &(actor, shift, _) in log.iter() {
-                if let Some(name) = by_actor.get(&actor) {
-                    per_name.entry(name.clone()).or_default().push(shift);
-                }
-            }
-            for (name, mut shifts) in per_name {
-                shifts.sort_unstable();
-                let q = |p: f64| shifts[((shifts.len() - 1) as f64 * p) as usize];
-                let at = |v: i64| shifts.iter().filter(|&&x| x == v).count() as f64 / shifts.len() as f64;
-                println!(
-                    "  ground timing shifts {name:<28} n {:>5} p10/p50/p90 {}/{}/{}  at -8: {:.2} at +40: {:.2} at 0: {:.2}",
-                    shifts.len(), q(0.1), q(0.5), q(0.9), at(-8), at(40), at(0)
-                );
-            }
-        }
-        if label.starts_with("all fits") {
-            replay_to_rocketsim::conversion::GROUND_SHIFT_LOG.lock().unwrap().clear();
-        }
+        label.starts_with("all fits");
         // Matched fresh packets: (frame index, offset between converter timeline and server ticks).
         let mut matched: Vec<(usize, i64)> = Vec::new();
         for (f, frame) in frames.iter().enumerate() {
@@ -339,7 +298,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut flags: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // name -> (n, mismatches)
         // Exported controls against the input the server applied: per control, the absolute errors
         // (frames where it can matter: the air controls only while airborne).
-        let control_names = ["throttle", "steer", "pitch", "yaw", "roll", "jump", "boost", "handbrake"];
+        let control_names = [
+            "throttle",
+            "steer",
+            "pitch",
+            "yaw",
+            "roll",
+            "jump",
+            "boost",
+            "handbrake",
+        ];
         // Air controls against the truth's mean over the frame's interval (the most a constant per interval can match).
         let mut interval_mean_err: Vec<Vec<f32>> = vec![Vec::new(); 3];
         let mut interval_within: Vec<Vec<f32>> = vec![Vec::new(); 3];
@@ -368,57 +336,63 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .cars
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| (i, c))
                     .filter(|(_, c)| (c.1.phys.pos - ball_sim.pos).length() < 350.0)
-                    .min_by(|a, b| (a.1.1.phys.pos - ball_sim.pos).length().total_cmp(&(b.1.1.phys.pos - ball_sim.pos).length()))
+                    .min_by(|a, b| {
+                        (a.1.1.phys.pos - ball_sim.pos)
+                            .length()
+                            .total_cmp(&(b.1.1.phys.pos - ball_sim.pos).length())
+                    })
+                    && let Some(name) = slot_name.get(&slot)
                 {
-                    if let Some(name) = slot_name.get(&slot) {
-                        let exported = car_sim.phys.pos - ball_sim.pos;
-                        let mut best = (f32::INFINITY, 0i64);
-                        for tau in server_tick - 20..=server_tick + 20 {
-                            let Some(players) = truth.get(&(tau.max(0) as u64)) else { continue };
-                            let (Some(tc), Some(tb)) = (players.get(name), players.get("BALL#")) else { continue };
-                            let e = (exported - (tc.pos - tb.pos)).length();
-                            if e < best.0 {
-                                best = (e, tau - server_tick);
-                            }
-                        }
-                        if best.0.is_finite() {
-                            rel_err.push(best.0);
-                            rel_tick.push(best.1 as f32);
+                    let exported = car_sim.phys.pos - ball_sim.pos;
+                    let mut best = (f32::INFINITY, 0i64);
+                    for tau in server_tick - 20..=server_tick + 20 {
+                        let Some(players) = truth.get(&(tau.max(0) as u64)) else {
+                            continue;
+                        };
+                        let (Some(tc), Some(tb)) = (players.get(name), players.get("BALL#")) else {
+                            continue;
+                        };
+                        let e = (exported - (tc.pos - tb.pos)).length();
+                        if e < best.0 {
+                            best = (e, tau - server_tick);
                         }
                     }
+                    if best.0.is_finite() {
+                        rel_err.push(best.0);
+                        rel_tick.push(best.1 as f32);
+                    }
                 }
-                if let Some(players) = truth.get(&(server_tick.max(0) as u64)) {
-                    if let Some(tb) = players.get("BALL#") {
-                        let near = players
-                            .iter()
-                            .any(|(n, t)| n != "BALL#" && (t.pos - tb.pos).length() < 300.0);
-                        let fresh_ball = frames[f]
-                            .ball
-                            .as_ref()
-                            .and_then(|b| b.position.as_ref())
-                            .is_some_and(|p| p.frame == f);
-                        let b = &converted.state.ball.phys;
-                        for group in [
-                            "all".to_string(),
-                            if near {
-                                "ball near a car (<300 UU)".to_string()
-                            } else {
-                                "ball away from cars".to_string()
-                            },
-                            if fresh_ball {
-                                "fresh ball packet".to_string()
-                            } else {
-                                "no fresh ball packet".to_string()
-                            },
-                        ] {
-                            let r = ball_rows.entry(group).or_default();
-                            r.pos.push((b.pos - tb.pos).length());
-                            r.vel.push((b.vel - tb.vel).length());
-                            r.rot.push(rotation_error(b.rot_mat, tb.rot));
-                            r.ang.push((b.ang_vel - tb.ang).length());
-                        }
+                if let Some(players) = truth.get(&(server_tick.max(0) as u64))
+                    && let Some(tb) = players.get("BALL#")
+                {
+                    let near = players
+                        .iter()
+                        .any(|(n, t)| n != "BALL#" && (t.pos - tb.pos).length() < 300.0);
+                    let fresh_ball = frames[f]
+                        .ball
+                        .as_ref()
+                        .and_then(|b| b.position.as_ref())
+                        .is_some_and(|p| p.frame == f);
+                    let b = &converted.state.ball.phys;
+                    for group in [
+                        "all".to_string(),
+                        if near {
+                            "ball near a car (<300 UU)".to_string()
+                        } else {
+                            "ball away from cars".to_string()
+                        },
+                        if fresh_ball {
+                            "fresh ball packet".to_string()
+                        } else {
+                            "no fresh ball packet".to_string()
+                        },
+                    ] {
+                        let r = ball_rows.entry(group).or_default();
+                        r.pos.push((b.pos - tb.pos).length());
+                        r.vel.push((b.vel - tb.vel).length());
+                        r.rot.push(rotation_error(b.rot_mat, tb.rot));
+                        r.ang.push((b.ang_vel - tb.ang).length());
                     }
                 }
             }
@@ -611,7 +585,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let observed = |g: usize| {
                             frames
                                 .get(g)
-                                .and_then(|fr| fr.cars.iter().find(|c| c.player_key == car.player_key))
+                                .and_then(|fr| {
+                                    fr.cars.iter().find(|c| c.player_key == car.player_key)
+                                })
                                 .and_then(|c| c.inputs.steer.as_ref())
                                 .map(|v| (v.value, v.frame))
                         };
@@ -843,7 +819,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let offset = offset_at(f);
             frame_ticks.push((
                 converted.timeline_tick as i64 - offset,
-                frames[f].game_state.as_ref().is_some_and(|g| g.value == "Active"),
+                frames[f]
+                    .game_state
+                    .as_ref()
+                    .is_some_and(|g| g.value == "Active"),
             ));
             for e in converted.fitted_inputs.iter().filter(|e| e.kind != "air") {
                 let Some(name) = slot_name.get(&e.slot) else {
@@ -851,17 +830,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 let server = e.tick as i64 - offset;
                 let dodge = e.kind == "dodge";
-                fitted_ticks.entry((name.clone(), dodge)).or_default().push(server);
+                fitted_ticks
+                    .entry((name.clone(), dodge))
+                    .or_default()
+                    .push(server);
                 let Some(list) = events.get(&(name.clone(), dodge)) else {
                     continue;
                 };
-                if let Some(best) = list.iter().min_by_key(|&&fn_| (fn_ as i64 - server).abs()) {
-                    if (*best as i64 - server).abs() <= 30 {
-                        press
-                            .entry(if dodge { "dodge" } else { "jump" })
-                            .or_default()
-                            .push((server - *best as i64) as f32);
-                    }
+                if let Some(best) = list.iter().min_by_key(|&&fn_| (fn_ as i64 - server).abs())
+                    && (*best as i64 - server).abs() <= 30
+                {
+                    press
+                        .entry(if dodge { "dodge" } else { "jump" })
+                        .or_default()
+                        .push((server - *best as i64) as f32);
                 }
             }
         }
@@ -869,7 +851,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         // fitted presses, those with no true press of that car within 30 ticks, the true presses inside
         // Active play, and those with no fitted press of that car within 30 ticks.
         for (dodge, kind) in [(false, "jump"), (true, "dodge")] {
-            let (mut fitted, mut fitted_unmatched, mut true_active, mut true_unmatched) = (0usize, 0usize, 0usize, 0usize);
+            let (mut fitted, mut fitted_unmatched, mut true_active, mut true_unmatched) =
+                (0usize, 0usize, 0usize, 0usize);
             for ((name, d), ticks) in &fitted_ticks {
                 if *d != dodge {
                     continue;
@@ -877,7 +860,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let truth_list = events.get(&(name.clone(), dodge));
                 for &server in ticks {
                     fitted += 1;
-                    if !truth_list.is_some_and(|l| l.iter().any(|&t| (t as i64 - server).abs() <= 30)) {
+                    if !truth_list
+                        .is_some_and(|l| l.iter().any(|&t| (t as i64 - server).abs() <= 30))
+                    {
                         fitted_unmatched += 1;
                     }
                 }
@@ -897,7 +882,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
                     true_active += 1;
-                    if !fitted_list.is_some_and(|l| l.iter().any(|&server| (t - server).abs() <= 30)) {
+                    if !fitted_list
+                        .is_some_and(|l| l.iter().any(|&server| (t - server).abs() <= 30))
+                    {
                         true_unmatched += 1;
                     }
                 }
@@ -923,8 +910,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!(
                 "  car-ball consistency over {} frames with a car within 350 UU of the ball: relative position error at the best common true tick p50/p90/p99 {:.1}/{:.1}/{:.1} UU; that tick minus the frame's tick p10/p50/p90 {:.0}/{:.0}/{:.0}",
                 rel_err.len(),
-                quantile(&mut rel_err.clone(), 0.5), quantile(&mut rel_err.clone(), 0.9), quantile(&mut rel_err, 0.99),
-                quantile(&mut ticks.clone(), 0.1), quantile(&mut ticks.clone(), 0.5), quantile(&mut ticks, 0.9)
+                quantile(&mut rel_err.clone(), 0.5),
+                quantile(&mut rel_err.clone(), 0.9),
+                quantile(&mut rel_err, 0.99),
+                quantile(&mut ticks.clone(), 0.1),
+                quantile(&mut ticks.clone(), 0.5),
+                quantile(&mut ticks, 0.9)
             );
         }
         if label.starts_with("all fits") {
@@ -936,7 +927,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     100.0 * *bad as f64 / (*n).max(1) as f64
                 );
             }
-            println!("    exported controls against the server's applied input (|error|; pitch, yaw, roll while airborne):");
+            println!(
+                "    exported controls against the server's applied input (|error|; pitch, yaw, roll while airborne):"
+            );
             for (i, name) in control_names.iter().enumerate() {
                 for (part, label) in [(0, "on the ground"), (8, "airborne")] {
                     let errs = &mut control_err[i + part];
@@ -963,8 +956,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     interval_mean_err[k].iter().sum::<f32>() / n,
                     100.0 * interval_mean_err[k].iter().filter(|e| **e > 0.1).count() as f32 / n,
                     interval_within[k].iter().sum::<f32>() / n,
-                    interval_next_err[k].iter().sum::<f32>() / interval_next_err[k].len().max(1) as f32,
-                    100.0 * interval_next_err[k].iter().filter(|e| **e <= 0.1).count() as f32 / interval_next_err[k].len().max(1) as f32,
+                    interval_next_err[k].iter().sum::<f32>()
+                        / interval_next_err[k].len().max(1) as f32,
+                    100.0 * interval_next_err[k].iter().filter(|e| **e <= 0.1).count() as f32
+                        / interval_next_err[k].len().max(1) as f32,
                     quantile(&mut interval_next_err[k].clone(), 0.5)
                 );
             }
@@ -1002,7 +997,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quantile(&mut r.vel, 0.9),
             );
         }
-        println!("\n{label}: {scored} scored car frames ({} matched fresh packets)", matched.len());
+        println!(
+            "\n{label}: {scored} scored car frames ({} matched fresh packets)",
+            matched.len()
+        );
         println!(
             "{:<44} {:>6} | {:>17} | {:>15} | {:>13} | {:>13}",
             "group",
@@ -1033,9 +1031,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Ok(())
     };
-    if std::env::var_os("SHIFT_LOG").is_some() {
-        replay_to_rocketsim::conversion::GROUND_SHIFT_LOG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
     {
         let mut options = ConvertOptions::default();
         options.zero_packet_lag = zero_lag;
@@ -1056,10 +1051,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             ) else {
                 continue;
             };
-            if let Some(hits) = by_position.get(&(name.clone(), key(Vec3A::from_array(p.value)))) {
-                if hits.len() == 1 {
-                    offsets.push((f, Some(car.actor_id), tick_of(f) - hits[0] as i64));
-                }
+            if let Some(hits) = by_position.get(&(name.clone(), key(Vec3A::from_array(p.value))))
+                && hits.len() == 1
+            {
+                offsets.push((f, Some(car.actor_id), tick_of(f) - hits[0] as i64));
             }
         }
         if let Some(p) = frame
@@ -1067,14 +1062,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             .as_ref()
             .and_then(|b| b.position.as_ref())
             .filter(|p| p.frame == f)
-        {
-            if let Some(hits) =
+            && let Some(hits) =
                 by_position.get(&("BALL#".to_string(), key(Vec3A::from_array(p.value))))
-            {
-                if hits.len() == 1 {
-                    offsets.push((f, None, tick_of(f) - hits[0] as i64));
-                }
-            }
+            && hits.len() == 1
+        {
+            offsets.push((f, None, tick_of(f) - hits[0] as i64));
         }
     }
     let mut oracle = replay_to_rocketsim::conversion::PacketLags {

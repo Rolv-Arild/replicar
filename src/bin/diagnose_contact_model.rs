@@ -199,11 +199,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 };
                 let t = tick(cf) - lag;
-                if (tick_a - 1..=tick_a).contains(&t) {
-                    if let Some(p) = physics(&c.body, cf) {
-                        chosen = Some((c, p, tick_a - t));
-                        break;
-                    }
+                if (tick_a - 1..=tick_a).contains(&t)
+                    && let Some(p) = physics(&c.body, cf)
+                {
+                    chosen = Some((c, p, tick_a - t));
+                    break;
                 }
             }
             let Some((c, packet, stale)) = chosen else {
@@ -263,31 +263,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sim_velocity = arena.get_ball_state().phys.vel;
             // Also run on to the following ball packet, once the contact has finished.
             let mut later: Option<(f32, f32, f32)> = None;
-            if f + 1 < frames.len() {
-                if let (Some(lag_c), Some(ball_c)) =
+            if f + 1 < frames.len()
+                && let (Some(lag_c), Some(ball_c)) =
                     (lag_of(f + 1, None), frames[f + 1].ball.as_ref())
-                {
-                    if let Some(c_state) = physics(ball_c, f + 1) {
-                        let tick_c = tick(f + 1) - lag_c;
-                        let extra = tick_c - tick_b;
-                        if (1..=10).contains(&extra) {
-                            for _ in 0..extra {
-                                step_arena_tick(arena);
-                            }
-                            // ball-only reference from A to C
-                            ball_only.set_ball_state(ball_state);
-                            for _ in 0..(tick_c - tick_a) {
-                                ball_only.step_tick();
-                            }
-                            let free_c = ball_only.get_ball_state().phys.vel;
-                            let sim_c = arena.get_ball_state().phys.vel;
-                            later = Some((
-                                (sim_c - c_state.1).length(),
-                                (c_state.1 - free_c).length(),
-                                (sim_c - free_c).length(),
-                            ));
-                        }
+                && let Some(c_state) = physics(ball_c, f + 1)
+            {
+                let tick_c = tick(f + 1) - lag_c;
+                let extra = tick_c - tick_b;
+                if (1..=10).contains(&extra) {
+                    for _ in 0..extra {
+                        step_arena_tick(arena);
                     }
+                    // ball-only reference from A to C
+                    ball_only.set_ball_state(ball_state);
+                    for _ in 0..(tick_c - tick_a) {
+                        ball_only.step_tick();
+                    }
+                    let free_c = ball_only.get_ball_state().phys.vel;
+                    let sim_c = arena.get_ball_state().phys.vel;
+                    later = Some((
+                        (sim_c - c_state.1).length(),
+                        (c_state.1 - free_c).length(),
+                        (sim_c - free_c).length(),
+                    ));
                 }
             }
             if let Some((error_c, impulse_c, sim_impulse_c)) = later {
@@ -340,7 +338,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             for label in [
                 "all".to_string(),
-                format!("{air}"),
+                air.to_string(),
                 format!(
                     "ticks simulated {}",
                     if k <= 4 {

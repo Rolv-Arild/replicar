@@ -28,7 +28,12 @@ struct Samples {
 }
 
 /// Age buckets (seconds from the start packet to the target frame) for the masked rows.
-const AGE_BUCKETS: [(&str, f32); 4] = [("<=0.04", 0.04), ("<=0.08", 0.08), ("<=0.12", 0.12), ("<=0.20", 0.20)];
+const AGE_BUCKETS: [(&str, f32); 4] = [
+    ("<=0.04", 0.04),
+    ("<=0.08", 0.08),
+    ("<=0.12", 0.12),
+    ("<=0.20", 0.20),
+];
 
 fn age_bucket(age: f32) -> &'static str {
     AGE_BUCKETS
@@ -49,7 +54,8 @@ impl Samples {
             .filter(|v| v.is_finite())
         {
             self.linear.push(value);
-            self.linear_age.push(residual.seconds_since_previous_position);
+            self.linear_age
+                .push(residual.seconds_since_previous_position);
         }
         if let Some(value) = residual
             .offline_projection_fit_error_uu
@@ -146,7 +152,8 @@ fn age_quantiles(values: &[f32]) -> AgeQuantiles {
     let mut values: Vec<_> = values.iter().copied().filter(|v| v.is_finite()).collect();
     values.sort_by(f32::total_cmp);
     let at = |fraction: f64| {
-        (!values.is_empty()).then(|| values[((values.len() - 1) as f64 * fraction).round() as usize])
+        (!values.is_empty())
+            .then(|| values[((values.len() - 1) as f64 * fraction).round() as usize])
     };
     AgeQuantiles {
         count: values.len(),
@@ -793,39 +800,39 @@ fn add_masked_kinematics(
     predicted: &PhysState,
     frames: &[replay_to_rocketsim::observations::Frame],
 ) {
-    if let (Some(actual), Some(previous)) = (&actual.linear_velocity, &stale.linear_velocity) {
-        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
-            samples.linear_velocity_uu_per_second.add(
-                distance(predicted.vel.to_array(), actual.value),
-                distance(previous.value, actual.value),
-            );
-        }
+    if let (Some(actual), Some(previous)) = (&actual.linear_velocity, &stale.linear_velocity)
+        && actual.frame == index
+        && valid_masked_interval(index, previous.frame, frames)
+    {
+        samples.linear_velocity_uu_per_second.add(
+            distance(predicted.vel.to_array(), actual.value),
+            distance(previous.value, actual.value),
+        );
     }
-    if let (Some(actual), Some(previous)) = (&actual.rotation_xyzw, &stale.rotation_xyzw) {
-        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
-            if let (Some(actual), Some(previous)) =
-                (quaternion(actual.value), quaternion(previous.value))
-            {
-                let actual = Mat3A::from_quat(actual);
-                samples.rotation_degrees.add(
-                    rotation_error_degrees(predicted.rot_mat, actual),
-                    rotation_error_degrees(Mat3A::from_quat(previous), actual),
-                );
-            }
-        }
+    if let (Some(actual), Some(previous)) = (&actual.rotation_xyzw, &stale.rotation_xyzw)
+        && actual.frame == index
+        && valid_masked_interval(index, previous.frame, frames)
+        && let (Some(actual), Some(previous)) =
+            (quaternion(actual.value), quaternion(previous.value))
+    {
+        let actual = Mat3A::from_quat(actual);
+        samples.rotation_degrees.add(
+            rotation_error_degrees(predicted.rot_mat, actual),
+            rotation_error_degrees(Mat3A::from_quat(previous), actual),
+        );
     }
     if let (Some(actual), Some(previous)) = (
         &actual.angular_velocity_replay_units,
         &stale.angular_velocity_replay_units,
-    ) {
-        if actual.frame == index && valid_masked_interval(index, previous.frame, frames) {
-            let actual = actual.value.map(|axis| axis * 0.01);
-            let previous = previous.value.map(|axis| axis * 0.01);
-            samples.angular_velocity_radians_per_second.add(
-                distance(predicted.ang_vel.to_array(), actual),
-                distance(previous, actual),
-            );
-        }
+    ) && actual.frame == index
+        && valid_masked_interval(index, previous.frame, frames)
+    {
+        let actual = actual.value.map(|axis| axis * 0.01);
+        let previous = previous.value.map(|axis| axis * 0.01);
+        samples.angular_velocity_radians_per_second.add(
+            distance(predicted.ang_vel.to_array(), actual),
+            distance(previous, actual),
+        );
     }
 }
 
@@ -869,7 +876,8 @@ fn masked_observations(original: &ObservedReplay, schedule: MaskSchedule) -> Obs
         for car in &mut frame.cars {
             // The same car lifetime: an actor id reused in consecutive frames is another car.
             if let Some(prior) = previous.cars.iter().find(|prior| {
-                prior.actor_id == car.actor_id && prior.actor_created_frame == car.actor_created_frame
+                prior.actor_id == car.actor_id
+                    && prior.actor_created_frame == car.actor_created_frame
             }) {
                 car.body = prior.body.clone();
                 car.boost = prior.boost.clone();
@@ -1196,46 +1204,43 @@ fn masked_metrics(
                     position_error_uu,
                 });
             }
-            if let (Some(actual), Some(previous)) = (&car.boost, &stale.boost) {
-                if actual.frame == index
-                    && valid_masked_interval(index, previous.frame, &original.frames)
-                {
-                    by_boost.add(
-                        (predicted.boost - actual.value).abs(),
-                        (previous.value - actual.value).abs(),
-                    );
-                }
+            if let (Some(actual), Some(previous)) = (&car.boost, &stale.boost)
+                && actual.frame == index
+                && valid_masked_interval(index, previous.frame, &original.frames)
+            {
+                by_boost.add(
+                    (predicted.boost - actual.value).abs(),
+                    (previous.value - actual.value).abs(),
+                );
             }
             if let (Some(position), Some(actual), Some(previous)) = (
                 &car.body.position,
                 &car.body.angular_velocity_replay_units,
                 &stale.body.angular_velocity_replay_units,
-            ) {
-                if position.frame == index
-                    && actual.frame == index
-                    && valid_masked_interval(index, previous.frame, &original.frames)
-                {
-                    let altitude = if position.value[2] < 50.0 {
-                        "ground"
-                    } else if position.value[2] > 100.0 {
-                        "air"
-                    } else {
-                        "transition"
-                    };
-                    car_angular_by_altitude
-                        .entry(altitude.to_owned())
-                        .or_default()
-                        .add(
-                            distance(
-                                predicted.phys.ang_vel.to_array(),
-                                actual.value.map(|axis| axis * 0.01),
-                            ),
-                            distance(
-                                previous.value.map(|axis| axis * 0.01),
-                                actual.value.map(|axis| axis * 0.01),
-                            ),
-                        );
-                }
+            ) && position.frame == index
+                && actual.frame == index
+                && valid_masked_interval(index, previous.frame, &original.frames)
+            {
+                let altitude = if position.value[2] < 50.0 {
+                    "ground"
+                } else if position.value[2] > 100.0 {
+                    "air"
+                } else {
+                    "transition"
+                };
+                car_angular_by_altitude
+                    .entry(altitude.to_owned())
+                    .or_default()
+                    .add(
+                        distance(
+                            predicted.phys.ang_vel.to_array(),
+                            actual.value.map(|axis| axis * 0.01),
+                        ),
+                        distance(
+                            previous.value.map(|axis| axis * 0.01),
+                            actual.value.map(|axis| axis * 0.01),
+                        ),
+                    );
             }
         }
     }
@@ -1366,7 +1371,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             "held-out"
         },
         masked_run_options: {
-            let applied = masked_conversion_options(&options, aligned_targets && aligned_predictor, Vec::new());
+            let applied = masked_conversion_options(
+                &options,
+                aligned_targets && aligned_predictor,
+                Vec::new(),
+            );
             MaskedRunOptions {
                 infer_packet_lag: applied.infer_packet_lag,
                 block_sim_pad_pickups: applied.block_sim_pad_pickups,
@@ -1418,8 +1427,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (index, (size, path)) in replay_paths.iter().enumerate() {
         match fs::read(path)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| convert_bytes(&bytes, &strict_options).map_err(|error| error.to_string()))
-        {
+            .and_then(|bytes| {
+                convert_bytes(&bytes, &strict_options).map_err(|error| error.to_string())
+            }) {
             Ok(conversion) => {
                 let mut own = ByBody::default();
                 let mut own_kinematics = KinematicsByBody::default();
@@ -1436,32 +1446,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                     all.add(residual);
                     one_step_kinematics_all.add_residual(residual);
 
-                    if residual.actor_id.is_some() {
-                        if let (Some(alt), Some(sim_ang), Some(hold_ang)) = (
+                    if residual.actor_id.is_some()
+                        && let (Some(alt), Some(sim_ang), Some(hold_ang)) = (
                             residual.altitude_z,
                             residual.simulated_angular_velocity_error_rad_per_sec,
                             residual.hold_angular_velocity_error_rad_per_sec,
-                        ) {
-                            let altitude = if alt < 50.0 {
-                                "ground"
-                            } else if alt > 100.0 {
-                                "air"
-                            } else {
-                                "transition"
-                            };
-                            one_step_car_angular_by_altitude
-                                .entry(altitude.to_owned())
-                                .or_default()
-                                .add(sim_ang, hold_ang);
-                            if altitude == "transition" {
-                                if let Some(contexts) = transition_contexts(&conversion, residual) {
-                                    for context in contexts {
-                                        one_step_transition_angular_by_context
-                                            .entry(context.to_owned())
-                                            .or_default()
-                                            .add(sim_ang, hold_ang);
-                                    }
-                                }
+                        )
+                    {
+                        let altitude = if alt < 50.0 {
+                            "ground"
+                        } else if alt > 100.0 {
+                            "air"
+                        } else {
+                            "transition"
+                        };
+                        one_step_car_angular_by_altitude
+                            .entry(altitude.to_owned())
+                            .or_default()
+                            .add(sim_ang, hold_ang);
+                        if altitude == "transition"
+                            && let Some(contexts) = transition_contexts(&conversion, residual)
+                        {
+                            for context in contexts {
+                                one_step_transition_angular_by_context
+                                    .entry(context.to_owned())
+                                    .or_default()
+                                    .add(sim_ang, hold_ang);
                             }
                         }
                     }
@@ -1476,14 +1486,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .worst_car_regret_uu
                                 .last()
                                 .is_some_and(|last| regret.unwrap() > last.regret_uu));
-                    if keep {
-                        if let Some(outlier) = outlier_record(path, &conversion, residual) {
-                            report.worst_car_regret_uu.push(outlier);
-                            report
-                                .worst_car_regret_uu
-                                .sort_by(|a, b| b.regret_uu.total_cmp(&a.regret_uu));
-                            report.worst_car_regret_uu.truncate(100);
-                        }
+                    if keep && let Some(outlier) = outlier_record(path, &conversion, residual) {
+                        report.worst_car_regret_uu.push(outlier);
+                        report
+                            .worst_car_regret_uu
+                            .sort_by(|a, b| b.regret_uu.total_cmp(&a.regret_uu));
+                        report.worst_car_regret_uu.truncate(100);
                     }
                 }
                 let replay_hash = u64::from_str_radix(
@@ -1511,8 +1519,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let offline_target = if aligned_targets && !offline_fits {
                     match fs::read(path)
                         .map_err(|error| error.to_string())
-                        .and_then(|bytes| convert_bytes(&bytes, &options).map_err(|error| error.to_string()))
-                    {
+                        .and_then(|bytes| {
+                            convert_bytes(&bytes, &options).map_err(|error| error.to_string())
+                        }) {
                         Ok(target) => Some(target),
                         Err(error) => {
                             report.failures.push(Failure {
@@ -1754,7 +1763,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     // The report is written either way; a failed replay must not look like a clean run to a script.
     if !report.failures.is_empty() {
-        return Err(format!("{} replay(s) failed (listed in the report)", report.failures.len()).into());
+        return Err(format!(
+            "{} replay(s) failed (listed in the report)",
+            report.failures.len()
+        )
+        .into());
     }
     Ok(())
 }
@@ -1801,7 +1814,10 @@ mod tests {
             .parse()
             .unwrap();
         let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
-        let schedule = MaskSchedule { seed: None, replay_hash: 7 };
+        let schedule = MaskSchedule {
+            seed: None,
+            replay_hash: 7,
+        };
         let shift = |body: &mut Body, by: f32| {
             for value in body.position.iter_mut() {
                 value.value[0] += by;
@@ -1879,10 +1895,16 @@ mod tests {
             return;
         }
         let bytes = fs::read(path).unwrap();
-        let replay = boxcars::ParserBuilder::new(&bytes).must_parse_network_data().parse().unwrap();
+        let replay = boxcars::ParserBuilder::new(&bytes)
+            .must_parse_network_data()
+            .parse()
+            .unwrap();
         let original = replay_to_rocketsim::observations::extract(&replay).unwrap();
         drop(replay);
-        let schedule = MaskSchedule { seed: None, replay_hash: 7 };
+        let schedule = MaskSchedule {
+            seed: None,
+            replay_hash: 7,
+        };
         // The evaluator's own base options.
         let mut options = ConvertOptions::default();
         options.air_bvp = false;
@@ -1892,36 +1914,49 @@ mod tests {
             let mut cars: Vec<_> = state
                 .cars
                 .iter()
-                .map(|(info, car)| format!("{} {:?} {:?} {}", info.idx, car.phys, car.boost.to_bits(), car.is_demoed))
+                .map(|(info, car)| {
+                    format!(
+                        "{} {:?} {:?} {}",
+                        info.idx,
+                        car.phys,
+                        car.boost.to_bits(),
+                        car.is_demoed
+                    )
+                })
                 .collect();
             cars.sort();
             format!("{:?} {:?}", state.ball.phys, cars)
         };
-        let pads = |output: &ConversionOutput, frame: usize| format!("{:?}", output.frames[frame].state.boost_pads);
-        let convert = |observed: &ObservedReplay, lag_inference: bool, leak: Option<(usize, usize)>| {
-            let withheld = (0..observed.frames.len()).map(|i| schedule.horizon(i).is_some()).collect();
-            let masked_options = masked_conversion_options(&options, lag_inference, withheld);
-            let mut masked = masked_observations(observed, schedule);
-            if let Some((from, to)) = leak {
-                // Deliberately feed the ball packet of frame `from` (after the window) into window frame
-                // `to`, stamped as that frame's own fresh packet.
-                let mut ball = observed.frames[from].ball.clone().expect("a ball body");
-                for value in ball.position.iter_mut() {
-                    value.frame = to;
-                }
-                for value in ball.linear_velocity.iter_mut() {
-                    value.frame = to;
-                }
-                for value in ball.rotation_xyzw.iter_mut() {
-                    value.frame = to;
-                }
-                for value in ball.angular_velocity_replay_units.iter_mut() {
-                    value.frame = to;
-                }
-                masked.frames[to].ball = Some(ball);
-            }
-            convert_observations(masked, &masked_options).unwrap()
+        let pads = |output: &ConversionOutput, frame: usize| {
+            format!("{:?}", output.frames[frame].state.boost_pads)
         };
+        let convert =
+            |observed: &ObservedReplay, lag_inference: bool, leak: Option<(usize, usize)>| {
+                let withheld = (0..observed.frames.len())
+                    .map(|i| schedule.horizon(i).is_some())
+                    .collect();
+                let masked_options = masked_conversion_options(&options, lag_inference, withheld);
+                let mut masked = masked_observations(observed, schedule);
+                if let Some((from, to)) = leak {
+                    // Deliberately feed the ball packet of frame `from` (after the window) into window frame
+                    // `to`, stamped as that frame's own fresh packet.
+                    let mut ball = observed.frames[from].ball.clone().expect("a ball body");
+                    for value in ball.position.iter_mut() {
+                        value.frame = to;
+                    }
+                    for value in ball.linear_velocity.iter_mut() {
+                        value.frame = to;
+                    }
+                    for value in ball.rotation_xyzw.iter_mut() {
+                        value.frame = to;
+                    }
+                    for value in ball.angular_velocity_replay_units.iter_mut() {
+                        value.frame = to;
+                    }
+                    masked.frames[to].ball = Some(ball);
+                }
+                convert_observations(masked, &masked_options).unwrap()
+            };
         let truncated_at = |end: usize| {
             let mut truncated = original.clone();
             // Right after the window: frame `end` is its last frame.
@@ -1942,31 +1977,62 @@ mod tests {
                 physics += usize::from(signature(&reference, frame) != signature(&cut, frame));
                 pad_frames += usize::from(pads(&reference, frame) != pads(&cut, frame));
             }
-            eprintln!("default predictor, window at {}: {physics} of {} frames differ in physics or boost, {pad_frames} in pads", window * 100 + 1, end + 1);
-            assert_eq!(physics, 0, "truncating the replay after the window at {} changes the exported states", window * 100 + 1);
+            eprintln!(
+                "default predictor, window at {}: {physics} of {} frames differ in physics or boost, {pad_frames} in pads",
+                window * 100 + 1,
+                end + 1
+            );
+            assert_eq!(
+                physics,
+                0,
+                "truncating the replay after the window at {} changes the exported states",
+                window * 100 + 1
+            );
         }
         // Secondary signature check: a ball packet from 40 frames after the window, fed into its first frame
         // in the longer replay only, changes the states of the window.
         let end = 4 * 100 + 4;
         let leaked = convert(&reference_replay, false, Some((end + 40, 401)));
         let cut = convert(&truncated_at(end), false, None);
-        let differing = (0..=end).filter(|&frame| signature(&leaked, frame) != signature(&cut, frame)).count();
-        eprintln!("signature check (a post-window ball packet fed into frame 401): {differing} frames differ");
-        assert!(differing > 0, "the injected packet found no dependence: the test cannot tell");
+        let differing = (0..=end)
+            .filter(|&frame| signature(&leaked, frame) != signature(&cut, frame))
+            .count();
+        eprintln!(
+            "signature check (a post-window ball packet fed into frame 401): {differing} frames differ"
+        );
+        assert!(
+            differing > 0,
+            "the injected packet found no dependence: the test cannot tell"
+        );
         // Aligned predictor: its known future dependence (the replay-wide ball-car offset) is the positive
         // control of the truncation path itself: the same truncation must change the states here.
         let full = convert(&original, true, None);
         let cut = convert(&truncated_at(904), true, None);
         let mut worst = 0.0f32;
         for frame in 0..=904 {
-            worst = worst.max((full.frames[frame].state.ball.phys.pos - cut.frames[frame].state.ball.phys.pos).length());
-            for ((_, a), (_, b)) in full.frames[frame].state.cars.iter().zip(&cut.frames[frame].state.cars) {
+            worst = worst.max(
+                (full.frames[frame].state.ball.phys.pos - cut.frames[frame].state.ball.phys.pos)
+                    .length(),
+            );
+            for ((_, a), (_, b)) in full.frames[frame]
+                .state
+                .cars
+                .iter()
+                .zip(&cut.frames[frame].state.cars)
+            {
                 worst = worst.max((a.phys.pos - b.phys.pos).length());
             }
         }
-        let differing = (0..=904).filter(|&frame| signature(&full, frame) != signature(&cut, frame)).count();
-        eprintln!("aligned predictor, window at 901: {differing} of 905 frames differ, largest ball or car position difference {worst:.2} UU");
-        assert!(differing > 0, "the aligned predictor must depend on the later packets (positive control of the truncation)");
+        let differing = (0..=904)
+            .filter(|&frame| signature(&full, frame) != signature(&cut, frame))
+            .count();
+        eprintln!(
+            "aligned predictor, window at 901: {differing} of 905 frames differ, largest ball or car position difference {worst:.2} UU"
+        );
+        assert!(
+            differing > 0,
+            "the aligned predictor must depend on the later packets (positive control of the truncation)"
+        );
     }
 
     #[test]

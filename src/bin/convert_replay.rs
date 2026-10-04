@@ -12,8 +12,12 @@ use replay_to_rocketsim::serialization::write_jsonl;
 /// `<dir>/.<stem>.partial-<pid>.<ext>` beside the output: the name an export is written under until it is
 /// complete (its record tables get `.<stem>.partial-<pid>.<table>.parquet` by `table_path`).
 fn temp_path(output: &std::path::Path) -> PathBuf {
-    let stem = output.file_stem().map_or_else(|| "export".into(), |s| s.to_string_lossy().into_owned());
-    let extension = output.extension().map_or_else(String::new, |e| format!(".{}", e.to_string_lossy()));
+    let stem = output
+        .file_stem()
+        .map_or_else(|| "export".into(), |s| s.to_string_lossy().into_owned());
+    let extension = output
+        .extension()
+        .map_or_else(String::new, |e| format!(".{}", e.to_string_lossy()));
     output.with_file_name(format!(".{stem}.partial-{}{extension}", std::process::id()))
 }
 
@@ -46,7 +50,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut event_tables = true;
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
     let mut final_assessment = false;
-    while let Some(arg) = args.next() {
+    for arg in args {
         if arg == "--final-assessment" {
             final_assessment = true;
         } else if arg == "--no-event-tables" {
@@ -110,10 +114,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     // then the tables and the main file are renamed into place. If anything fails, what this run published is
     // deleted again and the backups are restored, so an old export stays complete (old main with its old
     // tables); on success the backups are deleted. A failed backup removal is a warning.
-    let mut targets: Vec<PathBuf> = table_rows.iter().map(|(table, _)| table_path(&output_path, table)).collect();
+    let mut targets: Vec<PathBuf> = table_rows
+        .iter()
+        .map(|(table, _)| table_path(&output_path, table))
+        .collect();
     targets.push(output_path.clone());
     let backup_of = |target: &std::path::Path| -> PathBuf {
-        let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let name = target
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         target.with_file_name(format!(".{name}.bak-{}", std::process::id()))
     };
     let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -138,7 +147,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Err(error) = publish {
         for target in &published {
             if let Err(remove_error) = fs::remove_file(target) {
-                eprintln!("warning: could not remove {} while rolling back: {remove_error}", target.display());
+                eprintln!(
+                    "warning: could not remove {} while rolling back: {remove_error}",
+                    target.display()
+                );
             }
         }
         for (target, backup) in &backups {
@@ -155,7 +167,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     for (_, backup) in &backups {
         if let Err(error) = fs::remove_file(backup) {
-            eprintln!("warning: could not remove the backup {}: {error}", backup.display());
+            eprintln!(
+                "warning: could not remove the backup {}: {error}",
+                backup.display()
+            );
         }
     }
     // The stale tables a run without tables leaves behind would be read next to the new main file. The export
@@ -174,7 +189,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     for (table, rows) in &table_rows {
-        println!("{rows} rows -> {}", table_path(&output_path, table).display());
+        println!(
+            "{rows} rows -> {}",
+            table_path(&output_path, table).display()
+        );
     }
     println!("{count} frames -> {}", output_path.display());
     Ok(())

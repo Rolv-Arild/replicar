@@ -65,13 +65,14 @@ fn odd(value: &Option<Value<u8>>) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(
-        env::args_os()
-            .nth(1)
-            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--final-assessment]")?,
-    );
+    let path = PathBuf::from(env::args_os().nth(1).ok_or(
+        "usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--final-assessment]",
+    )?);
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replay_to_rocketsim::sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
+    if replay_to_rocketsim::sealed_path_refused(
+        &path,
+        env::args_os().any(|arg| arg == "--final-assessment"),
+    ) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let mut options = ConvertOptions::default();
@@ -86,7 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // an activation.
     // Keyed by car lifetime (actor id and creation frame) and cleared per replay, so an id that is
     // reused or appears in the next replay does not inherit another car's previous packet.
-    let mut previous_dodge_parity: std::collections::HashMap<(i32, usize), bool> = Default::default();
+    let mut previous_dodge_parity: std::collections::HashMap<(i32, usize), bool> =
+        Default::default();
     let mut previous_jump_parity: BTreeMap<(i32, usize), bool> = BTreeMap::new();
     let mut previous_altitude: std::collections::HashMap<(i32, usize), f32> = Default::default();
     let mut skipped = 0usize;

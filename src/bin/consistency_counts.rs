@@ -4,7 +4,7 @@
 //! replays detected as lag-free, the demolition counts (as `count_demolitions`) and the scoreboard check
 //! (as `check_scoreboard` with `CONVERTED`). Per replay and in total.
 //!
-//! usage: consistency_counts <dir or replay> [--final-assessment]
+//! usage: `consistency_counts <dir or replay> [--final-assessment]`
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -81,9 +81,18 @@ impl Counts {
     }
 
     fn print(&self, label: &str) {
-        let pct = |n: usize, d: usize| if d == 0 { "n/a".to_owned() } else { format!("{:.1}%", 100.0 * n as f64 / d as f64) };
+        let pct = |n: usize, d: usize| {
+            if d == 0 {
+                "n/a".to_owned()
+            } else {
+                format!("{:.1}%", 100.0 * n as f64 / d as f64)
+            }
+        };
         println!("{label}:");
-        println!("  replays {}, detected as lag-free {}", self.replays, self.lag_free_replays);
+        println!(
+            "  replays {}, detected as lag-free {}",
+            self.replays, self.lag_free_replays
+        );
         println!(
             "  boost pickups (new, with an instigator) {}: pad matched to RocketSim's list {} ({}), the car's path reaches the pad {} ({})",
             self.pickups,
@@ -127,7 +136,10 @@ impl Counts {
 
 fn count_replay(bytes: &[u8], options: &ConvertOptions) -> Result<Counts, Box<dyn Error>> {
     let output = convert_bytes(bytes, options)?;
-    let mut c = Counts { replays: 1, ..Counts::default() };
+    let mut c = Counts {
+        replays: 1,
+        ..Counts::default()
+    };
     // Lag-free detection is part of the lag inference of the conversion; run it on the same observations.
     c.lag_free_replays = usize::from(infer_packet_lags(&output.observations, options).lag_free);
     let (mut touches, mut contacts): (Vec<u64>, Vec<(u64, u64)>) = (Vec::new(), Vec::new());
@@ -138,17 +150,35 @@ fn count_replay(bytes: &[u8], options: &ConvertOptions) -> Result<Counts, Box<dy
             c.pickups_path_reaches_pad += usize::from(p.verified);
         }
         touches.extend(converted.touches.iter().map(|t| t.tick));
-        contacts.extend(converted.ball_contacts.iter().map(|b| (b.tick_from, b.tick_to)));
-        c.contacts_with_sim_touch += converted.ball_contacts.iter().filter(|b| b.simulated_touch).count();
+        contacts.extend(
+            converted
+                .ball_contacts
+                .iter()
+                .map(|b| (b.tick_from, b.tick_to)),
+        );
+        c.contacts_with_sim_touch += converted
+            .ball_contacts
+            .iter()
+            .filter(|b| b.simulated_touch)
+            .count();
         for event in &frame.events {
-            if let Event::Demolish { source, victim_car, repeat, .. } = event {
+            if let Event::Demolish {
+                source,
+                victim_car,
+                repeat,
+                ..
+            } = event
+            {
                 if *source == "goal_explosion" {
                     c.goal_explosions += 1;
                 } else if *repeat {
                     c.demolition_repeats += 1;
                 } else {
                     let linked = victim_car.is_some_and(|v| {
-                        frame.cars.iter().any(|car| car.actor_id == v && car.player_key.is_some())
+                        frame
+                            .cars
+                            .iter()
+                            .any(|car| car.actor_id == v && car.player_key.is_some())
                     });
                     if linked {
                         c.demolitions += 1;
@@ -163,21 +193,25 @@ fn count_replay(bytes: &[u8], options: &ConvertOptions) -> Result<Counts, Box<dy
             .iter()
             .filter(|e| matches!(&e.event, ArenaEvent::CarHitCar(hit) if hit.is_demo))
             .count();
-        if let Some(sb) = &converted.scoreboard {
-            if sb.clock_state == "running" {
-                let overtime = sb.period == "overtime";
-                let shown = frame.seconds_remaining.as_ref().map(|v| v.value);
-                let clock = if overtime { sb.overtime_seconds } else { sb.seconds_remaining };
-                if let (Some(shown), Some(clock)) = (shown, clock) {
-                    c.running_frames += 1;
-                    match (shown - clock.ceil() as i32).abs() {
-                        0 => {}
-                        1 => c.running_off_by_one += 1,
-                        _ => c.running_off_more += 1,
-                    }
-                } else {
-                    c.running_without_value += 1;
+        if let Some(sb) = &converted.scoreboard
+            && sb.clock_state == "running"
+        {
+            let overtime = sb.period == "overtime";
+            let shown = frame.seconds_remaining.as_ref().map(|v| v.value);
+            let clock = if overtime {
+                sb.overtime_seconds
+            } else {
+                sb.seconds_remaining
+            };
+            if let (Some(shown), Some(clock)) = (shown, clock) {
+                c.running_frames += 1;
+                match (shown - clock.ceil() as i32).abs() {
+                    0 => {}
+                    1 => c.running_off_by_one += 1,
+                    _ => c.running_off_more += 1,
                 }
+            } else {
+                c.running_without_value += 1;
             }
         }
     }
@@ -185,7 +219,11 @@ fn count_replay(bytes: &[u8], options: &ConvertOptions) -> Result<Counts, Box<dy
     c.sim_touches = touches.len();
     c.sim_touches_in_contact = touches
         .iter()
-        .filter(|&&t| contacts.iter().any(|&(from, to)| t + 2 >= from && t <= to + 2))
+        .filter(|&&t| {
+            contacts
+                .iter()
+                .any(|&(from, to)| t + 2 >= from && t <= to + 2)
+        })
         .count();
     c.contacts = contacts.len();
     Ok(c)
@@ -195,14 +233,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let usage = "usage: consistency_counts <dir or replay> [--final-assessment]";
     let path = PathBuf::from(env::args().nth(1).ok_or(usage)?);
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replay_to_rocketsim::sealed_path_refused(&path, env::args().any(|arg| arg == "--final-assessment")) {
+    if replay_to_rocketsim::sealed_path_refused(
+        &path,
+        env::args().any(|arg| arg == "--final-assessment"),
+    ) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let options = ConvertOptions::default();
     let mut total = Counts::default();
     for replay in replay_paths(&path, env::args_os().any(|arg| arg == "--final-assessment"))? {
         let counts = count_replay(&fs::read(&replay)?, &options)?;
-        let name = replay.file_name().unwrap().to_string_lossy().chars().take(8).collect::<String>();
+        let name = replay
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .take(8)
+            .collect::<String>();
         println!(
             "{name} lag-free {} | pickups {} on-list {} reach {} | touches {} in-contact {} | contacts {} with-touch {} | demolitions {} repeat {} unlinked {} sim {} | running {} off1 {} off2+ {}",
             counts.lag_free_replays,

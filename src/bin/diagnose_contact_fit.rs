@@ -320,11 +320,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 };
                 let t = tick(cf) - lag;
-                if (tick_a - 1..=tick_a).contains(&t) {
-                    if let Some(p) = physics(&c.body, cf) {
-                        chosen = Some((c, p, tick_a - t, cf, t));
-                        break;
-                    }
+                if (tick_a - 1..=tick_a).contains(&t)
+                    && let Some(p) = physics(&c.body, cf)
+                {
+                    chosen = Some((c, p, tick_a - t, cf, t));
+                    break;
                 }
             }
             let Some((c, packet, stale, car_frame, car_tick)) = chosen else {
@@ -559,7 +559,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             for label in [
                 "all".to_string(),
                 format!("hitbox {}", slot.hitbox),
-                format!("{air}"),
+                air.to_string(),
                 if hit0 && error0 < 50.0 {
                     "already matched".to_string()
                 } else if hit0 {
@@ -586,11 +586,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if let Some((norm, _, car_error)) = best {
                     group.matched += 1;
                     group.shift.push(norm);
-                    if norm > 0.0 {
-                        if let Some(local) = local_shift {
-                            for (axis, value) in local.iter().enumerate() {
-                                group.local[axis].push(*value);
-                            }
+                    if norm > 0.0
+                        && let Some(local) = local_shift
+                    {
+                        for (axis, value) in local.iter().enumerate() {
+                            group.local[axis].push(*value);
                         }
                     }
                     if let (Some(fitted), Some(base)) = (car_error, car_error0) {

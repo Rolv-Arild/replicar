@@ -2,7 +2,7 @@
 //! the integer the replay shows differs from the ceiling of the reconstructed clock in running
 //! frames (a frame right at a change may differ by one), and counts of the clock states.
 //!
-//! usage: check_scoreboard <dir or replay> [--final-assessment]
+//! usage: `check_scoreboard <dir or replay> [--final-assessment]`
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -34,9 +34,16 @@ fn replay_paths(path: &Path, final_assessment: bool) -> Result<Vec<PathBuf>, Box
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(env::args().nth(1).ok_or("usage: check_scoreboard <dir or replay> [--final-assessment]")?);
+    let path = PathBuf::from(
+        env::args()
+            .nth(1)
+            .ok_or("usage: check_scoreboard <dir or replay> [--final-assessment]")?,
+    );
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replay_to_rocketsim::sealed_path_refused(&path, env::args().any(|arg| arg == "--final-assessment")) {
+    if replay_to_rocketsim::sealed_path_refused(
+        &path,
+        env::args().any(|arg| arg == "--final-assessment"),
+    ) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let (mut running, mut off_by_one, mut off_more, mut missing) = (0usize, 0usize, 0usize, 0usize);
@@ -50,11 +57,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &bytes,
                 &replay_to_rocketsim::conversion::ConvertOptions::default(),
             )?;
-            let sb: Vec<_> = output.frames.iter().map(|f| f.scoreboard.clone().expect("scoreboard")).collect();
+            let sb: Vec<_> = output
+                .frames
+                .iter()
+                .map(|f| f.scoreboard.clone().expect("scoreboard"))
+                .collect();
             (output.observations, sb)
         } else {
             let parsed = replay_to_rocketsim::parse_replay(&bytes)?;
-            let observed = replay_to_rocketsim::observations::extract(&parsed).ok_or("no observations")?;
+            let observed =
+                replay_to_rocketsim::observations::extract(&parsed).ok_or("no observations")?;
             let sb = reconstruct(&observed);
             (observed, sb)
         };
@@ -67,7 +79,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             let (Some(shown), Some(x)) = (
                 frame.seconds_remaining.as_ref().map(|v| v.value),
-                if overtime { sb[f].overtime_seconds } else { sb[f].seconds_remaining },
+                if overtime {
+                    sb[f].overtime_seconds
+                } else {
+                    sb[f].seconds_remaining
+                },
             ) else {
                 missing += 1;
                 continue;
@@ -86,24 +102,68 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let expired = sb.iter().filter(|x| x.clock_state == "expired").count();
         let decided = sb.iter().filter(|x| x.clock_state == "decided").count();
-        let ended_state = observed.frames.last().and_then(|f| f.game_state.as_ref()).map(|g| g.value.clone());
+        let ended_state = observed
+            .frames
+            .last()
+            .and_then(|f| f.game_state.as_ref())
+            .map(|g| g.value.clone());
         if env::var_os("PER_REPLAY").is_some() && (expired > 0 || decided > 0) {
             let min_z = observed
                 .frames
                 .iter()
                 .enumerate()
                 .filter(|(f, _)| sb[*f].clock_state == "expired" || sb[*f].clock_state == "decided")
-                .filter_map(|(f, fr)| fr.ball.as_ref().and_then(|b| b.position.as_ref()).filter(|p| p.frame == f).map(|p| p.value[2]))
+                .filter_map(|(f, fr)| {
+                    fr.ball
+                        .as_ref()
+                        .and_then(|b| b.position.as_ref())
+                        .filter(|p| p.frame == f)
+                        .map(|p| p.value[2])
+                })
                 .fold(f32::INFINITY, f32::min);
-            println!("{} expired {} decided {} min fresh ball z after expiry {:.0} last state {:?}", replay.file_name().unwrap().to_string_lossy().chars().take(8).collect::<String>(), expired, decided, min_z, ended_state);
+            println!(
+                "{} expired {} decided {} min fresh ball z after expiry {:.0} last state {:?}",
+                replay
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .chars()
+                    .take(8)
+                    .collect::<String>(),
+                expired,
+                decided,
+                min_z,
+                ended_state
+            );
         }
         if bad > 0 {
-            worst.push((bad, format!("{} ({} running frames)", replay.file_name().unwrap().to_string_lossy().chars().take(8).collect::<String>(), n)));
+            worst.push((
+                bad,
+                format!(
+                    "{} ({} running frames)",
+                    replay
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .chars()
+                        .take(8)
+                        .collect::<String>(),
+                    n
+                ),
+            ));
         }
     }
-    println!("running frames {running}: shown integer equals ceil of the reconstruction {:.3}%, differs by one {:.3}%, by more {:.3}% ({off_more}); running frames without a value {missing}", 100.0 * (running - off_by_one - off_more) as f64 / running as f64, 100.0 * off_by_one as f64 / running as f64, 100.0 * off_more as f64 / running as f64);
+    println!(
+        "running frames {running}: shown integer equals ceil of the reconstruction {:.3}%, differs by one {:.3}%, by more {:.3}% ({off_more}); running frames without a value {missing}",
+        100.0 * (running - off_by_one - off_more) as f64 / running as f64,
+        100.0 * off_by_one as f64 / running as f64,
+        100.0 * off_more as f64 / running as f64
+    );
     println!("clock states: {states:?}");
-    worst.sort_by(|a, b| b.0.cmp(&a.0));
-    println!("replays with frames off by more than one: {:?}", &worst[..worst.len().min(10)]);
+    worst.sort_by_key(|w| std::cmp::Reverse(w.0));
+    println!(
+        "replays with frames off by more than one: {:?}",
+        &worst[..worst.len().min(10)]
+    );
     Ok(())
 }

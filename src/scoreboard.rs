@@ -62,7 +62,11 @@ pub fn reconstruct(observations: &ObservedReplay) -> Vec<ScoreboardFrame> {
     }
     let mut out: Vec<ScoreboardFrame> = (0..frames.len())
         .map(|f| ScoreboardFrame {
-            period: if overtime[f] { "overtime" } else { "regulation" },
+            period: if overtime[f] {
+                "overtime"
+            } else {
+                "regulation"
+            },
             clock_state: match state_of(f) {
                 Some("Countdown") => "countdown",
                 Some("PostGoalScored") | Some("ReplayPlayback") => "goal_pause",
@@ -214,10 +218,10 @@ pub fn reconstruct(observations: &ObservedReplay) -> Vec<ScoreboardFrame> {
     }
     // A replay that ends while waiting for the ball ends at the final whistle: its last frame is
     // the decision (3 ticks before the server's end phase on the host replay of game 1).
-    if let Some(last) = out.last_mut() {
-        if last.clock_state == "expired" {
-            last.clock_state = "decided";
-        }
+    if let Some(last) = out.last_mut()
+        && last.clock_state == "expired"
+    {
+        last.clock_state = "decided";
     }
     // Frozen frames between runs keep the value the clock stopped at.
     let mut held: Option<f32> = None;
@@ -262,7 +266,7 @@ mod tests {
             players: Vec::new(),
             team_scores: [None, None],
             seconds_remaining: value(clock, index),
-            overtime: overtime.then(|| Value {
+            overtime: overtime.then_some(Value {
                 value: true,
                 frame: index,
                 source: Source::Replay,
@@ -338,7 +342,11 @@ mod tests {
         for i in 0..450 {
             let t = i as f32 / 30.0;
             let played = f64::from((t - 2.0).max(0.0));
-            let (state, shown) = if t < 0.5 { ("Countdown", 0) } else { ("Active", played.ceil() as i32) };
+            let (state, shown) = if t < 0.5 {
+                ("Countdown", 0)
+            } else {
+                ("Active", played.ceil() as i32)
+            };
             frames.push(frame(i, t, state, shown, true));
         }
         let replay = ObservedReplay {

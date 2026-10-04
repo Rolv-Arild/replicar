@@ -69,7 +69,12 @@ impl FreshnessTracker {
         }
     }
 
-    pub fn frame(&mut self, observed: &ObservedReplay, index: usize, converted: &ConvertedFrame) -> FrameFreshness {
+    pub fn frame(
+        &mut self,
+        observed: &ObservedReplay,
+        index: usize,
+        converted: &ConvertedFrame,
+    ) -> FrameFreshness {
         let mut present = vec![false; self.cars.len()];
         for (info, _) in &converted.state.cars {
             if let Some(flag) = present.get_mut(info.idx) {
@@ -101,7 +106,8 @@ impl FreshnessTracker {
         present: &[bool],
     ) -> FrameFreshness {
         let frame = &frames[index];
-        let age = |server: Option<i64>| server.map(|tick| (timeline_tick as i64 - tick).max(0) as u32);
+        let age =
+            |server: Option<i64>| server.map(|tick| (timeline_tick as i64 - tick).max(0) as u32);
         if ball_fresh {
             let lag = packet_lags.iter().find(|lag| lag.actor_id.is_none());
             self.ball = Some(server_tick(timeline_tick, lag));
@@ -131,7 +137,9 @@ impl FreshnessTracker {
             }
             let fresh = fresh_car_slots.contains(&slot);
             if fresh {
-                let lag = packet_lags.iter().find(|lag| lag.actor_id == Some(car.actor_id));
+                let lag = packet_lags
+                    .iter()
+                    .find(|lag| lag.actor_id == Some(car.actor_id));
                 self.cars[slot] = Some((lifetime, server_tick(timeline_tick, lag)));
             }
             car_fresh.push(Some(fresh));
@@ -140,7 +148,9 @@ impl FreshnessTracker {
                     .position
                     .as_ref()
                     .filter(|packet| packet.frame <= index)
-                    .map(|packet| (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32),
+                    .map(|packet| {
+                        (f64::from(frame.time) - f64::from(frames[packet.frame].time)) as f32
+                    }),
             );
             car_packet_age_ticks.push(age(self.cars[slot].and_then(|(_, tick)| tick)));
         }
@@ -208,7 +218,11 @@ mod tests {
     }
 
     fn lag(actor_id: Option<i32>, ticks: u64, source: &'static str) -> AppliedPacketLag {
-        AppliedPacketLag { actor_id, ticks, source }
+        AppliedPacketLag {
+            actor_id,
+            ticks,
+            source,
+        }
     }
 
     // Four ticks per frame, a car slot 0 (actor 10) and a ball. Frames 0 to 5 at timeline ticks 0, 4, ..., 20.
@@ -226,7 +240,11 @@ mod tests {
         for index in 0..6 {
             let ball = [None, Some(1), Some(1), Some(1), Some(4), Some(4)][index];
             let car10 = [None, Some(1), Some(1), Some(3), Some(3), Some(3)][index];
-            frames.push(frame(index, ball, vec![car(10, 0, "a", car10), car(11, 0, "b", None)]));
+            frames.push(frame(
+                index,
+                ball,
+                vec![car(10, 0, "a", car10), car(11, 0, "b", None)],
+            ));
         }
         let mut seen = Vec::new();
         for index in 0..6 {
@@ -239,7 +257,16 @@ mod tests {
             if fresh.contains(&0) {
                 lags.push(lag(Some(10), if index == 1 { 2 } else { 0 }, "chain"));
             }
-            seen.push(tracker.step(&frames, index, ticks(index), ball_fresh, fresh, &lags, &actor_slots, &present));
+            seen.push(tracker.step(
+                &frames,
+                index,
+                ticks(index),
+                ball_fresh,
+                fresh,
+                &lags,
+                &actor_slots,
+                &present,
+            ));
         }
         // Before the first packet everything is null; a body that never updates stays null (not 0).
         assert_eq!(seen[0].ball_packet_age_ticks, None);
@@ -256,12 +283,27 @@ mod tests {
         assert_eq!(seen[4].ball_packet_age_ticks, Some(1));
         assert_eq!(seen[5].ball_packet_age_ticks, Some(5));
         assert_eq!(seen[5].car_packet_age_ticks[0], Some(8));
-        assert_eq!(seen.iter().map(|f| f.car_packet_age_ticks[1]).collect::<Vec<_>>(), vec![None; 6]);
+        assert_eq!(
+            seen.iter()
+                .map(|f| f.car_packet_age_ticks[1])
+                .collect::<Vec<_>>(),
+            vec![None; 6]
+        );
         // Masks: fresh exactly where a packet was applied; every slot with a car has a value.
-        assert_eq!(seen.iter().map(|f| f.ball_fresh).collect::<Vec<_>>(), [false, true, false, false, true, false]);
+        assert_eq!(
+            seen.iter().map(|f| f.ball_fresh).collect::<Vec<_>>(),
+            [false, true, false, false, true, false]
+        );
         assert_eq!(
             seen.iter().map(|f| f.car_fresh[0]).collect::<Vec<_>>(),
-            [Some(false), Some(true), Some(false), Some(true), Some(false), Some(false)]
+            [
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false)
+            ]
         );
         assert!(seen.iter().all(|f| f.car_fresh[1] == Some(false)));
         // The car's frame-time age: packets at frames 1 and 3, so 0 at them and one frame (1/30 s) per frame
@@ -286,21 +328,51 @@ mod tests {
             .collect();
         let mut tracker = FreshnessTracker::new(1);
         let mut at = |index: usize, lags: &[AppliedPacketLag]| {
-            tracker.step(&frames, index, ticks(index), true, &[0], lags, &actor_slots, &present)
+            tracker.step(
+                &frames,
+                index,
+                ticks(index),
+                true,
+                &[0],
+                lags,
+                &actor_slots,
+                &present,
+            )
         };
         // No lag record at all (inference off, or a frame that is not simulated).
         let first = at(0, &[]);
         assert!(first.ball_fresh && first.car_fresh == [Some(true)]);
-        assert_eq!((first.ball_packet_age_ticks, first.car_packet_age_ticks.clone()), (None, vec![None]));
+        assert_eq!(
+            (
+                first.ball_packet_age_ticks,
+                first.car_packet_age_ticks.clone()
+            ),
+            (None, vec![None])
+        );
         // The `default` source is half the frame window, not an inferred lag.
         let second = at(1, &[lag(None, 2, "default"), lag(Some(10), 2, "default")]);
-        assert_eq!((second.ball_packet_age_ticks, second.car_packet_age_ticks.clone()), (None, vec![None]));
+        assert_eq!(
+            (
+                second.ball_packet_age_ticks,
+                second.car_packet_age_ticks.clone()
+            ),
+            (None, vec![None])
+        );
         // A fitted or chained lag is one; a lag of 0 is a value.
         let third = at(2, &[lag(None, 0, "chain"), lag(Some(10), 3, "dodge_fit")]);
-        assert_eq!((third.ball_packet_age_ticks, third.car_packet_age_ticks.clone()), (Some(0), vec![Some(3)]));
+        assert_eq!(
+            (
+                third.ball_packet_age_ticks,
+                third.car_packet_age_ticks.clone()
+            ),
+            (Some(0), vec![Some(3)])
+        );
         // A later fresh packet without a lag does not keep the previous packet's age.
         let fourth = at(3, &[]);
-        assert_eq!((fourth.ball_packet_age_ticks, fourth.car_packet_age_ticks), (None, vec![None]));
+        assert_eq!(
+            (fourth.ball_packet_age_ticks, fourth.car_packet_age_ticks),
+            (None, vec![None])
+        );
     }
 
     #[test]
@@ -314,7 +386,16 @@ mod tests {
             frame(2, None, vec![car(20, 1, "a", Some(2))]),
         ];
         let present = [true, false]; // slot 1 has no car in the state
-        let first = tracker.step(&frames, 0, 0, false, &[0], &[lag(Some(10), 1, "chain")], &actor_slots, &present);
+        let first = tracker.step(
+            &frames,
+            0,
+            0,
+            false,
+            &[0],
+            &[lag(Some(10), 1, "chain")],
+            &actor_slots,
+            &present,
+        );
         assert_eq!(first.car_packet_age_ticks, [Some(1), None]);
         // Absent slot: car_fresh and the age are null, not false or 0.
         assert_eq!(first.car_fresh, [Some(true), None]);
@@ -322,20 +403,47 @@ mod tests {
         let second = tracker.step(&frames, 1, 4, false, &[], &[], &actor_slots, &present);
         assert_eq!(second.car_packet_age_ticks, [None, None]);
         assert_eq!(second.car_fresh, [Some(false), None]);
-        let third = tracker.step(&frames, 2, 8, false, &[0], &[lag(Some(20), 2, "frame_median")], &actor_slots, &present);
+        let third = tracker.step(
+            &frames,
+            2,
+            8,
+            false,
+            &[0],
+            &[lag(Some(20), 2, "frame_median")],
+            &actor_slots,
+            &present,
+        );
         assert_eq!(third.car_packet_age_ticks, [Some(2), None]);
     }
 
     #[test]
     fn a_slot_whose_primary_car_is_unresolved_is_unknown_not_stale() {
         // Slot 0 is in the state but the frame has no car that maps to it (between actor lifetimes).
-        let frames = vec![frame(0, None, vec![car(10, 0, "a", Some(0))]), frame(1, None, Vec::new())];
+        let frames = vec![
+            frame(0, None, vec![car(10, 0, "a", Some(0))]),
+            frame(1, None, Vec::new()),
+        ];
         let mut tracker = FreshnessTracker::new(1);
         let present = [true];
-        let first = tracker.step(&frames, 0, 0, false, &[0], &[lag(Some(10), 1, "chain")], &[(10, 0)], &present);
+        let first = tracker.step(
+            &frames,
+            0,
+            0,
+            false,
+            &[0],
+            &[lag(Some(10), 1, "chain")],
+            &[(10, 0)],
+            &present,
+        );
         assert_eq!(first.car_fresh, [Some(true)]);
         let second = tracker.step(&frames, 1, 4, false, &[], &[], &[], &present);
         assert_eq!(second.car_fresh, [None]);
-        assert_eq!((second.car_update_age_seconds.clone(), second.car_packet_age_ticks), (vec![None], vec![None]));
+        assert_eq!(
+            (
+                second.car_update_age_seconds.clone(),
+                second.car_packet_age_ticks
+            ),
+            (vec![None], vec![None])
+        );
     }
 }

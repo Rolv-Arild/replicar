@@ -7,7 +7,7 @@
 //! Also the players' names by key on the first line, and (unless `--no-lags`) the converter's inferred
 //! packet lags of each frame (`lags`: actor id or null for the ball, ticks, source).
 //!
-//! usage: dump_replay_packets <replay> <out.jsonl> [--no-lags]
+//! usage: `dump_replay_packets <replay> <out.jsonl> [--no-lags]`
 
 use std::env;
 use std::error::Error;

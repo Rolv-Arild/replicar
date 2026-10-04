@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use rocketsim::{Arena, ArenaConfig, BallState, CarControls, GameMode, Team};
 
 use crate::conversion::{
-    ConvertError, ConvertOptions, PacketLags, convert_observations_with, hitbox_config, infer_packet_lags,
-    quaternion, rebase_car_ticks, step_arena_tick,
+    ConvertError, ConvertOptions, PacketLags, convert_observations_with, hitbox_config,
+    infer_packet_lags, quaternion, rebase_car_ticks, step_arena_tick,
 };
 use crate::observations::{Body, ObservedReplay};
 
@@ -34,7 +34,10 @@ const MAX_LEAD_TICKS: i64 = 4;
 fn max_lead_ticks() -> i64 {
     static LEAD: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *LEAD.get_or_init(|| {
-        std::env::var("ALIGN_MAX_LEAD").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_LEAD_TICKS)
+        std::env::var("ALIGN_MAX_LEAD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MAX_LEAD_TICKS)
     })
 }
 /// Shifts within this (UU/s) of the best are equivalent; the smallest one wins.
@@ -53,8 +56,16 @@ pub struct AlignmentSummary {
 
 fn phys(body: &Body, frame: usize) -> Option<([f32; 3], [f32; 3], glam::Mat3A, [f32; 3])> {
     let pos = body.position.as_ref().filter(|v| v.frame == frame)?.value;
-    let vel = body.linear_velocity.as_ref().filter(|v| v.frame == frame)?.value;
-    let rot = body.rotation_xyzw.as_ref().filter(|v| v.frame == frame)?.value;
+    let vel = body
+        .linear_velocity
+        .as_ref()
+        .filter(|v| v.frame == frame)?
+        .value;
+    let rot = body
+        .rotation_xyzw
+        .as_ref()
+        .filter(|v| v.frame == frame)?
+        .value;
     let ang = body
         .angular_velocity_replay_units
         .as_ref()
@@ -99,7 +110,9 @@ pub fn aligned_lags(
     let mut votes: std::collections::BTreeMap<usize, Vec<i64>> = std::collections::BTreeMap::new();
     for converted in &frames {
         for contact in &converted.ball_contacts {
-            let Some(slot) = contact.car_slot else { continue };
+            let Some(slot) = contact.car_slot else {
+                continue;
+            };
             let fb = converted.replay_frame;
             let fa = contact.frame_a;
             summary.contacts += 1;
@@ -119,14 +132,18 @@ pub fn aligned_lags(
             let mut packet: Option<(usize, i64)> = None;
             for g in (fa.saturating_sub(3)..=fb).rev() {
                 let Some(car) = frame_data[g].cars.iter().find(|c| {
-                    c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame
+                    c.actor_id == car_actor.actor_id
+                        && c.actor_created_frame == car_actor.actor_created_frame
                 }) else {
                     continue;
                 };
                 if phys(&car.body, g).is_none() {
                     continue;
                 }
-                let Some(&lag) = lags.car_actor.get(&(car.actor_id, car.actor_created_frame, g)) else {
+                let Some(&lag) = lags
+                    .car_actor
+                    .get(&(car.actor_id, car.actor_created_frame, g))
+                else {
                     continue;
                 };
                 let tick = timeline(g) - lag.round() as i64;
@@ -135,14 +152,19 @@ pub fn aligned_lags(
                     break;
                 }
             }
-            let Some((g, car_tick)) = packet else { continue };
+            let Some((g, car_tick)) = packet else {
+                continue;
+            };
             if hit_tick - car_tick > max_lead_ticks() {
                 continue;
             }
             let car_packet = frame_data[g]
                 .cars
                 .iter()
-                .find(|c| c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame)
+                .find(|c| {
+                    c.actor_id == car_actor.actor_id
+                        && c.actor_created_frame == car_actor.actor_created_frame
+                })
                 .and_then(|c| phys(&c.body, g))
                 .expect("checked above");
             let (Some(ball_a), Some(ball_b), Some(exported)) = (
@@ -177,13 +199,20 @@ pub fn aligned_lags(
             let observed = frame_data[g]
                 .cars
                 .iter()
-                .find(|c| c.actor_id == car_actor.actor_id && c.actor_created_frame == car_actor.actor_created_frame)
+                .find(|c| {
+                    c.actor_id == car_actor.actor_id
+                        && c.actor_created_frame == car_actor.actor_created_frame
+                })
                 .expect("checked above");
             let controls = CarControls {
                 throttle: observed.inputs.throttle.as_ref().map_or(0.0, |v| v.value),
                 steer: observed.inputs.steer.as_ref().map_or(0.0, |v| v.value),
                 handbrake: observed.inputs.handbrake.as_ref().is_some_and(|v| v.value),
-                boost: observed.inputs.boost_active_raw.as_ref().is_some_and(|v| v.value % 2 == 1),
+                boost: observed
+                    .inputs
+                    .boost_active_raw
+                    .as_ref()
+                    .is_some_and(|v| v.value % 2 == 1),
                 ..CarControls::default()
             };
             let ball_state = |p: &([f32; 3], [f32; 3], glam::Mat3A, [f32; 3])| {
@@ -237,12 +266,19 @@ pub fn aligned_lags(
                         - hitbox_config(&slot_info.hitbox).hitbox_pos_offset;
                     let q = local.abs() - hitbox_config(&slot_info.hitbox).hitbox_size * 0.5;
                     let gap = q.max(glam::Vec3A::ZERO).length() + q.max_element().min(0.0) - 91.25;
-                    eprintln!("START gap at the car packet {gap:.1} UU; car speed {:.0}, ball {:.0}; ticks from start to b {}", arena.get_car_state(0).phys.vel.length(), arena.get_ball_state().phys.vel.length(), tick_b - t1);
+                    eprintln!(
+                        "START gap at the car packet {gap:.1} UU; car speed {:.0}, ball {:.0}; ticks from start to b {}",
+                        arena.get_car_state(0).phys.vel.length(),
+                        arena.get_ball_state().phys.vel.length(),
+                        tick_b - t1
+                    );
                 }
                 let mut hit = false;
                 for _ in t1..tick_b {
                     let events = step_arena_tick(&mut arena);
-                    hit |= events.iter().any(|e| matches!(e, rocketsim::ArenaEvent::CarHitBall(_)));
+                    hit |= events
+                        .iter()
+                        .any(|e| matches!(e, rocketsim::ArenaEvent::CarHitBall(_)));
                 }
                 if shift == 0 && std::env::var_os("ALIGN_DEBUG").is_some() {
                     eprintln!("   sim hit {hit}");
@@ -251,7 +287,9 @@ pub fn aligned_lags(
                 residuals.push((shift, (v - glam::Vec3A::from(ball_b.1)).length()));
             }
             let lead = hit_tick - car_tick;
-            let Some(&(_, r0)) = residuals.iter().find(|(s, _)| *s == 0) else { continue };
+            let Some(&(_, r0)) = residuals.iter().find(|(s, _)| *s == 0) else {
+                continue;
+            };
             let best = residuals.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
             summary.fitted += 1;
             if std::env::var_os("ALIGN_DEBUG").is_some() {
@@ -259,7 +297,10 @@ pub fn aligned_lags(
                     "CONTACT car_key={} lead={} residuals={:?}",
                     slot_info.player_key,
                     lead,
-                    residuals.iter().map(|r| (r.0, r.1.round())).collect::<Vec<_>>()
+                    residuals
+                        .iter()
+                        .map(|r| (r.0, r.1.round()))
+                        .collect::<Vec<_>>()
                 );
             }
             // Only a shift that reproduces the ball's velocity is believed; a fit that needs none
@@ -289,8 +330,14 @@ pub fn aligned_lags(
                 let lag_ball = lags.ball[fa];
                 eprintln!(
                     "CHOSEN shift={chosen} car_key={} car_frame={g} car_tick={car_tick} car_pos={:.2},{:.2},{:.2} ball_frame={fa} ball_tick={tick_a} ball_pos={:.2},{:.2},{:.2} ball_lag={:?}",
-                    slot_info.player_key, car_packet.0[0], car_packet.0[1], car_packet.0[2],
-                    ball_a.0[0], ball_a.0[1], ball_a.0[2], lag_ball
+                    slot_info.player_key,
+                    car_packet.0[0],
+                    car_packet.0[1],
+                    car_packet.0[2],
+                    ball_a.0[0],
+                    ball_a.0[1],
+                    ball_a.0[2],
+                    lag_ball
                 );
             }
             if let Some(run) = run {

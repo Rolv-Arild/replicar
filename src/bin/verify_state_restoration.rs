@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             if serde_json::to_value(&record)? != serde_json::to_value(&round_trip)? {
                 return Err(format!("snapshot fields differ at frame {frames}").into());
             }
-            if frames % 5000 == 0 {
+            if frames.is_multiple_of(5000) {
                 // A live arena at tick 0 and one that has run 1,000 ticks: the absolute ticks of the state
                 // (`last_extra_hit_tick`) are rebased to the same age before the live arena's own tick.
                 for live_ticks in [0u64, 1000] {
@@ -73,7 +73,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         actual.cooldown = source.cooldown;
                     }
                     for (source, actual) in record.cars.iter().zip(&mut applied.cars) {
-                        let expected = rebase_tick(source.last_extra_hit_tick, record.arena_tick, live_ticks);
+                        let expected =
+                            rebase_tick(source.last_extra_hit_tick, record.arena_tick, live_ticks);
                         if actual.last_extra_hit_tick != expected {
                             return Err(format!(
                                 "live arena (tick {live_ticks}) last_extra_hit_tick {:?}, expected {expected:?} for {:?} at source tick {}, frame {frames}",
