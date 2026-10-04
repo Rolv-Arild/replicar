@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(
         env::args_os()
             .nth(1)
-            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--no-infer-flip-cancel] [--final-assessment]")?,
+            .ok_or("usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--final-assessment]")?,
     );
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
     if replay_to_rocketsim::sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
@@ -77,47 +77,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut options = ConvertOptions::default();
     let no_lag = env::args_os().any(|arg| arg == "--no-infer-packet-lag");
     options.infer_packet_lag = !no_lag;
-    options.infer_dodge_start = !env::args_os().any(|arg| arg == "--no-infer-dodge-start");
-    options.infer_dodge_first_packet_tick =
-        !env::args_os().any(|arg| arg == "--no-infer-dodge-first-packet");
-    options.infer_double_jump = !env::args_os().any(|arg| arg == "--no-infer-double-jump");
-    // The residuals at packets measure prediction; the boundary-value solve fits them, so it is off here.
-    options.air_bvp = env::args_os().any(|arg| arg == "--air-bvp");
-    options.fit_on_next_packet = env::args_os().any(|arg| arg == "--fit-on-next-packet");
-    options.block_sim_pad_pickups = !env::args_os().any(|arg| arg == "--sim-pad-pickups");
-    options.defer_dodge_past_next_packet =
-        !env::args_os().any(|arg| arg == "--no-defer-dodge");
-    options.lookahead_ground_controls =
-        !env::args_os().any(|arg| arg == "--no-lookahead-ground-controls");
-    options.fit_ground_control_timing =
-        !env::args_os().any(|arg| arg == "--no-fit-ground-control-timing");
-    options.fit_jump_timing = !env::args_os().any(|arg| arg == "--no-fit-jump-timing");
-    options.flip_cancel_holdout = env::args_os().any(|arg| arg == "--flip-cancel-holdout");
-    if let Some(name) = env::args()
-        .skip_while(|a| a != "--flip-cancel-source")
-        .nth(1)
-    {
-        if let Some(source) = replay_to_rocketsim::conversion::FlipCancelSource::from_name(&name) {
-            options.flip_cancel_source = source;
-        }
-    }
-    if let Some(n) = env::args()
-        .skip_while(|a| a != "--flip-cancel-packets")
-        .nth(1)
-    {
-        options.flip_cancel_packets = n.parse().unwrap_or(1);
-    }
-    options.apply_hit_extra_impulse = env::args_os().any(|arg| arg == "--apply-hit-impulse");
-    options.exact_tick_lag_chains = !env::args_os().any(|arg| arg == "--no-exact-tick-lag-chains");
-    options.infer_flip_cancel = !env::args_os().any(|arg| arg == "--no-infer-flip-cancel");
-    options.ball_hit_chains = !env::args_os().any(|arg| arg == "--no-ball-hit-chains");
-    options.align_contacts = !env::args_os().any(|arg| arg == "--no-align-contacts");
-    options.apply_observed_demolitions =
-        !env::args_os().any(|arg| arg == "--no-observed-demolitions");
-    options.per_car_control_shift = !env::args_os().any(|arg| arg == "--no-per-car-control-shift");
-    // As ConvertOptions::default() (on), like evaluate_corpus.
-    options.estimate_ball_car_lag_offset =
-        !env::args_os().any(|arg| arg == "--no-estimate-ball-car-offset");
+    // The residuals at packets measure prediction; the boundary-value solve and the next-packet fits use
+    // those packets, so they are off here.
+    options.air_bvp = false;
+    options.fit_on_next_packet = false;
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     // Parity of each car's dodge counter at its previous residual, to spot the first packet after
     // an activation.

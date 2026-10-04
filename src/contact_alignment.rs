@@ -17,7 +17,7 @@ use rocketsim::{Arena, ArenaConfig, BallState, CarControls, GameMode, Team};
 
 use crate::conversion::{
     ConvertError, ConvertOptions, PacketLags, convert_observations_with, hitbox_config, infer_packet_lags,
-    quaternion, rebase_car_ticks, step_tick_with_hit_impulse,
+    quaternion, rebase_car_ticks, step_arena_tick,
 };
 use crate::observations::{Body, ObservedReplay};
 
@@ -83,10 +83,7 @@ pub fn aligned_lags(
     first.align_contacts = false;
     first.external_packet_lags = Some(std::sync::Arc::new(lags.clone()));
     first.air_bvp = false;
-    first.infer_dodge_start = false;
-    first.infer_flip_cancel = false;
-    first.fit_ground_control_timing = false;
-    first.fit_jump_timing = false;
+    first.input_fits = false;
     let mut frames = Vec::new();
     let summary_pass = convert_observations_with(observations, &first, |converted, _, _| {
         frames.push(converted.clone());
@@ -217,20 +214,17 @@ pub fn aligned_lags(
                 let t1 = tick_a.max(tick_c);
                 if tick_a <= tick_c {
                     ball_arena.set_ball_state(ball_state(&ball_a));
-                    crate::conversion::reset_scratch_arena_contacts(&mut ball_arena, None, options);
                     for _ in tick_a..tick_c {
                         ball_arena.step_tick();
                     }
                     arena.set_ball_state(*ball_arena.get_ball_state());
                     arena.set_car_state(0, car_state);
                     arena.refresh_car_sticky_gate(0);
-                    crate::conversion::reset_scratch_arena_contacts(&mut arena, Some(0), options);
                     arena.set_car_controls(0, controls);
                 } else {
                     arena.set_ball_state(parked);
                     arena.set_car_state(0, car_state);
                     arena.refresh_car_sticky_gate(0);
-                    crate::conversion::reset_scratch_arena_contacts(&mut arena, Some(0), options);
                     arena.set_car_controls(0, controls);
                     for _ in tick_c..tick_a {
                         arena.step_tick();
@@ -247,7 +241,7 @@ pub fn aligned_lags(
                 }
                 let mut hit = false;
                 for _ in t1..tick_b {
-                    let events = step_tick_with_hit_impulse(&mut arena, options.apply_hit_extra_impulse);
+                    let events = step_arena_tick(&mut arena);
                     hit |= events.iter().any(|e| matches!(e, rocketsim::ArenaEvent::CarHitBall(_)));
                 }
                 if shift == 0 && std::env::var_os("ALIGN_DEBUG").is_some() {

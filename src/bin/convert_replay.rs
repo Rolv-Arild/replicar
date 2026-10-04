@@ -47,41 +47,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
     let mut final_assessment = false;
     while let Some(arg) = args.next() {
-        if arg == "--no-inferred-boost" {
-            options.infer_boost_from_active = false;
-        } else if arg == "--inferred-jump" {
-            options.infer_jump_from_active = true;
-            options.gate_jump_on_observed_impulse = false;
-        } else if arg == "--gated-jump" {
-            options.infer_jump_from_active = true;
-            options.gate_jump_on_observed_impulse = true;
-        } else if arg == "--no-inferred-jump" {
-            options.infer_jump_from_active = false;
-            options.gate_jump_on_observed_impulse = false;
-        } else if arg == "--no-align-contacts" {
-            options.align_contacts = false;
-        } else if arg == "--lag-boundary" {
-            let name = args.next().ok_or("--lag-boundary requires a name")?;
-            options.lag_boundary =
-                replay_to_rocketsim::conversion::LagBoundary::from_name(&name.to_string_lossy())
-                    .ok_or("--lag-boundary: later or earlier")?;
-        } else if arg == "--final-assessment" {
+        if arg == "--final-assessment" {
             final_assessment = true;
         } else if arg == "--no-event-tables" {
             event_tables = false;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
-        } else if arg == "--reset-scratch-contacts" {
-            options.reset_scratch_contacts = true;
-        } else if arg == "--gated-low-air-angular" {
-            options.hold_low_air_angular = true;
-            options.gate_low_air_angular_by_speed = true;
         } else if arg.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option {}", arg.to_string_lossy()).into());
         } else if mesh_path.is_none() {
             mesh_path = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--octane-hitbox] [--reset-scratch-contacts] [--gated-low-air-angular] [--lag-boundary later|earlier] [--no-event-tables] [--final-assessment]".into());
+            return Err("usage: convert_replay <input.replay> <output.jsonl|output.parquet> [collision_meshes] [--octane-hitbox] [--no-event-tables] [--final-assessment]".into());
         }
     }
     if let Some(path) = mesh_path {

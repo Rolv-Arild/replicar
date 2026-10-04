@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_tick_with_hit_impulse};
+use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_arena_tick};
 use replay_to_rocketsim::observations::Body;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
@@ -113,8 +113,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|v| v.to_string_lossy().parse().ok())
         .unwrap_or(1.0);
     println!("ball_hit_extra_force_scale = {extra_scale}");
-    let apply_hit = !env::args_os().any(|arg| arg == "--no-apply-hit-impulse");
-    println!("apply reported extra hit impulse: {apply_hit}");
     rocketsim::init(Path::new("collision_meshes"), true)?;
     let mut arenas: BTreeMap<String, Arena> = BTreeMap::new();
     let mut ball_only = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
@@ -253,12 +251,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
             );
             for _ in 0..stale {
-                step_tick_with_hit_impulse(arena, apply_hit);
+                step_arena_tick(arena);
             }
             arena.set_ball_state(ball_state);
             let mut hit = false;
             for _ in 0..k {
-                for event in step_tick_with_hit_impulse(arena, apply_hit) {
+                for event in step_arena_tick(arena) {
                     hit |= matches!(event, ArenaEvent::CarHitBall(_));
                 }
             }
@@ -274,7 +272,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let extra = tick_c - tick_b;
                         if (1..=10).contains(&extra) {
                             for _ in 0..extra {
-                                step_tick_with_hit_impulse(arena, apply_hit);
+                                step_arena_tick(arena);
                             }
                             // ball-only reference from A to C
                             ball_only.set_ball_state(ball_state);

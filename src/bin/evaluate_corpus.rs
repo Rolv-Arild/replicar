@@ -512,11 +512,6 @@ struct ReplayReport {
 struct MaskedRunOptions {
     /// Packet lags are inferred only by the aligned lag-inferring predictor.
     infer_packet_lag: bool,
-    /// As in `options` (on by default): the ball-car lag offset is a replay-wide estimate from the hits of
-    /// the whole replay, so the aligned lag-inferring predictor reads packets after a withheld window. Accepted:
-    /// the evaluation measures the reconstruction, not a causal predictor (the default predictor infers no
-    /// lags and is unaffected).
-    estimate_ball_car_lag_offset: bool,
     block_sim_pad_pickups: bool,
     air_bvp: bool,
     fit_on_next_packet: bool,
@@ -1306,171 +1301,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     while let Some(arg) = args.next() {
         if arg == "--final-assessment" {
             final_assessment = true;
-        } else if arg == "--no-inferred-boost" {
-            options.infer_boost_from_active = false;
-        } else if arg == "--inferred-jump" {
-            options.infer_jump_from_active = true;
-            options.gate_jump_on_observed_impulse = false;
-        } else if arg == "--gated-jump" {
-            options.infer_jump_from_active = true;
-            options.gate_jump_on_observed_impulse = true;
-        } else if arg == "--no-inferred-jump" {
-            options.infer_jump_from_active = false;
-            options.gate_jump_on_observed_impulse = false;
-        } else if arg == "--inferred-dodge" {
-            options.infer_dodge_from_active = true;
-            options.gate_dodge_on_observed_impulse = false;
-        } else if arg == "--gated-dodge" {
-            options.infer_dodge_from_active = true;
-            options.gate_dodge_on_observed_impulse = true;
-        } else if arg == "--no-inferred-dodge" {
-            options.infer_dodge_from_active = false;
-            options.gate_dodge_on_observed_impulse = false;
-        } else if arg == "--no-sync-pads" {
-            options.sync_boost_pad_pickups = false;
-        } else if arg == "--sync-pads" {
-            options.sync_boost_pad_pickups = true;
-        } else if arg == "--no-infer-air-steer" {
-            options.infer_air_steer_controls = false;
-        } else if arg == "--infer-air-steer" {
-            options.infer_air_steer_controls = true;
-        } else if arg == "--no-infer-air-lookahead" {
-            options.infer_air_controls_from_lookahead = false;
-        } else if arg == "--infer-air-lookahead" {
-            options.infer_air_controls_from_lookahead = true;
-        } else if arg == "--infer-transition-air-lookahead" {
-            options.infer_transition_air_lookahead = true;
-        } else if arg == "--no-infer-transition-air-lookahead" {
-            options.infer_transition_air_lookahead = false;
-        } else if arg == "--compensate-transition-air-damping" {
-            options.compensate_transition_air_damping = true;
-        } else if arg == "--hold-low-air-angular" {
-            options.hold_low_air_angular = true;
-        } else if arg == "--gated-low-air-angular" {
-            options.hold_low_air_angular = true;
-            options.gate_low_air_angular_by_speed = true;
-        } else if arg == "--feedback-low-air-angular" {
-            options.feedback_low_air_angular = true;
-        } else if arg == "--air-lookahead-frames" {
-            options.air_lookahead_max_frames = args
-                .next()
-                .ok_or("--air-lookahead-frames requires a frame count")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--air-lookahead-refine" {
-            options.air_lookahead_refine_iterations = args
-                .next()
-                .ok_or("--air-lookahead-refine requires an iteration count")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--persist-past-air-controls" {
-            options.persist_past_air_controls = true;
-        } else if arg == "--air-persist-seconds" {
-            options.air_persist_max_seconds = args
-                .next()
-                .ok_or("--air-persist-seconds requires a duration")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--air-persist-min-control" {
-            options.air_persist_min_control = args
-                .next()
-                .ok_or("--air-persist-min-control requires a magnitude")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--air-persist-max-speed-drop" {
-            options.air_persist_max_speed_drop = args
-                .next()
-                .ok_or("--air-persist-max-speed-drop requires a speed")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--air-persist-gain" {
-            options.air_persist_gain = args
-                .next()
-                .ok_or("--air-persist-gain requires a scale")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--infer-packet-lag" {
-            options.infer_packet_lag = true;
-        } else if arg == "--no-limit-reported-velocities" {
-            options.limit_reported_velocities = false;
-        } else if arg == "--infer-flip-cancel" {
-            options.infer_flip_cancel = true;
-        } else if arg == "--no-infer-flip-cancel" {
-            options.infer_flip_cancel = false;
-        } else if arg == "--exact-tick-lag-chains" {
-            options.exact_tick_lag_chains = true;
-        } else if arg == "--no-exact-tick-lag-chains" {
-            options.exact_tick_lag_chains = false;
-        } else if arg == "--lag-boundary" {
-            let name = args
-                .next()
-                .ok_or("--lag-boundary requires a name")?
-                .to_string_lossy()
-                .into_owned();
-            options.lag_boundary = replay_to_rocketsim::conversion::LagBoundary::from_name(&name)
-                .ok_or("--lag-boundary: later or earlier")?;
-        } else if arg == "--align-contacts" {
-            options.align_contacts = true;
-        } else if arg == "--no-align-contacts" {
-            options.align_contacts = false;
-        } else if arg == "--ball-hit-chains" {
-            options.ball_hit_chains = true;
-        } else if arg == "--no-ball-hit-chains" {
-            options.ball_hit_chains = false;
-        } else if arg == "--estimate-ball-car-offset" {
-            options.estimate_ball_car_lag_offset = true;
-        } else if arg == "--no-estimate-ball-car-offset" {
-            options.estimate_ball_car_lag_offset = false;
-        } else if arg == "--apply-hit-impulse" {
-            options.apply_hit_extra_impulse = true;
-        } else if arg == "--no-apply-hit-impulse" {
-            options.apply_hit_extra_impulse = false;
-        } else if arg == "--no-infer-dodge-first-packet" {
-            options.infer_dodge_first_packet_tick = false;
-        } else if arg == "--no-infer-double-jump" {
-            options.infer_double_jump = false;
-        } else if arg == "--air-bvp" {
-            options.air_bvp = true;
-        } else if arg == "--fit-on-next-packet" {
-            options.fit_on_next_packet = true;
-        } else if arg == "--sim-pad-pickups" {
-            options.block_sim_pad_pickups = false;
-        } else if arg == "--no-defer-dodge" {
-            options.defer_dodge_past_next_packet = false;
-        } else if arg == "--infer-dodge-start" {
-            options.infer_dodge_start = true;
-        } else if arg == "--no-infer-dodge-start" {
-            options.infer_dodge_start = false;
-        } else if arg == "--lookahead-ground-controls" {
-            options.lookahead_ground_controls = true;
-        } else if arg == "--no-lookahead-ground-controls" {
-            options.lookahead_ground_controls = false;
-        } else if arg == "--fit-ground-control-timing" {
-            options.fit_ground_control_timing = true;
-        } else if arg == "--no-fit-ground-control-timing" {
-            options.fit_ground_control_timing = false;
-        } else if arg == "--flip-cancel-holdout" {
-            options.flip_cancel_holdout = true;
-        } else if arg == "--flip-cancel-source" {
-            let name = args
-                .next()
-                .ok_or("--flip-cancel-source requires a name")?
-                .to_string_lossy()
-                .into_owned();
-            options.flip_cancel_source =
-                replay_to_rocketsim::conversion::FlipCancelSource::from_name(&name).ok_or(
-                    "--flip-cancel-source: next-fit, previous-fit, external-previous or external-next",
-                )?;
-        } else if arg == "--flip-cancel-packets" {
-            options.flip_cancel_packets = args
-                .next()
-                .ok_or("--flip-cancel-packets requires a count")?
-                .to_string_lossy()
-                .parse()?;
-        } else if arg == "--fit-jump-timing" {
-            options.fit_jump_timing = true;
-        } else if arg == "--no-fit-jump-timing" {
-            options.fit_jump_timing = false;
         } else if arg == "--offline-fits" {
             offline_fits = true;
         } else if arg == "--aligned-targets-raw-predictor" {
@@ -1480,24 +1310,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             aligned_targets = true;
         } else if arg == "--no-infer-packet-lag" {
             options.infer_packet_lag = false;
-        } else if arg == "--infer-air-roll-from-handbrake" {
-            options.infer_air_roll_from_handbrake = true;
-        } else if arg == "--no-infer-air-roll-from-handbrake" {
-            options.infer_air_roll_from_handbrake = false;
-        } else if arg == "--legacy-persist-gates" {
-            options.air_persist_calibrated = false;
-        } else if arg == "--no-persist-past-air-controls" {
-            options.persist_past_air_controls = false;
-        } else if arg == "--air-lookahead-seconds" {
-            options.air_lookahead_max_seconds = args
-                .next()
-                .ok_or("--air-lookahead-seconds requires a duration")?
-                .to_string_lossy()
-                .parse()?;
         } else if arg == "--octane-hitbox" {
             options.use_loadout_hitboxes = false;
-        } else if arg == "--reset-scratch-contacts" {
-            options.reset_scratch_contacts = true;
         } else if arg == "--mask-seed" {
             mask_seed = Some(
                 args.next()
@@ -1513,7 +1327,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--no-inferred-boost] [--no-inferred-jump] [--inferred-jump] [--gated-jump] [--no-inferred-dodge] [--inferred-dodge] [--gated-dodge] [--no-sync-pads] [--sync-pads] [--no-infer-air-steer] [--infer-air-steer] [--no-infer-air-lookahead] [--infer-air-lookahead] [--infer-transition-air-lookahead] [--no-infer-transition-air-lookahead] [--compensate-transition-air-damping] [--hold-low-air-angular] [--gated-low-air-angular] [--feedback-low-air-angular] [--air-lookahead-frames n] [--air-lookahead-seconds s] [--air-lookahead-refine n] [--aligned-targets] [--aligned-targets-raw-predictor] [--infer-dodge-start] [--no-infer-dodge-start] [--no-defer-dodge] [--sim-pad-pickups] [--no-infer-double-jump] [--no-infer-dodge-first-packet] [--lookahead-ground-controls] [--no-lookahead-ground-controls] [--fit-ground-control-timing] [--no-fit-ground-control-timing] [--fit-jump-timing] [--no-fit-jump-timing] [--flip-cancel-holdout] [--flip-cancel-packets n] [--flip-cancel-source name] [--apply-hit-impulse] [--no-apply-hit-impulse] [--exact-tick-lag-chains] [--no-exact-tick-lag-chains] [--lag-boundary later|earlier] [--align-contacts] [--no-align-contacts] [--ball-hit-chains] [--no-ball-hit-chains] [--estimate-ball-car-offset] [--no-estimate-ball-car-offset] [--infer-flip-cancel] [--no-infer-flip-cancel] [--no-limit-reported-velocities] [--infer-packet-lag] [--no-infer-packet-lag] [--infer-air-roll-from-handbrake] [--no-infer-air-roll-from-handbrake] [--persist-past-air-controls] [--no-persist-past-air-controls] [--legacy-persist-gates] [--air-persist-seconds s] [--air-persist-gain g] [--air-persist-min-control m] [--air-persist-max-speed-drop s] [--octane-hitbox] [--reset-scratch-contacts] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--aligned-targets] [--aligned-targets-raw-predictor] [--offline-fits] [--no-infer-packet-lag] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
         }
     }
     if replay_to_rocketsim::sealed_path_refused(&root, final_assessment) {
@@ -1555,7 +1369,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             let applied = masked_conversion_options(&options, aligned_targets && aligned_predictor, Vec::new());
             MaskedRunOptions {
                 infer_packet_lag: applied.infer_packet_lag,
-                estimate_ball_car_lag_offset: applied.estimate_ball_car_lag_offset,
                 block_sim_pad_pickups: applied.block_sim_pad_pickups,
                 air_bvp: applied.air_bvp,
                 fit_on_next_packet: applied.fit_on_next_packet,

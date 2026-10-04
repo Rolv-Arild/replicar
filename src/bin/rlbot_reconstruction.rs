@@ -215,41 +215,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter_map(|p| p.name.clone().map(|n| (p.key.clone(), n)))
         .collect();
 
-    type Tweak = fn(&mut ConvertOptions);
-    let variants: [(&str, Tweak); 4] = [
-        ("all fits", |_| {}),
-        ("no dodge first-packet inference", |o| {
-            o.infer_dodge_first_packet_tick = false;
-            o.defer_dodge_past_next_packet = false;
-        }),
-        ("no timing fits (ground, jump, dodge, cancel)", |o| {
-            o.fit_ground_control_timing = false;
-            o.fit_jump_timing = false;
-            o.infer_dodge_start = false;
-            o.infer_flip_cancel = false;
-        }),
-        ("no fits, no lookahead controls", |o| {
-            o.fit_ground_control_timing = false;
-            o.fit_jump_timing = false;
-            o.infer_dodge_start = false;
-            o.infer_flip_cancel = false;
-            o.lookahead_ground_controls = false;
-        }),
-    ];
     let score = |label: &str, options: ConvertOptions| -> Result<(), Box<dyn Error>> {
-        let mut options = options;
-        options.block_sim_pad_pickups |= env::var_os("BLOCK_PADS").is_some();
-        options.reset_scratch_contacts |= env::var_os("RESET_SCRATCH_CONTACTS").is_some();
-        options.boost_pickup_lookahead |= env::var_os("BOOST_LOOKAHEAD").is_some();
-        if env::var_os("NO_FIT_NEXT").is_some() {
-            options.fit_on_next_packet = false;
-        }
-        if env::var_os("NO_AIR_BVP").is_some() {
-            options.air_bvp = false;
-        }
-        if env::var_os("NO_FLAGS").is_some() {
-            options.flags_from_counters = false;
-        }
         let output = convert_observations(observed.clone(), &options)?;
         let slot_name: HashMap<usize, String> = output
             .car_slots
@@ -1070,18 +1036,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::var_os("SHIFT_LOG").is_some() {
         replay_to_rocketsim::conversion::GROUND_SHIFT_LOG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    for (label, tweak) in variants {
+    {
         let mut options = ConvertOptions::default();
         options.zero_packet_lag = zero_lag;
-        options.ball_car_lag_offset = std::env::var("LAG_MU").ok().and_then(|v| v.parse().ok());
-        options.ball_hit_chains = std::env::var_os("NO_BALL_HITS").is_none();
-        options.estimate_ball_car_lag_offset = std::env::var_os("NO_EST_MU").is_none();
-        options.detect_lag_free_replays = std::env::var_os("NO_LAG_FREE").is_none();
-        options.align_contacts = std::env::var_os("NO_ALIGN_CONTACTS").is_none();
-        options.per_car_control_shift = std::env::var_os("NO_CAR_SHIFT").is_none();
-        options.packet_interval_control_rule = std::env::var_os("PACKET_CONTROL_RULE").is_some();
-        tweak(&mut options);
-        score(label, options)?;
+        score("all fits", options)?;
     }
     // Oracle lags: the true lag of every packet that matches a server tick exactly, taken as its offset
     // against the running minimum of the offsets (a lag is at least 0 and its minimum over a window is
@@ -1151,15 +1109,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.external_packet_lags = Some(std::sync::Arc::new(oracle));
     score(
         "ORACLE packet lags (true lags of the exactly matched packets), all fits",
-        options.clone(),
-    )?;
-    options.fit_ground_control_timing = false;
-    options.fit_jump_timing = false;
-    options.infer_dodge_start = false;
-    options.infer_flip_cancel = false;
-    options.lookahead_ground_controls = false;
-    score(
-        "ORACLE packet lags, no fits, no lookahead controls",
         options,
     )?;
     Ok(())

@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_tick_with_hit_impulse};
+use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_arena_tick};
 use replay_to_rocketsim::observations::Body;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
@@ -376,7 +376,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
                 arena.set_car_controls(0, controls);
                 for _ in 0..steps {
-                    step_tick_with_hit_impulse(arena, false);
+                    step_arena_tick(arena);
                 }
                 let miss = next_packet.0 - arena.get_car_state(0).phys.pos;
                 next_car = Some((steps, next_packet.0, miss));
@@ -407,19 +407,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 arena.set_car_state(0, car_state(&packet, shift));
                 arena.set_car_controls(0, controls);
                 for _ in 0..stale {
-                    step_tick_with_hit_impulse(arena, false);
+                    step_arena_tick(arena);
                 }
                 arena.set_ball_state(ball_state);
                 let mut hit = false;
                 for _ in 0..k {
-                    for event in step_tick_with_hit_impulse(arena, false) {
+                    for event in step_arena_tick(arena) {
                         hit |= matches!(event, ArenaEvent::CarHitBall(_));
                     }
                 }
                 let error = (arena.get_ball_state().phys.vel - b.1).length();
                 let car_error = follow.map(|(steps, target, _)| {
                     for _ in 0..(steps - stale - k) {
-                        step_tick_with_hit_impulse(arena, false);
+                        step_arena_tick(arena);
                     }
                     (arena.get_car_state(0).phys.pos - target).length()
                 });
@@ -456,7 +456,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut min_gap = f32::MAX;
                 for s in 0..=(stale + k) {
                     if s > 0 {
-                        step_tick_with_hit_impulse(arena, false);
+                        step_arena_tick(arena);
                     }
                     if s >= stale {
                         if s > stale {
@@ -487,7 +487,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if s == stale + 1 {
                         arena.set_ball_state(ball_state);
                     }
-                    for event in step_tick_with_hit_impulse(arena, false) {
+                    for event in step_arena_tick(arena) {
                         hit |= s > stale && matches!(event, ArenaEvent::CarHitBall(_));
                     }
                     let mut state = *arena.get_car_state(0);
@@ -509,11 +509,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
                     arena.set_car_controls(0, controls);
                     for _ in 0..pre {
-                        step_tick_with_hit_impulse(arena, false);
+                        step_arena_tick(arena);
                     }
                     arena.set_ball_state(ball_state);
                     for _ in 0..k {
-                        for event in step_tick_with_hit_impulse(arena, false) {
+                        for event in step_arena_tick(arena) {
                             hit |= matches!(event, ArenaEvent::CarHitBall(_));
                         }
                     }
@@ -528,12 +528,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     arena.set_car_state(0, far_car);
                     arena.set_ball_state(ball_state);
                     for _ in 0..lead {
-                        step_tick_with_hit_impulse(arena, false);
+                        step_arena_tick(arena);
                     }
                     arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
                     arena.set_car_controls(0, controls);
                     for _ in 0..(k - lead) {
-                        for event in step_tick_with_hit_impulse(arena, false) {
+                        for event in step_arena_tick(arena) {
                             hit |= matches!(event, ArenaEvent::CarHitBall(_));
                         }
                     }

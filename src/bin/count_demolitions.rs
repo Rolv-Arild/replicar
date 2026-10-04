@@ -46,11 +46,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if replay_to_rocketsim::sealed_path_refused(&path, env::args().any(|arg| arg == "--final-assessment")) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
-    let mut options = ConvertOptions::default();
-    options.apply_observed_demolitions = env::var_os("NO_OBSERVED_DEMOS").is_none();
-    // RocketSim's own demolition rule only runs when it is not disabled (`disable_simulated_demolitions`
-    // takes effect together with `apply_observed_demolitions`).
-    let simulated_possible = !(options.apply_observed_demolitions && options.disable_simulated_demolitions);
+    let options = ConvertOptions::default();
+    // RocketSim's own demolition rule only runs when it is not disabled (`disable_simulated_demolitions`).
+    let simulated_possible = !options.disable_simulated_demolitions;
     let (mut tot_obs, mut tot_sim, mut tot_both) = (0, 0, 0);
     let (mut tot_repeat, mut tot_unlinked, mut tot_goal, mut tot_repeat_unlinked) = (0usize, 0usize, 0usize, 0usize);
     for replay in replay_paths(&path, env::args_os().any(|arg| arg == "--final-assessment"))? {
@@ -129,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("simulated {tot_sim}, with an observed demolition of the same victim within 30 ticks {tot_both}");
     } else {
         println!(
-            "simulated demolitions: not counted (observed demolitions are applied and RocketSim's own rule is disabled, disable_simulated_demolitions = true, so there are none by construction); set NO_OBSERVED_DEMOS=1 to run RocketSim's rule instead and compare"
+            "simulated demolitions: not counted (observed demolitions are applied and RocketSim's own rule is disabled, disable_simulated_demolitions = true, so there are none by construction)"
         );
     }
     Ok(())
