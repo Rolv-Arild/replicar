@@ -225,7 +225,10 @@ fn a_car_does_not_pick_up_a_pad_the_replay_never_reported() {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("0000a984")))
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("0000a984"))
+        })
     else {
         eprintln!("skipping pad blocking test: replay missing");
         return;
