@@ -11,7 +11,7 @@ use crate::conversion::{
 use crate::observations;
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const ROCKETSIM_REVISION: &str = "0b020516c4fc633e0db09dfbfaa2026bcddb058e";
+pub const ROCKETSIM_REVISION: &str = "9910c58e47a99cf94969a4a57cac8c6f7efe1470";
 
 fn xyz(v: Vec3A) -> [f32; 3] {
     v.to_array()

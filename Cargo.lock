@@ -676,8 +676,8 @@ dependencies = [
 
 [[package]]
 name = "rocketsim"
-version = "0.2.1"
-source = "git+https://github.com/ZealanL/RocketSim.git?rev=0b020516c4fc633e0db09dfbfaa2026bcddb058e#0b020516c4fc633e0db09dfbfaa2026bcddb058e"
+version = "0.2.4"
+source = "git+https://github.com/ZealanL/RocketSim.git?rev=9910c58e47a99cf94969a4a57cac8c6f7efe1470#9910c58e47a99cf94969a4a57cac8c6f7efe1470"
 dependencies = [
  "arrayvec",
  "byteorder",

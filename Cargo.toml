@@ -9,7 +9,7 @@ arrow-schema = "=60.0.0"
 boxcars = "=0.12.0"
 glam = "=0.33.11"
 parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd"] }
-rocketsim = { git = "https://github.com/ZealanL/RocketSim.git", rev = "0b020516c4fc633e0db09dfbfaa2026bcddb058e" }
+rocketsim = { git = "https://github.com/ZealanL/RocketSim.git", rev = "9910c58e47a99cf94969a4a57cac8c6f7efe1470" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

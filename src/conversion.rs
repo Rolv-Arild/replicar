@@ -142,6 +142,14 @@ pub struct ConvertOptions {
     /// car missed, or the reverse): the boost amount then comes only from the replay's own updates
     /// (offline reconstruction; masked prediction has no later update and keeps the simulated pickups).
     pub block_sim_pad_pickups: bool,
+    /// After a car or the ball is teleported into a REUSED scratch arena for an offline fit (`seed_scratch_car`,
+    /// the contact alignment's candidate setup, the ball-only rollouts of `ball_evidence`), drop the arena's
+    /// cached contact state (`Arena::reset_car_transient_contacts` for the seeded car and
+    /// `Arena::clear_persistent_manifolds`) so the run matches one from a fresh arena. Never applied to the main
+    /// arena: replay following needs its contact continuity. Off by default (omitted from the serialized options
+    /// while off, so default exports are unchanged).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reset_scratch_contacts: bool,
     /// Offline: a boost amount that jumps up (a pad pickup) is first seen about a frame after the car
     /// picked it up, so apply an increase seen in the next frame one frame early.
     pub boost_pickup_lookahead: bool,
@@ -347,6 +355,7 @@ impl Default for ConvertOptions {
             disable_simulated_demolitions: true,
             sync_boost_pad_pickups: true,
             block_sim_pad_pickups: true,
+            reset_scratch_contacts: false,
             boost_pickup_lookahead: false,
             infer_air_steer_controls: true,
             infer_dodge_start: true,
@@ -1829,10 +1838,27 @@ pub fn rebase_tick(tick: Option<u64>, source_tick: u64, target_tick: u64) -> Opt
 /// Seeds the scratch arena's car (`set_car_state(0, ..)`) with `state` from a timeline whose arena tick was
 /// `source_tick` (the main arena's tick, or the tick the scratch arena had when it produced the state),
 /// rebasing `last_extra_hit_tick` into the scratch arena's own tick counter (`rebase_car_ticks`).
-pub(crate) fn seed_scratch_car(scratch: &mut Arena, state: CarState, source_tick: u64) {
+///
+/// With `options.reset_scratch_contacts` the arena's cached contacts are dropped after the teleport
+/// (`reset_scratch_arena_contacts`), so the run matches one from a fresh arena.
+pub(crate) fn seed_scratch_car(scratch: &mut Arena, state: CarState, source_tick: u64, options: &ConvertOptions) {
     let target_tick = scratch.tick_count();
     scratch.set_car_state(0, rebase_car_ticks(state, source_tick, target_tick));
     scratch.refresh_car_sticky_gate(0);
+    reset_scratch_arena_contacts(scratch, Some(0), options);
+}
+
+/// For a reused scratch arena after a teleport (`ConvertOptions::reset_scratch_contacts`): drop the transient
+/// contacts of the seeded car and the persistent manifolds, as RocketSim documents for planning code that
+/// reuses an arena across poses. A no-op when the option is off. Never call it on the main arena.
+pub(crate) fn reset_scratch_arena_contacts(scratch: &mut Arena, car: Option<usize>, options: &ConvertOptions) {
+    if !options.reset_scratch_contacts {
+        return;
+    }
+    if let Some(car) = car {
+        scratch.reset_car_transient_contacts(car);
+    }
+    scratch.clear_persistent_manifolds();
 }
 
 /// Body product IDs are from boxcars' TeamLoadout, not RocketSim's preset indices.
@@ -3025,7 +3051,7 @@ fn plan_air_bvp(
                         parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
                     }
                     scratch.set_ball_state(parked);
-                    seed_scratch_car(scratch, start, now_tick);
+                    seed_scratch_car(scratch, start, now_tick, options);
                     let mut tick = now_tick;
                     for &(controls, n) in segments {
                         for _ in 0..n {
@@ -3386,7 +3412,7 @@ fn fit_ground_control_timing(
             continue;
         }
         scratch.set_ball_state(parked);
-        seed_scratch_car(scratch, *state, now_tick);
+        seed_scratch_car(scratch, *state, now_tick, options);
         for tau in t_a + 1..=t_c {
             let e = controls_at(&entries, shift, tau);
             scratch.set_car_controls(
@@ -3615,7 +3641,7 @@ fn fit_jump_timing(
     let mut costs: Vec<(i64, f32)> = Vec::new();
     for shift in JUMP_TIMING_SHIFTS {
         scratch.set_ball_state(*ball);
-        seed_scratch_car(scratch, *state, now_tick);
+        seed_scratch_car(scratch, *state, now_tick, options);
         for tau in t_a + 1..=t_c {
             let c = controls_at(shift, tau);
             scratch.set_car_controls(
@@ -3895,7 +3921,7 @@ fn fit_ground_flip_timing(
         let mut path_ticks = vec![now_tick];
         let mut path_ball = vec![*ball];
         scratch.set_ball_state(*ball);
-        seed_scratch_car(scratch, *state, now_tick);
+        seed_scratch_car(scratch, *state, now_tick, options);
         for step in 1..=horizon {
             let c = controls_at(shift, t_a + step as i64);
             scratch.set_car_controls(
@@ -3921,7 +3947,7 @@ fn fit_ground_flip_timing(
             }
             let press = press as usize;
             scratch.set_ball_state(path_ball[press - 1]);
-            seed_scratch_car(scratch, path[press - 1], path_ticks[press - 1]);
+            seed_scratch_car(scratch, path[press - 1], path_ticks[press - 1], options);
             for step in press..=horizon {
                 let c = controls_at(shift, t_a + step as i64);
                 let mut controls = CarControls {
@@ -3955,7 +3981,7 @@ fn fit_ground_flip_timing(
         let cancel = step as f32 * 0.25;
         // Rebuild the state at the press for this jump shift.
         scratch.set_ball_state(*ball);
-        seed_scratch_car(scratch, *state, now_tick);
+        seed_scratch_car(scratch, *state, now_tick, options);
         for step_tick in 1..=horizon {
             let c = controls_at(shift, t_a + step_tick as i64);
             let mut controls = CarControls {
@@ -3996,7 +4022,7 @@ fn fit_ground_flip_timing(
     let mut first_packet = None;
     if options.infer_dodge_first_packet_tick && first_fresh.0 >= activation_frame {
         scratch.set_ball_state(*ball);
-        seed_scratch_car(scratch, *state, now_tick);
+        seed_scratch_car(scratch, *state, now_tick, options);
         let mut states: Vec<CarState> = vec![*state];
         for step_tick in 1..=horizon {
             let c = controls_at(shift, t_a + step_tick as i64);
@@ -4347,7 +4373,7 @@ fn fit_flip_cancel(
         for step in 0..=4 {
             let cancel = step as f32 * 0.25;
             scratch.set_ball_state(parked);
-            seed_scratch_car(scratch, start, now_tick);
+            seed_scratch_car(scratch, start, now_tick, options);
             let mut controls = *base_controls;
             controls.jump = false;
             controls.pitch = cancel * sign;
@@ -4475,7 +4501,7 @@ fn fit_flip_cancel(
         // does), not from wherever an earlier fit left the shared scratch arena's ball.
         scratch.set_ball_state(*ball);
         for (j, target) in targets.iter().enumerate() {
-            seed_scratch_car(scratch, start, start_tick);
+            seed_scratch_car(scratch, start, start_tick, options);
             let mut controls = *base_controls;
             controls.jump = false;
             controls.pitch = cancel * sign;
@@ -4712,7 +4738,7 @@ fn fit_dodge_start(
     let mut path_ticks = vec![now_tick];
     let mut path_ball = vec![*ball];
     scratch.set_ball_state(*ball);
-    seed_scratch_car(scratch, start, now_tick);
+    seed_scratch_car(scratch, start, now_tick, options);
     scratch.set_car_controls(0, base);
     for _ in 0..horizon {
         scratch.step_tick();
@@ -4723,7 +4749,7 @@ fn fit_dodge_start(
     // States at every tick from `dodge_tick` to the horizon for a dodge at `dodge_tick` with `cancel`.
     let run_all = |scratch: &mut Arena, dodge_tick: u64, cancel: f32| -> Vec<CarState> {
         scratch.set_ball_state(path_ball[dodge_tick as usize - 1]);
-        seed_scratch_car(scratch, path[dodge_tick as usize - 1], path_ticks[dodge_tick as usize - 1]);
+        seed_scratch_car(scratch, path[dodge_tick as usize - 1], path_ticks[dodge_tick as usize - 1], options);
         let mut after: Vec<CarState> = Vec::new();
         for tick in dodge_tick..=horizon {
             let mut controls = base;

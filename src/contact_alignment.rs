@@ -217,17 +217,20 @@ pub fn aligned_lags(
                 let t1 = tick_a.max(tick_c);
                 if tick_a <= tick_c {
                     ball_arena.set_ball_state(ball_state(&ball_a));
+                    crate::conversion::reset_scratch_arena_contacts(&mut ball_arena, None, options);
                     for _ in tick_a..tick_c {
                         ball_arena.step_tick();
                     }
                     arena.set_ball_state(*ball_arena.get_ball_state());
                     arena.set_car_state(0, car_state);
                     arena.refresh_car_sticky_gate(0);
+                    crate::conversion::reset_scratch_arena_contacts(&mut arena, Some(0), options);
                     arena.set_car_controls(0, controls);
                 } else {
                     arena.set_ball_state(parked);
                     arena.set_car_state(0, car_state);
                     arena.refresh_car_sticky_gate(0);
+                    crate::conversion::reset_scratch_arena_contacts(&mut arena, Some(0), options);
                     arena.set_car_controls(0, controls);
                     for _ in tick_c..tick_a {
                         arena.step_tick();
