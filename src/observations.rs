@@ -163,7 +163,9 @@ pub const DEMOLITION_REPEAT_WINDOW: f32 = 5.0;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    GoalScoredOn { team: u8 },
+    GoalScoredOn {
+        team: u8,
+    },
     /// A demolition replicated on the victim car (`ReplicatedDemolish*`). Car fields are replay car
     /// actor ids (the player a car belongs to comes from `Frame::cars`); velocities are in replay
     /// units. The same demolition can be replicated in more than one update.
@@ -189,7 +191,10 @@ pub enum Event {
     /// first value above zero, or a re-sent value, is not an event), and seen with the replication delay of
     /// the update, not at the tick of the contact. The counter does not count every reset: the flags also
     /// clear on wheel contact with a car or a wall (RESULTS.md, 'Flip resets').
-    DodgeRefreshed { car: i32, count: i32 },
+    DodgeRefreshed {
+        car: i32,
+        count: i32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,7 +322,9 @@ fn nonstandard_notes(map: Option<&str>, settings: &BTreeMap<String, Vec<String>>
     match map {
         None => notes.push("the replay header has no MapName".to_owned()),
         Some(map) if !KNOWN_MAPS.contains(&map.to_lowercase().as_str()) => {
-            notes.push(format!("map {map} is not one of the maps measured on train"));
+            notes.push(format!(
+                "map {map} is not one of the maps measured on train"
+            ));
         }
         _ => {}
     }
@@ -327,7 +334,10 @@ fn nonstandard_notes(map: Option<&str>, settings: &BTreeMap<String, Vec<String>>
             _ => "1",
         };
         for value in values {
-            let is_standard = value == standard || value.parse::<f32>().is_ok_and(|v| (v - standard.parse::<f32>().unwrap_or(0.0)).abs() < 1e-6);
+            let is_standard = value == standard
+                || value
+                    .parse::<f32>()
+                    .is_ok_and(|v| (v - standard.parse::<f32>().unwrap_or(0.0)).abs() < 1e-6);
             if !is_standard {
                 notes.push(format!("{name} = {value} (standard {standard})"));
             }
@@ -524,7 +534,13 @@ impl Tracker {
         }
     }
 
-    fn announce(&mut self, id: ActorId, class: &str, frame: usize, trajectory: &boxcars::Trajectory) {
+    fn announce(
+        &mut self,
+        id: ActorId,
+        class: &str,
+        frame: usize,
+        trajectory: &boxcars::Trajectory,
+    ) {
         if let Some(existing) = self.actors.get(&id) {
             if existing.class == class {
                 self.diagnostics.repeated_actor_announcements += 1;
@@ -565,21 +581,21 @@ impl Tracker {
     fn link(&mut self, actor: ActorId, property: &str, attribute: &Attribute, frame: usize) {
         match property {
             "Engine.Pawn:PlayerReplicationInfo" => {
-                if let Some(car) = self.cars.get_mut(&actor) {
-                    if let Attribute::ActiveActor(value) = attribute {
-                        car.player_link_active = value.active;
-                        if value.active {
-                            car.player_actor = Some(value.actor);
-                            let lifetime = (actor, car.created_frame);
-                            let created = car.created_frame;
-                            // A car lifetime that takes over a player another lifetime owned is a replacement.
-                            if let Some(previous) = self.player_owner.insert(value.actor, lifetime) {
-                                if previous != lifetime {
-                                    self.diagnostics.replacement_cars_linked += 1;
-                                    if created != frame {
-                                        self.diagnostics.replacement_cars_linked_after_creation += 1;
-                                    }
-                                }
+                if let Some(car) = self.cars.get_mut(&actor)
+                    && let Attribute::ActiveActor(value) = attribute
+                {
+                    car.player_link_active = value.active;
+                    if value.active {
+                        car.player_actor = Some(value.actor);
+                        let lifetime = (actor, car.created_frame);
+                        let created = car.created_frame;
+                        // A car lifetime that takes over a player another lifetime owned is a replacement.
+                        if let Some(previous) = self.player_owner.insert(value.actor, lifetime)
+                            && previous != lifetime
+                        {
+                            self.diagnostics.replacement_cars_linked += 1;
+                            if created != frame {
+                                self.diagnostics.replacement_cars_linked_after_creation += 1;
                             }
                         }
                     }
@@ -642,10 +658,10 @@ impl Tracker {
                             }
                         }
                         Some(ActorKind::Ball) => {
-                            if let Some((id, ball)) = self.ball.as_mut() {
-                                if *id == actor {
-                                    ball.update(body, frame);
-                                }
+                            if let Some((id, ball)) = self.ball.as_mut()
+                                && *id == actor
+                            {
+                                ball.update(body, frame);
                             }
                         }
                         _ => self.diagnostics.unknown_actor_updates += 1,
@@ -672,21 +688,19 @@ impl Tracker {
             "TAGame.CarComponent_Boost_TA:ReplicatedBoostAmount" => {
                 if let (Some(car_id), Attribute::Byte(raw)) =
                     (self.components.get(&actor), attribute)
+                    && let Some(car) = self.cars.get_mut(car_id)
                 {
-                    if let Some(car) = self.cars.get_mut(car_id) {
-                        car.boost_raw = Some(Value::replay(*raw, frame));
-                        car.boost = Some(Value::replay(boost_amount(*raw), frame));
-                    }
+                    car.boost_raw = Some(Value::replay(*raw, frame));
+                    car.boost = Some(Value::replay(boost_amount(*raw), frame));
                 }
             }
             "TAGame.CarComponent_Boost_TA:ReplicatedBoost" => {
                 if let (Some(car_id), Attribute::ReplicatedBoost(value)) =
                     (self.components.get(&actor), attribute)
+                    && let Some(car) = self.cars.get_mut(car_id)
                 {
-                    if let Some(car) = self.cars.get_mut(car_id) {
-                        car.boost_raw = Some(Value::replay(value.boost_amount, frame));
-                        car.boost = Some(Value::replay(boost_amount(value.boost_amount), frame));
-                    }
+                    car.boost_raw = Some(Value::replay(value.boost_amount, frame));
+                    car.boost = Some(Value::replay(boost_amount(value.boost_amount), frame));
                 }
             }
             "TAGame.CarComponent_TA:ReplicatedActive" => {
@@ -701,27 +715,25 @@ impl Tracker {
                     self.actors.get(&actor),
                     self.components.get(&actor),
                     attribute,
-                ) {
-                    if let Some(car) = self.cars.get_mut(car_id) {
-                        let field = match component {
-                            ComponentKind::Boost => &mut car.inputs.boost_active_raw,
-                            ComponentKind::Jump => &mut car.inputs.jump_active_raw,
-                            ComponentKind::DoubleJump => &mut car.inputs.double_jump_active_raw,
-                            ComponentKind::Dodge => &mut car.inputs.dodge_active_raw,
-                            ComponentKind::FlipCar => &mut car.inputs.flip_car_active_raw,
-                        };
-                        *field = Some(Value::replay(*raw, frame));
-                    }
+                ) && let Some(car) = self.cars.get_mut(car_id)
+                {
+                    let field = match component {
+                        ComponentKind::Boost => &mut car.inputs.boost_active_raw,
+                        ComponentKind::Jump => &mut car.inputs.jump_active_raw,
+                        ComponentKind::DoubleJump => &mut car.inputs.double_jump_active_raw,
+                        ComponentKind::Dodge => &mut car.inputs.dodge_active_raw,
+                        ComponentKind::FlipCar => &mut car.inputs.flip_car_active_raw,
+                    };
+                    *field = Some(Value::replay(*raw, frame));
                 }
             }
             "TAGame.CarComponent_Dodge_TA:DodgeTorque" => {
                 if let (Some(car_id), Attribute::Location(torque)) =
                     (self.components.get(&actor), attribute)
+                    && let Some(car) = self.cars.get_mut(car_id)
                 {
-                    if let Some(car) = self.cars.get_mut(car_id) {
-                        car.inputs.dodge_torque_replay_units =
-                            Some(Value::replay(vector(*torque), frame));
-                    }
+                    car.inputs.dodge_torque_replay_units =
+                        Some(Value::replay(vector(*torque), frame));
                 }
             }
             "Engine.TeamInfo:Score" => {
@@ -747,24 +759,23 @@ impl Tracker {
                 }
             }
             "TAGame.GameEvent_TA:ReplicatedStateName" => {
-                if let Attribute::Int(index) = attribute {
-                    if let Some(name) = usize::try_from(*index)
+                if let Attribute::Int(index) = attribute
+                    && let Some(name) = usize::try_from(*index)
                         .ok()
                         .and_then(|index| names.get(index))
-                    {
-                        if !matches!(name.as_str(), "PostGoalScored" | "ReplayPlayback") {
-                            self.goal_events_this_phase.clear();
-                        }
-                        self.game_state = Some(Value::replay(name.clone(), frame));
+                {
+                    if !matches!(name.as_str(), "PostGoalScored" | "ReplayPlayback") {
+                        self.goal_events_this_phase.clear();
                     }
+                    self.game_state = Some(Value::replay(name.clone(), frame));
                 }
             }
             "TAGame.GameEvent_Soccar_TA:ReplicatedScoredOnTeam" => {
-                if let Attribute::Byte(team @ 0..=1) = attribute {
-                    if !self.goal_events_this_phase.contains(team) {
-                        self.goal_events_this_phase.push(*team);
-                        events.push(Event::GoalScoredOn { team: *team });
-                    }
+                if let Attribute::Byte(team @ 0..=1) = attribute
+                    && !self.goal_events_this_phase.contains(team)
+                {
+                    self.goal_events_this_phase.push(*team);
+                    events.push(Event::GoalScoredOn { team: *team });
                 }
             }
             "ProjectX.GRI_X:ReplicatedGameMutatorIndex"
@@ -776,7 +787,11 @@ impl Tracker {
                     _ => None,
                 };
                 if let Some(value) = value {
-                    let seen = self.diagnostics.game_settings.entry(property.to_owned()).or_default();
+                    let seen = self
+                        .diagnostics
+                        .game_settings
+                        .entry(property.to_owned())
+                        .or_default();
                     if !seen.contains(&value) {
                         seen.push(value);
                     }
@@ -786,7 +801,10 @@ impl Tracker {
                 if let Attribute::Int(count) = attribute {
                     let before = self.dodges_refreshed.insert(actor.0, *count);
                     if before.is_some_and(|before| *count > before) {
-                        events.push(Event::DodgeRefreshed { car: actor.0, count: *count });
+                        events.push(Event::DodgeRefreshed {
+                            car: actor.0,
+                            count: *count,
+                        });
                     }
                 }
             }
@@ -800,8 +818,16 @@ impl Tracker {
                         attacker_pri: active(&d.attacker_pri),
                         self_demolish: d.self_demolish,
                         repeat: false,
-                        attacker_velocity: [d.attacker_velocity.x, d.attacker_velocity.y, d.attacker_velocity.z],
-                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                        attacker_velocity: [
+                            d.attacker_velocity.x,
+                            d.attacker_velocity.y,
+                            d.attacker_velocity.z,
+                        ],
+                        victim_velocity: [
+                            d.victim_velocity.x,
+                            d.victim_velocity.y,
+                            d.victim_velocity.z,
+                        ],
                     });
                 }
             }
@@ -814,8 +840,16 @@ impl Tracker {
                         attacker_pri: None,
                         self_demolish: false,
                         repeat: false,
-                        attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
-                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                        attacker_velocity: [
+                            d.attack_velocity.x,
+                            d.attack_velocity.y,
+                            d.attack_velocity.z,
+                        ],
+                        victim_velocity: [
+                            d.victim_velocity.x,
+                            d.victim_velocity.y,
+                            d.victim_velocity.z,
+                        ],
                     });
                 }
             }
@@ -828,8 +862,16 @@ impl Tracker {
                         attacker_pri: None,
                         self_demolish: false,
                         repeat: false,
-                        attacker_velocity: [d.attack_velocity.x, d.attack_velocity.y, d.attack_velocity.z],
-                        victim_velocity: [d.victim_velocity.x, d.victim_velocity.y, d.victim_velocity.z],
+                        attacker_velocity: [
+                            d.attack_velocity.x,
+                            d.attack_velocity.y,
+                            d.attack_velocity.z,
+                        ],
+                        victim_velocity: [
+                            d.victim_velocity.x,
+                            d.victim_velocity.y,
+                            d.victim_velocity.z,
+                        ],
                     });
                 }
             }
@@ -855,7 +897,9 @@ impl Tracker {
                 }
             }
             "Engine.PlayerReplicationInfo:Ping" => {
-                if let (Some(player), Attribute::Byte(ping)) = (self.players.get_mut(&actor), attribute) {
+                if let (Some(player), Attribute::Byte(ping)) =
+                    (self.players.get_mut(&actor), attribute)
+                {
                     player.ping_raw = Some(Value::replay(*ping, frame));
                 }
             }
@@ -975,10 +1019,12 @@ impl Tracker {
             .collect();
         players.sort_by_key(|player| player.actor_id);
         for player in &players {
-            if let Some(previous) = self.last_player_keys.insert(player.actor_id, player.key.clone()) {
-                if previous != player.key {
-                    self.diagnostics.player_key_changes += 1;
-                }
+            if let Some(previous) = self
+                .last_player_keys
+                .insert(player.actor_id, player.key.clone())
+                && previous != player.key
+            {
+                self.diagnostics.player_key_changes += 1;
             }
         }
         let player_lookup: HashMap<_, _> = players
@@ -1100,12 +1146,18 @@ pub fn extract(replay: &Replay) -> Option<ObservedReplay> {
         }
         output.push(tracker.snapshot(index, frame.time, frame.delta, events, pad_pickups));
     }
-    tracker.diagnostics.map_name = replay.properties.iter().find_map(|(name, prop)| match (name.as_str(), prop) {
-        ("MapName", HeaderProp::Name(map) | HeaderProp::Str(map)) => Some(map.clone()),
-        _ => None,
-    });
-    tracker.diagnostics.nonstandard_notes =
-        nonstandard_notes(tracker.diagnostics.map_name.as_deref(), &tracker.diagnostics.game_settings);
+    tracker.diagnostics.map_name =
+        replay
+            .properties
+            .iter()
+            .find_map(|(name, prop)| match (name.as_str(), prop) {
+                ("MapName", HeaderProp::Name(map) | HeaderProp::Str(map)) => Some(map.clone()),
+                _ => None,
+            });
+    tracker.diagnostics.nonstandard_notes = nonstandard_notes(
+        tracker.diagnostics.map_name.as_deref(),
+        &tracker.diagnostics.game_settings,
+    );
     Some(ObservedReplay {
         header: Header {
             game_type: replay.game_type.clone(),
@@ -1158,16 +1210,25 @@ mod event_tests {
         assert!(observe(&mut tracker, 5, 0).is_empty());
         assert!(observe(&mut tracker, 5, 0).is_empty());
         let events = observe(&mut tracker, 5, 1);
-        assert!(matches!(events[..], [Event::DodgeRefreshed { car: 5, count: 1 }]));
+        assert!(matches!(
+            events[..],
+            [Event::DodgeRefreshed { car: 5, count: 1 }]
+        ));
         assert!(observe(&mut tracker, 5, 1).is_empty());
         let events = observe(&mut tracker, 5, 2);
-        assert!(matches!(events[..], [Event::DodgeRefreshed { car: 5, count: 2 }]));
+        assert!(matches!(
+            events[..],
+            [Event::DodgeRefreshed { car: 5, count: 2 }]
+        ));
         // A car first seen with a nonzero total has no event for it (when it happened is unknown).
         assert!(observe(&mut tracker, 6, 3).is_empty());
         // After the actor is deleted its id starts over.
         tracker.actors.insert(
             ActorId(5),
-            Actor { class: "Car".to_owned(), kind: ActorKind::Car },
+            Actor {
+                class: "Car".to_owned(),
+                kind: ActorKind::Car,
+            },
         );
         tracker.delete(ActorId(5));
         assert!(observe(&mut tracker, 5, 1).is_empty());
@@ -1179,15 +1240,32 @@ mod event_tests {
     #[test]
     fn a_spawn_trajectory_gives_a_location_and_a_heading() {
         let trajectory = |yaw, pitch, roll| boxcars::Trajectory {
-            location: Some(boxcars::Vector3i { x: 256, y: -3840, z: 36 }),
+            location: Some(boxcars::Vector3i {
+                x: 256,
+                y: -3840,
+                z: 36,
+            }),
             rotation: Some(boxcars::Rotation { yaw, pitch, roll }),
         };
         let spawn = SpawnPose::from_trajectory(&trajectory(Some(-1), Some(64), None), 7).unwrap();
         assert_eq!(spawn.position, [256.0, -3840.0, 36.0]);
         let [x, y, z, w] = spawn.rotation_xyzw.unwrap();
-        assert!(x == 0.0 && y == 0.0 && (z - 0.707_106_8).abs() < 1e-5 && (w - 0.707_106_8).abs() < 1e-5);
-        assert!(SpawnPose::from_trajectory(&trajectory(Some(13), Some(90), Some(75)), 7).unwrap().rotation_xyzw.is_none());
-        let no_location = boxcars::Trajectory { location: None, rotation: None };
+        assert!(
+            x == 0.0
+                && y == 0.0
+                && (z - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5
+                && (w - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5
+        );
+        assert!(
+            SpawnPose::from_trajectory(&trajectory(Some(13), Some(90), Some(75)), 7)
+                .unwrap()
+                .rotation_xyzw
+                .is_none()
+        );
+        let no_location = boxcars::Trajectory {
+            location: None,
+            rotation: None,
+        };
         assert!(SpawnPose::from_trajectory(&no_location, 7).is_none());
     }
 
@@ -1197,13 +1275,24 @@ mod event_tests {
     #[test]
     fn link_changes_and_settings_are_reported() {
         let announce = |tracker: &mut Tracker, id: i32, class: &str, frame: usize| {
-            tracker.announce(ActorId(id), class, frame, &boxcars::Trajectory { location: None, rotation: None });
+            tracker.announce(
+                ActorId(id),
+                class,
+                frame,
+                &boxcars::Trajectory {
+                    location: None,
+                    rotation: None,
+                },
+            );
         };
         let link = |tracker: &mut Tracker, car: i32, player: i32, frame: usize| {
             tracker.link(
                 ActorId(car),
                 "Engine.Pawn:PlayerReplicationInfo",
-                &Attribute::ActiveActor(boxcars::ActiveActor { active: true, actor: ActorId(player) }),
+                &Attribute::ActiveActor(boxcars::ActiveActor {
+                    active: true,
+                    actor: ActorId(player),
+                }),
                 frame,
             );
         };
@@ -1215,21 +1304,43 @@ mod event_tests {
         announce(&mut tracker, 2, "Archetypes.Car.Car_Default", 10);
         link(&mut tracker, 2, 5, 12);
         assert_eq!(tracker.diagnostics.replacement_cars_linked, 1);
-        assert_eq!(tracker.diagnostics.replacement_cars_linked_after_creation, 1);
+        assert_eq!(
+            tracker.diagnostics.replacement_cars_linked_after_creation,
+            1
+        );
         tracker.delete(ActorId(5));
         assert_eq!(tracker.diagnostics.players_deleted_with_cars, 2);
-        assert!(tracker.cars.values().all(|car| car.player_actor.is_none() && !car.player_link_active));
+        assert!(
+            tracker
+                .cars
+                .values()
+                .all(|car| car.player_actor.is_none() && !car.player_link_active)
+        );
 
         let mut settings = BTreeMap::new();
-        settings.insert("ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(), vec!["-1".to_owned()]);
-        settings.insert("TAGame.Ball_TA:ReplicatedBallGravityScale".to_owned(), vec!["1".to_owned(), "0.5".to_owned()]);
+        settings.insert(
+            "ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(),
+            vec!["-1".to_owned()],
+        );
+        settings.insert(
+            "TAGame.Ball_TA:ReplicatedBallGravityScale".to_owned(),
+            vec!["1".to_owned(), "0.5".to_owned()],
+        );
         let notes = nonstandard_notes(Some("Stadium_P"), &settings);
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("BallGravityScale = 0.5"));
-        assert!(nonstandard_notes(Some("SomeNewMap_P"), &BTreeMap::new())[0].contains("SomeNewMap_P"));
-        assert_eq!(nonstandard_notes(Some("CS_P"), &BTreeMap::new()), Vec::<String>::new());
+        assert!(
+            nonstandard_notes(Some("SomeNewMap_P"), &BTreeMap::new())[0].contains("SomeNewMap_P")
+        );
+        assert_eq!(
+            nonstandard_notes(Some("CS_P"), &BTreeMap::new()),
+            Vec::<String>::new()
+        );
         settings.clear();
-        settings.insert("ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(), vec!["3".to_owned()]);
+        settings.insert(
+            "ProjectX.GRI_X:ReplicatedGameMutatorIndex".to_owned(),
+            vec!["3".to_owned()],
+        );
         assert_eq!(nonstandard_notes(Some("Stadium_P"), &settings).len(), 1);
     }
 
@@ -1264,7 +1375,10 @@ mod event_tests {
         assert!(!repeat_of(&first));
         tracker.actors.insert(
             ActorId(7),
-            Actor { class: "Car".to_owned(), kind: ActorKind::Car },
+            Actor {
+                class: "Car".to_owned(),
+                kind: ActorKind::Car,
+            },
         );
         tracker.delete(ActorId(7));
         let recycled = tracker.snapshot(1, 11.7, 0.03, vec![demolish(7)], Vec::new());
@@ -1280,7 +1394,10 @@ mod event_tests {
             tracker.observe(
                 ActorId(9),
                 "TAGame.VehiclePickup_TA:NewReplicatedPickupData",
-                &Attribute::PickupNew(boxcars::PickupNew { instigator: Some(ActorId(3)), picked_up: 1 }),
+                &Attribute::PickupNew(boxcars::PickupNew {
+                    instigator: Some(ActorId(3)),
+                    picked_up: 1,
+                }),
                 &[],
                 0,
                 &mut Vec::new(),
@@ -1292,7 +1409,10 @@ mod event_tests {
         assert!(pickup(&mut tracker));
         tracker.actors.insert(
             ActorId(9),
-            Actor { class: "Pad".to_owned(), kind: ActorKind::Pad("Pad".to_owned()) },
+            Actor {
+                class: "Pad".to_owned(),
+                kind: ActorKind::Pad("Pad".to_owned()),
+            },
         );
         tracker.delete(ActorId(9));
         assert!(!pickup(&mut tracker));
@@ -1306,7 +1426,10 @@ mod event_tests {
         for (actor, key) in [(6, "a"), (15, "b")] {
             tracker.players.insert(
                 ActorId(actor),
-                TrackedPlayer { unique_id: Some(key.to_owned()), ..TrackedPlayer::default() },
+                TrackedPlayer {
+                    unique_id: Some(key.to_owned()),
+                    ..TrackedPlayer::default()
+                },
             );
         }
         let ping = |tracker: &mut Tracker, actor: i32, attribute: Attribute, frame: usize| {
@@ -1321,8 +1444,15 @@ mod event_tests {
             );
         };
         let ping_of = |frame: &Frame, key: &str| {
-            let player = frame.players.iter().find(|player| player.key == key).unwrap();
-            player.ping_raw.as_ref().map(|ping| (ping.value, ping.frame, ping.source))
+            let player = frame
+                .players
+                .iter()
+                .find(|player| player.key == key)
+                .unwrap();
+            player
+                .ping_raw
+                .as_ref()
+                .map(|ping| (ping.value, ping.frame, ping.source))
         };
         let before = tracker.snapshot(0, 0.0, 0.0, Vec::new(), Vec::new());
         assert_eq!((ping_of(&before, "a"), ping_of(&before, "b")), (None, None));

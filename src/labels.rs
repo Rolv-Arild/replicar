@@ -78,7 +78,10 @@ fn goal_of(frame: &Frame) -> Option<u8> {
 }
 
 fn in_play(frame: &Frame) -> bool {
-    frame.game_state.as_ref().is_some_and(|state| state.value == "Active")
+    frame
+        .game_state
+        .as_ref()
+        .is_some_and(|state| state.value == "Active")
 }
 
 /// Labels that need the whole replay, computed once.
@@ -111,7 +114,11 @@ impl ReplayLabels {
         let mut open: Option<(u32, usize, usize)> = None;
         // After a goal frame the rest of that run of in-play frames belongs to no episode.
         let mut after_goal = false;
-        fn close(episode_end: &mut [Option<usize>], (_, first, _): (u32, usize, usize), end: usize) {
+        fn close(
+            episode_end: &mut [Option<usize>],
+            (_, first, _): (u32, usize, usize),
+            end: usize,
+        ) {
             for slot in &mut episode_end[first..=end] {
                 *slot = Some(end);
             }
@@ -191,7 +198,10 @@ pub(crate) fn slot_primary_cars<'a>(
 ) -> Vec<Option<&'a Car>> {
     let mut cars = vec![None; present.len()];
     for car in primary_linked_cars(frame) {
-        let Some(&(_, slot)) = car_actor_slots.iter().find(|(actor, _)| *actor == car.actor_id) else {
+        let Some(&(_, slot)) = car_actor_slots
+            .iter()
+            .find(|(actor, _)| *actor == car.actor_id)
+        else {
             continue;
         };
         if present.get(slot).copied().unwrap_or(false) {
@@ -265,7 +275,10 @@ mod tests {
             seconds_remaining: None,
             overtime: None,
             game_state: value(state.to_string(), index),
-            events: goal.map(|team| Event::GoalScoredOn { team }).into_iter().collect(),
+            events: goal
+                .map(|team| Event::GoalScoredOn { team })
+                .into_iter()
+                .collect(),
             pad_pickups: Vec::new(),
         }
     }
@@ -287,7 +300,8 @@ mod tests {
     /// pause), countdown 20, play 21-24 with no goal (the replay ends).
     fn two_goal_replay() -> ObservedReplay {
         let mut frames = Vec::new();
-        let mut push = |state: &str, goal: Option<u8>| frames.push(frame(frames.len(), state, goal));
+        let mut push =
+            |state: &str, goal: Option<u8>| frames.push(frame(frames.len(), state, goal));
         push("WaitingForPlayers", None);
         push("PreGame", None);
         push("Countdown", None);
@@ -366,7 +380,8 @@ mod tests {
     #[test]
     fn a_tied_regulation_gives_the_overtime_kickoff_its_own_episode() {
         let mut frames = Vec::new();
-        let mut push = |state: &str, goal: Option<u8>| frames.push(frame(frames.len(), state, goal));
+        let mut push =
+            |state: &str, goal: Option<u8>| frames.push(frame(frames.len(), state, goal));
         for _ in 0..3 {
             push("Active", None); // regulation play to expiry (0-2)
         }
@@ -380,7 +395,17 @@ mod tests {
         let labels = ReplayLabels::new(&observed);
         assert_eq!(
             labels.episode,
-            [Some(0), Some(0), Some(0), None, Some(1), Some(1), Some(1), Some(1), None]
+            [
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                None
+            ]
         );
         // The first episode has no goal: it ends at its last in-play frame; frames of it still look to the
         // overtime goal.
@@ -404,7 +429,10 @@ mod tests {
         assert_eq!(labels.episode, [None, None, None, Some(0)]);
         assert_eq!(labels.episodes(), 1);
         let first = labels.frame_at(&observed.frames, 0);
-        assert_eq!((first.next_scoring_team, first.seconds_until_next_goal), (Some(1), Some(0.0)));
+        assert_eq!(
+            (first.next_scoring_team, first.seconds_until_next_goal),
+            (Some(1), Some(0.0))
+        );
         // No goal after frame 0: the later frames have no next goal.
         assert_eq!(labels.frame_at(&observed.frames, 3).next_scoring_team, None);
     }
@@ -417,14 +445,23 @@ mod tests {
         assert_eq!(labels.episodes(), 0);
         let one = labels.frame_at(&observed.frames, 1);
         assert_eq!(
-            (one.episode, one.episode_seconds_remaining, one.next_scoring_team, one.seconds_until_next_goal),
+            (
+                one.episode,
+                one.episode_seconds_remaining,
+                one.next_scoring_team,
+                one.seconds_until_next_goal
+            ),
             (None, None, None, None)
         );
     }
 
     #[test]
     fn the_header_labels_read_the_last_observed_scoreboard() {
-        let mut frames = vec![frame(0, "Active", None), frame(1, "Active", None), frame(2, "PostGoalScored", Some(1))];
+        let mut frames = vec![
+            frame(0, "Active", None),
+            frame(1, "Active", None),
+            frame(2, "PostGoalScored", Some(1)),
+        ];
         frames[0].team_scores = [value(9, 0), value(9, 0)]; // earlier scores are not the final ones
         frames[2].team_scores = [value(2, 2), value(1, 0)];
         let labels = header_labels(&replay(frames.clone()));
@@ -440,7 +477,10 @@ mod tests {
         assert_eq!(header_labels(&replay(frames.clone())).winning_team, None);
         frames[2].team_scores = [value(3, 2), None];
         let unknown = header_labels(&replay(frames.clone()));
-        assert_eq!((unknown.final_score, unknown.winning_team), ([Some(3), None], None));
+        assert_eq!(
+            (unknown.final_score, unknown.winning_team),
+            ([Some(3), None], None)
+        );
         frames[2].team_scores = [
             value(1, 2),
             Some(Value {
@@ -450,7 +490,10 @@ mod tests {
             }),
         ];
         let shutout = header_labels(&replay(frames));
-        assert_eq!(shutout.final_score_sources, [Some("replay"), Some("inferred_match_start")]);
+        assert_eq!(
+            shutout.final_score_sources,
+            [Some("replay"), Some("inferred_match_start")]
+        );
         assert_eq!(shutout.winning_team, Some(0));
         assert_eq!(header_labels(&replay(Vec::new())).final_score, [None, None]);
     }

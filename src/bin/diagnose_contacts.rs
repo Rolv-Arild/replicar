@@ -112,13 +112,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut car_ticks: BTreeMap<(i32, usize), Vec<(usize, i64)>> = BTreeMap::new();
         for (f, converted) in output.frames.iter().enumerate() {
             for lag in &converted.packet_lags {
-                if let (Some(actor), "chain") = (lag.actor_id, lag.source) {
-                    if let Some(car) = frames[f].cars.iter().find(|c| c.actor_id == actor) {
-                        car_ticks
-                            .entry((actor, car.actor_created_frame))
-                            .or_default()
-                            .push((f, tick(f) - lag.ticks as i64));
-                    }
+                if let (Some(actor), "chain") = (lag.actor_id, lag.source)
+                    && let Some(car) = frames[f].cars.iter().find(|c| c.actor_id == actor)
+                {
+                    car_ticks
+                        .entry((actor, car.actor_created_frame))
+                        .or_default()
+                        .push((f, tick(f) - lag.ticks as i64));
                 }
             }
         }

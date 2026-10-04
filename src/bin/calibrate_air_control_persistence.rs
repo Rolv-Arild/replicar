@@ -206,31 +206,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
                         if matches!(band, Some(0) | Some(1)) {
                             let m = earlier.controls[0].abs().max(earlier.controls[2].abs());
-                            if let Some(bin) = HOLD_EDGES.iter().position(|&edge| m < edge) {
-                                if earlier.controls[axis].abs() >= 0.1 {
-                                    let cell = &mut joint[axis][bin];
-                                    cell.1 += 1;
-                                    if (v * u) as f32 >= 0.5 * earlier.controls[axis].powi(2) {
-                                        cell.0 += 1;
-                                    }
+                            if let Some(bin) = HOLD_EDGES.iter().position(|&edge| m < edge)
+                                && earlier.controls[axis].abs() >= 0.1
+                            {
+                                let cell = &mut joint[axis][bin];
+                                cell.1 += 1;
+                                if (v * u) as f32 >= 0.5 * earlier.controls[axis].powi(2) {
+                                    cell.0 += 1;
                                 }
                             }
                         }
                         if let Some(band) = band {
                             let magnitude = earlier.controls[axis].abs();
                             if let Some(bin) = HOLD_EDGES.iter().position(|&edge| magnitude < edge)
+                                && magnitude >= 0.1
                             {
-                                if magnitude >= 0.1 {
-                                    let cell = &mut medians[axis][band][bin];
-                                    cell.0 += f64::from(magnitude);
-                                    cell.1.push(
-                                        later.controls[axis] * earlier.controls[axis].signum(),
-                                    );
-                                    let cell = &mut hold[axis][band][bin];
-                                    cell.1 += 1;
-                                    if (v * u) as f32 >= 0.5 * earlier.controls[axis].powi(2) {
-                                        cell.0 += 1;
-                                    }
+                                let cell = &mut medians[axis][band][bin];
+                                cell.0 += f64::from(magnitude);
+                                cell.1
+                                    .push(later.controls[axis] * earlier.controls[axis].signum());
+                                let cell = &mut hold[axis][band][bin];
+                                cell.1 += 1;
+                                if (v * u) as f32 >= 0.5 * earlier.controls[axis].powi(2) {
+                                    cell.0 += 1;
                                 }
                             }
                         }

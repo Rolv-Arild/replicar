@@ -288,7 +288,10 @@ pub fn apply_soccar_state_to_arena(
         crate::conversion::rebase_tick(ball.ds_info.last_damage_tick, source_tick, arena_tick);
     arena.set_ball_state(ball);
     for (index, (_, car)) in snapshot.cars.iter().enumerate() {
-        arena.set_car_state(index, crate::conversion::rebase_car_ticks(*car, source_tick, arena_tick));
+        arena.set_car_state(
+            index,
+            crate::conversion::rebase_car_ticks(*car, source_tick, arena_tick),
+        );
         arena.refresh_car_sticky_gate(index);
     }
     let mut max_pad_error = 0.0f32;
@@ -426,7 +429,13 @@ mod tests {
                 live.step_tick();
             }
             apply_soccar_state_to_arena(&snapshot, &mut live).unwrap();
-            live.set_car_controls(0, CarControls { throttle: 1.0, ..CarControls::default() });
+            live.set_car_controls(
+                0,
+                CarControls {
+                    throttle: 1.0,
+                    ..CarControls::default()
+                },
+            );
             let mut hit_tick = None;
             for tick in 1..=200 {
                 for event in live.step_tick() {
@@ -441,11 +450,17 @@ mod tests {
             panic!("the car never hit the ball");
         };
         let clean = ball_speed_after_hit(0, None, 0);
-        assert!(clean > 1500.0, "the probe hit should carry the extra impulse: {clean}");
+        assert!(
+            clean > 1500.0,
+            "the probe hit should carry the extra impulse: {clean}"
+        );
         // A hit at the snapshot's own tick, in a tick-0 arena and in one at tick 6000.
         for (source_tick, live_ticks) in [(5000, 0), (5000, 6000), (5000, 3)] {
             let speed = ball_speed_after_hit(source_tick, Some(source_tick), live_ticks);
-            assert!((speed - clean).abs() < 1.0, "source {source_tick}, live {live_ticks}: {speed} against {clean}");
+            assert!(
+                (speed - clean).abs() < 1.0,
+                "source {source_tick}, live {live_ticks}: {speed} against {clean}"
+            );
         }
         // The rebased tick keeps the age: a hit 2 ticks before the snapshot, in an arena at tick 10.
         let mut source = Arena::new(GameMode::Soccar);

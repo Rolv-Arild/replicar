@@ -7,7 +7,7 @@
 //! the packet of the tick being simulated (`next`: packet n+1+t) or the previous one (`same`: n+t).
 //! Separates physics and input-alignment error from what the converter has to infer.
 //!
-//! usage: rlbot_onestep <states.jsonl> [max_packets]
+//! usage: `rlbot_onestep <states.jsonl> [max_packets]`
 
 use std::collections::BTreeMap;
 use std::env;
@@ -280,7 +280,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             for (vi, variant) in variants.iter().enumerate() {
                 let start = &packets[n];
                 for (k, pl) in start.players.iter().enumerate() {
-                    let mut state = car_state(pl, jumping_run[n][k] + 1, handbrake[n][k], if track_boost { boosting_time[n][k] } else { 0.0 });
+                    let mut state = car_state(
+                        pl,
+                        jumping_run[n][k] + 1,
+                        handbrake[n][k],
+                        if track_boost {
+                            boosting_time[n][k]
+                        } else {
+                            0.0
+                        },
+                    );
                     state.is_demoed = pl.demolished;
                     arena.set_car_state(k, state);
                 }
@@ -327,15 +336,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .collect();
                     let handbrake = (0..=h).any(|t| packets[n + t].players[k].controls.handbrake);
                     let jump_label = format!("jump {}->{}", states[0], states[h]);
-                    let category = if states.iter().any(|&s| s == 3) {
+                    let category = if states.contains(&3) {
                         "flip"
-                    } else if states.iter().any(|&s| s == 1) {
+                    } else if states.contains(&1) {
                         if h == 1 {
                             jump_label.as_str()
                         } else {
                             "jump window"
                         }
-                    } else if states.iter().any(|&s| s == 2) {
+                    } else if states.contains(&2) {
                         "double jump"
                     } else if states.iter().all(|&s| s == 0) {
                         if handbrake {
@@ -388,7 +397,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     for group in [
                         "all".to_string(),
-                        if a.is_bot { "bot cars".to_string() } else { "human cars".to_string() },
+                        if a.is_bot {
+                            "bot cars".to_string()
+                        } else {
+                            "human cars".to_string()
+                        },
                         category.to_string(),
                         if near_car {
                             "near another car".to_string()

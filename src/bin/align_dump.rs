@@ -6,7 +6,7 @@
 //! found; the dump's tick grid is then `T0 + 4 j` on the replay timeline. Prints the matches, the
 //! consistency of T0, and how car packets compare with the dump's car state where the ticks coincide.
 //!
-//! usage: align_dump <replay> <dump.json>
+//! usage: `align_dump <replay> <dump.json>`
 
 use std::collections::BTreeMap;
 use std::env;

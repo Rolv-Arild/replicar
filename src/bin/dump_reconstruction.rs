@@ -7,7 +7,7 @@
 //! frame is compared with the dump's truth, split by whether the frame kept its packet, by frames since
 //! the last packet, and by the car's behaviour in the dump. K = 1 is the unthinned replay.
 //!
-//! usage: dump_reconstruction <replay> <dump.json> [--player name] [K...]
+//! usage: `dump_reconstruction <replay> <dump.json> [--player name] [K...]`
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -131,21 +131,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|p| p.key.clone())
         .ok_or("player not found in the replay")?;
 
-    let variants: [(&str, fn(&mut ConvertOptions)); 3] = [
+    let variants: [(&str, fn(&mut ConvertOptions)); 2] = [
         ("all fits", |_| {}),
-        ("no timing fits", |o| {
-            o.fit_ground_control_timing = false;
-            o.fit_jump_timing = false;
-            o.infer_dodge_start = false;
-            o.infer_flip_cancel = false;
-        }),
-        ("no fits, no lookahead controls", |o| {
-            o.fit_ground_control_timing = false;
-            o.fit_jump_timing = false;
-            o.infer_dodge_start = false;
-            o.infer_flip_cancel = false;
-            o.lookahead_ground_controls = false;
-        }),
+        ("no input timing fits", |o| o.input_fits = false),
     ];
 
     for &k in &ks {

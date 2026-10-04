@@ -45,13 +45,17 @@ fn ball_state(body: &crate::observations::Body, frame: usize) -> Option<BallStat
     let mut state = BallState::default();
     state.phys.pos = Vec3A::from(pos.value);
     state.phys.vel = Vec3A::from(vel.value);
-    if let Some(ang) = body.angular_velocity_replay_units.as_ref().filter(|v| v.frame == frame) {
+    if let Some(ang) = body
+        .angular_velocity_replay_units
+        .as_ref()
+        .filter(|v| v.frame == frame)
+    {
         state.phys.ang_vel = Vec3A::from(ang.value) * 0.01;
     }
-    if let Some(rot) = body.rotation_xyzw.as_ref().filter(|v| v.frame == frame) {
-        if let Some(q) = crate::conversion::quaternion(rot.value) {
-            state.phys.rot_mat = Mat3A::from_quat(q);
-        }
+    if let Some(rot) = body.rotation_xyzw.as_ref().filter(|v| v.frame == frame)
+        && let Some(q) = crate::conversion::quaternion(rot.value)
+    {
+        state.phys.rot_mat = Mat3A::from_quat(q);
     }
     Some(state)
 }
@@ -68,9 +72,13 @@ pub fn ball_intervals(
     let mut arena = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
     let frames = &observations.frames;
     let first_time = f64::from(frames.first().map_or(0.0, |f| f.time));
-    let timeline = |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
+    let timeline =
+        |frame: usize| ((f64::from(frames[frame].time) - first_time) * 120.0).round() as i64;
     let active = |frame: usize| {
-        frames[frame].game_state.as_ref().is_some_and(|s| s.value == "Active")
+        frames[frame]
+            .game_state
+            .as_ref()
+            .is_some_and(|s| s.value == "Active")
     };
     let fresh: Vec<usize> = (0..frames.len())
         .filter(|&f| {
@@ -106,17 +114,17 @@ pub fn ball_intervals(
         let window_hi = timeline(fb) - timeline(fa.saturating_sub(1));
         let lag_range = match (lags.ball[fa], lags.ball[fb]) {
             (Some(lag_a), Some(lag_b)) => {
-                let estimate = (timeline(fb) - lag_b.round() as i64) - (timeline(fa) - lag_a.round() as i64);
+                let estimate =
+                    (timeline(fb) - lag_b.round() as i64) - (timeline(fa) - lag_a.round() as i64);
                 Some((estimate - 1, estimate + 1, estimate))
             }
             _ => None,
         };
         let max_d = window_hi.max(lag_range.map_or(0, |r| r.1));
-        if max_d < 1 || max_d > 60 {
+        if !(1..=60).contains(&max_d) {
             continue;
         }
         arena.set_ball_state(a);
-        crate::conversion::reset_scratch_arena_contacts(&mut arena, None, options);
         let mut states: Vec<(f32, f32, [f32; 3])> = Vec::new(); // (velocity residual, position residual, position) per elapsed tick
         for _ in 1..=max_d {
             arena.step_tick();
@@ -133,12 +141,11 @@ pub fn ball_intervals(
                 .min_by(|x, y| x.1.total_cmp(&y.1))
         };
         let mut best = lag_range.and_then(|(lo, hi, _)| pick(lo, hi));
-        if best.is_none_or(|(_, v, _)| v > CONTACT_VELOCITY_THRESHOLD) {
-            if let Some(wide) = pick(window_lo, window_hi) {
-                if best.is_none_or(|(_, v, _)| wide.1 < v) {
-                    best = Some(wide);
-                }
-            }
+        if best.is_none_or(|(_, v, _)| v > CONTACT_VELOCITY_THRESHOLD)
+            && let Some(wide) = pick(window_lo, window_hi)
+            && best.is_none_or(|(_, v, _)| wide.1 < v)
+        {
+            best = Some(wide);
         }
         let Some((best_ticks, velocity_residual, position_residual)) = best else {
             continue;
@@ -220,12 +227,12 @@ mod tests {
             arena.set_ball_state(start);
             let mut states = vec![*arena.get_ball_state()];
             for tick in 1..=8 {
-                if tick == 3 {
-                    if let Some(kick) = kick {
-                        let mut b = *arena.get_ball_state();
-                        b.phys.vel += kick;
-                        arena.set_ball_state(b);
-                    }
+                if tick == 3
+                    && let Some(kick) = kick
+                {
+                    let mut b = *arena.get_ball_state();
+                    b.phys.vel += kick;
+                    arena.set_ball_state(b);
                 }
                 arena.step_tick();
                 states.push(*arena.get_ball_state());
@@ -235,7 +242,10 @@ mod tests {
         for (kick, expect_contact) in [(None, false), (Some(Vec3A::new(0.0, 600.0, 100.0)), true)] {
             let states = run(kick);
             // Packets at ticks 0 and 4 of an 8 tick timeline at 30 fps (4 ticks per frame).
-            let frames = vec![ball_frame(0, 0.0, &states[0]), ball_frame(1, 4.0 / 120.0, &states[4])];
+            let frames = vec![
+                ball_frame(0, 0.0, &states[0]),
+                ball_frame(1, 4.0 / 120.0, &states[4]),
+            ];
             let replay = ObservedReplay {
                 header: Header {
                     game_type: "TAGame.Replay_Soccar_TA".to_string(),
@@ -253,7 +263,11 @@ mod tests {
             let intervals = ball_intervals(&replay, &lags, &options).unwrap();
             assert_eq!(intervals.len(), 1);
             let contact = intervals[0].velocity_residual > CONTACT_VELOCITY_THRESHOLD;
-            assert_eq!(contact, expect_contact, "residual {}", intervals[0].velocity_residual);
+            assert_eq!(
+                contact, expect_contact,
+                "residual {}",
+                intervals[0].velocity_residual
+            );
         }
     }
 }

@@ -1,8 +1,8 @@
 # Replay to RocketSim plan
 
-Last updated: 2026-10-03. Status: Phase 0 complete; Phases 1–4 in progress; Phase 5 JSONL, direct Rust Parquet/Python loading, and exact detached soccar `ArenaState` restoration implemented. Live simulation continuation and replay-sized observation memory remain open.
+Last updated: 2026-10-04. Status: Phase 0 complete; Phases 1–4 in progress; Phase 5 JSONL, direct Rust Parquet/Python loading, and exact detached soccar `ArenaState` restoration implemented. Live simulation continuation and replay-sized observation memory remain open.
 
-Next action (2026-10-03): the single test-split assessment is done (tag `test-assessment-1` = `99f0a9d`; RESULTS 'Test-split assessment'): 60 of 60 convert, 7 of 84 rows outside their bands (within the null, p95 11), 0 ordering rules broken. Follow-ups, on train and validation only: (1) 1v1 masked car position at 1 frame, above its band on test (three of the seven misses); (2) contact intervals holding a simulated touch 80.9% on test against 85% in development; (3) the four outlier replays' causes may be read from their own data for the record, without tuning on them; (4) open ideas: re-anchor the run after a lag junction, advance a spawn-held car's pose kinematically, refuse or down-weight a weakly constrained ball-car offset. Any further test run is a second, labelled run. Needs the user, not blocking: a real online replay with a remote client and `include_boost_pads = true`. Earlier history of next actions is in the work log.
+Next action (2026-10-04): release 1.0.0 is cut from `cleanup-release` (RESULTS 'Release clean-up'): experiments removed (tag `pre-cleanup` keeps them), options from 63 to 22, `conversion/` split into modules, MIT license, README and `docs/output-format.md`, default output byte-identical. Follow-ups, on train and validation only: 1v1 masked car at 1 frame above its test band; contact recall 80.9% on test against 85%; re-anchor runs at lag junctions; advance a spawn-held car's pose; refuse or down-weight a weakly determined ball-car offset; optional: mode and mutator support as in VirxEC's converter. Needs the user: an online recording with a remote client and `include_boost_pads = true`.
 
 ## Goal and scope
 
@@ -297,6 +297,8 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-03 (test assessment): `TEST_PROTOCOL.md` approved by the user; tagged `test-assessment-1` (`99f0a9d`) and run once (RESULTS 'Test-split assessment'). Merged `audit-and-leftovers` into `master` (the 'happy' definition of 2026-10-02 met).
 
 - 2026-10-03 (after the test run): compared with the user's `rlgym-tools` converter and `rust-carball` (read-only); per-player ping measured against the fitted timing (explains part of the recorder's lead, no converter change; RESULTS 'Per-player ping'); export gained future-derived training labels (`labels` / `label_*`), the observed ping with its age, and freshness columns (fresh masks, update ages, packet ages in ticks); reviewed and merged into `master`. Action picking not ported (user decision).
+
+- 2026-10-04: RocketSim updated to `9910c58` (no change in error); release clean-up and 1.0.0 (RESULTS 'Release clean-up').
 
 ## Backlog (kept current; 2026-10-02)
 

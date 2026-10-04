@@ -143,7 +143,11 @@ fn object_name(replay: &Replay, id: i32) -> String {
         .unwrap_or_else(|| format!("<invalid object {id}>"))
 }
 
-fn collect_replays(root: &Path, paths: &mut Vec<PathBuf>, skipped: &mut Vec<PathBuf>) -> io::Result<()> {
+fn collect_replays(
+    root: &Path,
+    paths: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
@@ -192,7 +196,12 @@ pub fn audit_directory(root: &Path) -> io::Result<CorpusAudit> {
         attributes: BTreeMap::new(),
         skipped_sealed: skipped
             .iter()
-            .map(|path| path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/"))
+            .map(|path| {
+                path.strip_prefix(root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect(),
     };
 

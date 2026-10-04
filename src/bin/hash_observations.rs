@@ -1,7 +1,7 @@
 //! Print a hash of the extracted observations of every replay under the given directories, to check
 //! that a parser change (for example a `boxcars` pin update) leaves the observations unchanged.
 //!
-//! usage: hash_observations <dir>... (directories are searched recursively; also single files; refuses paths containing "test")
+//! usage: `hash_observations <dir>... (directories are searched recursively; also single files; refuses paths containing "test")`
 
 use std::error::Error;
 use std::fs;

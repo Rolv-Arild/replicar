@@ -7,7 +7,7 @@
 //! Also the players' names by key on the first line, and (unless `--no-lags`) the converter's inferred
 //! packet lags of each frame (`lags`: actor id or null for the ball, ticks, source).
 //!
-//! usage: dump_replay_packets <replay> <out.jsonl> [--no-lags]
+//! usage: `dump_replay_packets <replay> <out.jsonl> [--no-lags]`
 
 use std::env;
 use std::error::Error;
@@ -45,11 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let observed = extract(&replay).ok_or("no network frames")?;
     let with_lags = !env::args().any(|a| a == "--no-lags");
     let lags: Vec<Json> = if with_lags {
-        let mut options = ConvertOptions::default();
-        options.ball_car_lag_offset = std::env::var("LAG_MU").ok().and_then(|v| v.parse().ok());
-        options.ball_hit_chains = std::env::var_os("NO_BALL_HITS").is_none();
-        options.estimate_ball_car_lag_offset = std::env::var_os("NO_EST_MU").is_none();
-        options.detect_lag_free_replays = std::env::var_os("NO_LAG_FREE").is_none();
+        let options = ConvertOptions::default();
         let output = convert_observations(observed.clone(), &options)?;
         output
             .frames

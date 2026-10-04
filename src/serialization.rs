@@ -402,7 +402,9 @@ pub(crate) fn frame_json(
     labels: &crate::labels::FrameLabels,
     freshness: &crate::freshness::FrameFreshness,
 ) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(&frame_line(converted, observed, residuals, labels, freshness))
+    serde_json::to_vec(&frame_line(
+        converted, observed, residuals, labels, freshness,
+    ))
 }
 
 fn frame_line<'a>(

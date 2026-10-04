@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_tick_with_hit_impulse};
+use replay_to_rocketsim::conversion::{ConvertOptions, convert_bytes, step_arena_tick};
 use replay_to_rocketsim::observations::Body;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
@@ -113,8 +113,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|v| v.to_string_lossy().parse().ok())
         .unwrap_or(1.0);
     println!("ball_hit_extra_force_scale = {extra_scale}");
-    let apply_hit = !env::args_os().any(|arg| arg == "--no-apply-hit-impulse");
-    println!("apply reported extra hit impulse: {apply_hit}");
     rocketsim::init(Path::new("collision_meshes"), true)?;
     let mut arenas: BTreeMap<String, Arena> = BTreeMap::new();
     let mut ball_only = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
@@ -201,11 +199,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 };
                 let t = tick(cf) - lag;
-                if (tick_a - 1..=tick_a).contains(&t) {
-                    if let Some(p) = physics(&c.body, cf) {
-                        chosen = Some((c, p, tick_a - t));
-                        break;
-                    }
+                if (tick_a - 1..=tick_a).contains(&t)
+                    && let Some(p) = physics(&c.body, cf)
+                {
+                    chosen = Some((c, p, tick_a - t));
+                    break;
                 }
             }
             let Some((c, packet, stale)) = chosen else {
@@ -253,43 +251,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
             );
             for _ in 0..stale {
-                step_tick_with_hit_impulse(arena, apply_hit);
+                step_arena_tick(arena);
             }
             arena.set_ball_state(ball_state);
             let mut hit = false;
             for _ in 0..k {
-                for event in step_tick_with_hit_impulse(arena, apply_hit) {
+                for event in step_arena_tick(arena) {
                     hit |= matches!(event, ArenaEvent::CarHitBall(_));
                 }
             }
             let sim_velocity = arena.get_ball_state().phys.vel;
             // Also run on to the following ball packet, once the contact has finished.
             let mut later: Option<(f32, f32, f32)> = None;
-            if f + 1 < frames.len() {
-                if let (Some(lag_c), Some(ball_c)) =
+            if f + 1 < frames.len()
+                && let (Some(lag_c), Some(ball_c)) =
                     (lag_of(f + 1, None), frames[f + 1].ball.as_ref())
-                {
-                    if let Some(c_state) = physics(ball_c, f + 1) {
-                        let tick_c = tick(f + 1) - lag_c;
-                        let extra = tick_c - tick_b;
-                        if (1..=10).contains(&extra) {
-                            for _ in 0..extra {
-                                step_tick_with_hit_impulse(arena, apply_hit);
-                            }
-                            // ball-only reference from A to C
-                            ball_only.set_ball_state(ball_state);
-                            for _ in 0..(tick_c - tick_a) {
-                                ball_only.step_tick();
-                            }
-                            let free_c = ball_only.get_ball_state().phys.vel;
-                            let sim_c = arena.get_ball_state().phys.vel;
-                            later = Some((
-                                (sim_c - c_state.1).length(),
-                                (c_state.1 - free_c).length(),
-                                (sim_c - free_c).length(),
-                            ));
-                        }
+                && let Some(c_state) = physics(ball_c, f + 1)
+            {
+                let tick_c = tick(f + 1) - lag_c;
+                let extra = tick_c - tick_b;
+                if (1..=10).contains(&extra) {
+                    for _ in 0..extra {
+                        step_arena_tick(arena);
                     }
+                    // ball-only reference from A to C
+                    ball_only.set_ball_state(ball_state);
+                    for _ in 0..(tick_c - tick_a) {
+                        ball_only.step_tick();
+                    }
+                    let free_c = ball_only.get_ball_state().phys.vel;
+                    let sim_c = arena.get_ball_state().phys.vel;
+                    later = Some((
+                        (sim_c - c_state.1).length(),
+                        (c_state.1 - free_c).length(),
+                        (sim_c - free_c).length(),
+                    ));
                 }
             }
             if let Some((error_c, impulse_c, sim_impulse_c)) = later {
@@ -342,7 +338,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             for label in [
                 "all".to_string(),
-                format!("{air}"),
+                air.to_string(),
                 format!(
                     "ticks simulated {}",
                     if k <= 4 {
