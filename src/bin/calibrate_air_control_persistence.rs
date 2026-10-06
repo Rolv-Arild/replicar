@@ -13,8 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::Mat3A;
-use replicar::conversion::{quaternion, solve_span_air_controls};
-use replicar::{observations, parse_replay};
+use replicar_v1::conversion::{quaternion, solve_span_air_controls};
+use replicar_v1::{observations, parse_replay};
 
 const LAG_BIN: f32 = 1.0 / 30.0;
 const LAG_BINS: usize = 9;
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: calibrate_air_control_persistence <train replay or directory>")?,
     );
-    if replicar::sealed_path_refused(&path, false) {
+    if replicar_v1::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     // Optional second argument: restrict fitted spans to at most this long (seconds). Short spans

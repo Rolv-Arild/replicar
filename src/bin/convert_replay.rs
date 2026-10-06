@@ -4,10 +4,10 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use replicar::conversion::{ConvertOptions, convert_bytes};
-use replicar::parquet_export::write_parquet_with_tables;
-use replicar::parquet_tables::{TABLE_NAMES, table_path};
-use replicar::serialization::write_jsonl;
+use replicar_v1::conversion::{ConvertOptions, convert_bytes};
+use replicar_v1::parquet_export::write_parquet_with_tables;
+use replicar_v1::parquet_tables::{TABLE_NAMES, table_path};
+use replicar_v1::serialization::write_jsonl;
 
 /// `<dir>/.<stem>.partial-<pid>.<ext>` beside the output: the name an export is written under until it is
 /// complete (its record tables get `.<stem>.partial-<pid>.<table>.parquet` by `table_path`).
@@ -82,7 +82,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
-    let bytes = replicar::read_replay_file(&input, final_assessment)?;
+    let bytes = replicar_v1::read_replay_file(&input, final_assessment)?;
     // Everything is written under temporary names beside the output and published only when the whole export
     // succeeded: a failed run leaves an existing output (and its tables) as it was.
     let temp = temp_path(&output_path);

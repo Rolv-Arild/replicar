@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::Vec3A;
-use replicar::conversion::{ConvertOptions, convert_bytes};
+use replicar_v1::conversion::{ConvertOptions, convert_bytes};
 use rocketsim::{Arena, ArenaConfig, BallState, GameMode};
 use serde_json::Value;
 
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: align_dump <replay> <dump.json>")?,
     );
-    if replicar::sealed_path_refused(&replay_path, false) {
+    if replicar_v1::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new("collision_meshes"), true)?;

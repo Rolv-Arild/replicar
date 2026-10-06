@@ -1,17 +1,16 @@
-[package]
-name = "replicar"
-version = "1.0.1"
+[workspace]
+members = [".", "crates/replicar-format", "crates/replicar", "crates/replicar-eval"]
+# Archived baselines under target/, reference projects under external/ and the measurement crates under scripts/
+# build on their own.
+exclude = ["target", "external", "scripts"]
+resolver = "3"
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.97"
-description = "Converts Rocket League replays into RocketSim game states per network frame, with the scoreboard, controls, events and provenance"
 license = "MIT"
-readme = "README.md"
-keywords = ["rocket-league", "rocketsim", "replay", "simulation"]
-categories = ["simulation", "parser-implementations"]
-# v1 is not published; v2 will be (docs/v2-plan.md).
-publish = false
 
-[dependencies]
+[workspace.dependencies]
 arrow-array = "=60.0.0"
 arrow-schema = "=60.0.0"
 boxcars = "=0.12.0"
@@ -21,6 +20,39 @@ rocketsim = "=0.2.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+thiserror = "2"
+
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+
+# v1, the converter of releases 1.x. It stays at the root, building and tested, until v2 replaces it: v2 is
+# compared with it stage by stage (docs/v2-plan.md, section 5). Its library is `replicar_v1`, so that v2's can be
+# `replicar`.
+[package]
+name = "replicar-v1"
+version = "1.0.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Converts Rocket League replays into RocketSim game states per network frame, with the scoreboard, controls, events and provenance"
+license.workspace = true
+readme = "README.md"
+keywords = ["rocket-league", "rocketsim", "replay", "simulation"]
+categories = ["simulation", "parser-implementations"]
+publish = false
+
+[lib]
+name = "replicar_v1"
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+boxcars.workspace = true
+glam.workspace = true
+parquet.workspace = true
+rocketsim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [lints.clippy]
 # Frame-indexed loops read several parallel per-frame arrays at the same index.

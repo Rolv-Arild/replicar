@@ -16,8 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replicar::conversion::{ConvertOptions, convert_bytes, step_arena_tick};
-use replicar::observations::Body;
+use replicar_v1::conversion::{ConvertOptions, convert_bytes, step_arena_tick};
+use replicar_v1::observations::Body;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
 };
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: diagnose_contact_model <train dir or replay>")?,
     );
-    if replicar::sealed_path_refused(&path, false) {
+    if replicar_v1::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let options = ConvertOptions::default();

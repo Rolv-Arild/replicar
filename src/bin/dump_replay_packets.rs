@@ -15,8 +15,8 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-use replicar::conversion::{ConvertOptions, convert_observations};
-use replicar::observations::{Value, extract};
+use replicar_v1::conversion::{ConvertOptions, convert_observations};
+use replicar_v1::observations::{Value, extract};
 use serde_json::{Value as Json, json};
 
 fn stamped<T: serde::Serialize>(v: &Option<Value<T>>) -> Json {
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: dump_replay_packets <replay> <out>")?,
     );
-    if replicar::sealed_path_refused(&replay_path, false) {
+    if replicar_v1::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let replay = boxcars::ParserBuilder::new(&fs::read(&replay_path)?)

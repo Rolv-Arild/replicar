@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use glam::{Mat3A, Vec3A};
-use replicar::conversion::step_arena_tick;
+use replicar_v1::conversion::step_arena_tick;
 use rocketsim::{
     Arena, ArenaConfig, ArenaEvent, BallState, CarBodyConfig, CarControls, CarState, GameMode, Team,
 };

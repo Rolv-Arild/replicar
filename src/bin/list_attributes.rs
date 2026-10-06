@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .split(',')
         .map(|p| p.to_lowercase())
         .collect();
-    if replicar::sealed_path_refused(std::path::Path::new(&path), false) {
+    if replicar_v1::sealed_path_refused(std::path::Path::new(&path), false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let trace = args.next().is_some_and(|a| a == "--trace");

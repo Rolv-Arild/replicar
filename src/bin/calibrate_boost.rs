@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replicar::{observations, parse_replay};
+use replicar_v1::{observations, parse_replay};
 
 fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
     for entry in fs::read_dir(root)? {
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     paths.sort();
     let mut by_transition = std::array::from_fn::<_, 4, _>(|_| Counts::default());
     for path in &paths {
-        let replay = parse_replay(&replicar::read_replay_file(
+        let replay = parse_replay(&replicar_v1::read_replay_file(
             std::path::Path::new(&path),
             false,
         )?)?;

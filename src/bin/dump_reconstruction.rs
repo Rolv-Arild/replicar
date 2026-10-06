@@ -16,8 +16,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use glam::{Mat3A, Vec3A};
-use replicar::conversion::{ConvertOptions, convert_observations};
-use replicar::observations::{Body, extract};
+use replicar_v1::conversion::{ConvertOptions, convert_observations};
+use replicar_v1::observations::{Body, extract};
 use serde_json::Value;
 
 fn vec3(v: &Value, keys: [&str; 3]) -> Vec3A {
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let replay_path = PathBuf::from(args.remove(0));
     let dump_path = PathBuf::from(args.remove(0));
-    if replicar::sealed_path_refused(&replay_path, false) {
+    if replicar_v1::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let mut player_name = "Vync62".to_string();

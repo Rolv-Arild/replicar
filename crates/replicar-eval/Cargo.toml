@@ -1,0 +1,20 @@
+[package]
+name = "replicar-eval"
+version = "2.0.0-dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Evaluation and parity tools for replicar: v2 against v1, and the evaluation protocol"
+publish = false
+
+[dependencies]
+boxcars.workspace = true
+replicar = { path = "../replicar" }
+# v1, kept at the repository root until v2 replaces it, is the oracle every v2 stage is compared with
+# (docs/v2-plan.md, section 5).
+replicar-v1 = { path = "../.." }
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

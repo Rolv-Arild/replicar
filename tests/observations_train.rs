@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replicar::{observations, parse_replay};
+use replicar_v1::{observations, parse_replay};
 
 fn collect(root: &Path, paths: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(root).unwrap() {

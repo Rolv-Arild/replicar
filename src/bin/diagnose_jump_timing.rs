@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replicar::conversion::{ConvertOptions, convert_bytes};
+use replicar_v1::conversion::{ConvertOptions, convert_bytes};
 use rocketsim::{Arena, ArenaConfig, CarBodyConfig, CarControls, CarState, GameMode, Team};
 
 fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: diagnose_jump_timing <train dir or replay> [max events]")?,
     );
-    if replicar::sealed_path_refused(&path, false) {
+    if replicar_v1::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let max_events: usize = env::args_os()
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     continue;
                 }
                 let packet_at =
-                    |f: usize| -> Option<(Packet, CarState, &replicar::observations::Car)> {
+                    |f: usize| -> Option<(Packet, CarState, &replicar_v1::observations::Car)> {
                         let c = frames[f].cars.iter().find(|c| {
                             c.actor_id == car.actor_id
                                 && c.actor_created_frame == car.actor_created_frame

@@ -193,7 +193,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .next()
         .and_then(|a| a.parse().ok())
         .unwrap_or(usize::MAX);
-    if replicar::sealed_path_refused(&path, false) {
+    if replicar_v1::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new("collision_meshes"), true)?;

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use replicar::conversion::{ConvertOptions, convert_bytes};
+use replicar_v1::conversion::{ConvertOptions, convert_bytes};
 
 #[test]
 fn one_replay_per_train_game_size_converts_to_finite_states() {

@@ -15,8 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::{Mat3A, Quat, Vec3A};
-use replicar::conversion::rotation_error_degrees;
-use replicar::{observations, parse_replay};
+use replicar_v1::conversion::rotation_error_degrees;
+use replicar_v1::{observations, parse_replay};
 use rocketsim::{Arena, ArenaConfig, BallState, GameMode};
 
 fn replay_paths(path: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .nth(1)
             .ok_or("usage: audit_tick_integrality <train dir or replay>")?,
     );
-    if replicar::sealed_path_refused(&path, false) {
+    if replicar_v1::sealed_path_refused(&path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     rocketsim::init(Path::new("collision_meshes"), true)?;

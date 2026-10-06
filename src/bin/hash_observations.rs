@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use replicar::observations::extract;
+use replicar_v1::observations::extract;
 use sha2::{Digest, Sha256};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -25,7 +25,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut files = Vec::new();
     for dir in std::env::args().skip(1) {
-        if replicar::sealed_path_refused(std::path::Path::new(&dir), false) {
+        if replicar_v1::sealed_path_refused(std::path::Path::new(&dir), false) {
             return Err("refusing to inspect a path containing 'test'".into());
         }
         let path = Path::new(&dir);

@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use glam::Vec3A;
-use replicar::observations::extract;
+use replicar_v1::observations::extract;
 use serde_json::Value;
 
 fn quantile(values: &mut [f32], q: f64) -> f32 {
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.next()
             .ok_or("usage: align_rlbot <replay> <states.jsonl>")?,
     );
-    if replicar::sealed_path_refused(&replay_path, false) {
+    if replicar_v1::sealed_path_refused(&replay_path, false) {
         return Err("refusing to inspect a path containing 'test'".into());
     }
     let replay = boxcars::ParserBuilder::new(&fs::read(&replay_path)?)
