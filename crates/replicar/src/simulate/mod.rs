@@ -14,9 +14,10 @@ use replicar_format::{FrameIndex, PlayerIndex};
 use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, DemoMode, GameMode};
 
 pub use players::SimPlayer;
+pub(crate) use updates::{dodge_torque, network_controls};
 
 use crate::decode::{ActorId, CarLife, GameState, NetworkCar, NetworkFrame, NetworkReplay};
-use crate::infer::{AirSchedule, Inference};
+use crate::infer::{AirSchedule, GroundSchedule, Inference};
 use crate::update_ticks::UpdateTicks;
 use crate::{Error, Meshes};
 use car::CarTrack;
@@ -106,6 +107,29 @@ pub struct FittedInput {
 pub enum FittedKind {
     /// Air controls solved tick by tick for `span_ticks` ticks.
     Air { span_ticks: u64 },
+    /// A jump press.
+    Jump,
+    /// A dodge press with its direction and pitch cancel; `activation_frame` is the frame whose dodge counter
+    /// turned odd.
+    Dodge {
+        pitch: f32,
+        yaw: f32,
+        cancel: f32,
+        activation_frame: usize,
+    },
+}
+
+/// A dodge to press: jump with the direction at `start_tick`, then the pitch cancel until `end_tick`; `base`
+/// carries the other controls.
+#[derive(Debug, Clone, Copy)]
+struct PendingDodge {
+    player: PlayerIndex,
+    start_tick: u64,
+    end_tick: u64,
+    pitch: f32,
+    yaw: f32,
+    cancel: f32,
+    base: rocketsim::CarControls,
 }
 
 /// The simulation at one replay frame.
@@ -216,6 +240,9 @@ struct Simulator<'a, 'i> {
     holds: Holds,
     /// The air schedules being flown.
     air_schedules: Vec<AirSchedule>,
+    /// The ground schedules being driven, and the dodges to press.
+    ground_schedules: Vec<(PlayerIndex, GroundSchedule)>,
+    pending_dodges: Vec<PendingDodge>,
     pads: Pads,
     diagnostics: SimDiagnostics,
     first_time: f32,
@@ -257,6 +284,8 @@ pub fn simulate(
         cars: HashMap::new(),
         holds: Holds::default(),
         air_schedules: Vec::new(),
+        ground_schedules: Vec::new(),
+        pending_dodges: Vec::new(),
         pads,
         diagnostics: SimDiagnostics::default(),
         first_time: network.frames.first().map_or(0.0, |frame| frame.time),
@@ -339,7 +368,7 @@ impl<'a> Simulator<'a, '_> {
         let mut interval = Interval {
             span,
             remaining: span,
-            switches: self.switches(&frame_cars, span, gap, withheld),
+            switches: self.switches(&frame_cars, f, replay_tick, span, gap, withheld),
             next_switch: 0,
         };
         let mut events = Vec::new();
@@ -389,16 +418,22 @@ impl<'a> Simulator<'a, '_> {
         }
     }
 
-    /// A car update's ticks before its frame: its own chain's, else the frame's median car, else half the
-    /// window.
+    /// A car update's ticks before its frame: a fit's, else its own chain's, else the frame's median car, else
+    /// half the window.
     fn car_ticks(&self, car: &NetworkCar, f: usize, simulated: bool, gap: u64) -> u64 {
         match (self.ticks, simulated) {
-            (Some(ticks), true) => ticks
-                .cars
-                .get(&(car.life, FrameIndex(f as u32)))
-                .copied()
-                .or(ticks.car_median[f])
-                .map_or(gap / 2, u64::from)
+            (Some(ticks), true) => self
+                .inference
+                .ticks_override(car.life, f)
+                .or_else(|| {
+                    ticks
+                        .cars
+                        .get(&(car.life, FrameIndex(f as u32)))
+                        .copied()
+                        .or(ticks.car_median[f])
+                        .map(u64::from)
+                })
+                .unwrap_or(gap / 2)
                 .min(gap),
             _ => 0,
         }
@@ -441,7 +476,9 @@ impl<'a> Simulator<'a, '_> {
             {
                 continue;
             }
-            let source = if ticks.cars.contains_key(&(car.life, frame.index)) {
+            let source = if self.inference.ticks_override(car.life, f).is_some() {
+                TickSource::DodgeFit
+            } else if ticks.cars.contains_key(&(car.life, frame.index)) {
                 TickSource::Chain
             } else if ticks.car_median[f].is_some() {
                 TickSource::FrameMedian
@@ -458,10 +495,14 @@ impl<'a> Simulator<'a, '_> {
     }
 
     /// When each car's network controls take effect inside the interval: controls first seen at this frame
-    /// act from `gap / 2 - 2` ticks in (a change takes about as long to be seen as a frame lasts).
+    /// act from `gap / 2 - 2` ticks in (a change takes about as long to be seen as a frame lasts). A car with a
+    /// fitted control shift has the controls of the frames around this one, each moved by the shift from that
+    /// rule: the latest in effect at the interval's start applies from its start, the later ones when due.
     fn switches(
         &self,
         cars: &[&'a NetworkCar],
+        f: usize,
+        replay_tick: u64,
         span: u64,
         gap: u64,
         withheld: bool,
@@ -469,10 +510,41 @@ impl<'a> Simulator<'a, '_> {
         if self.ticks.is_none() || span == 0 || withheld {
             return Vec::new();
         }
-        let mut switches: Vec<(u64, &NetworkCar)> = cars
-            .iter()
-            .map(|&car| ((gap / 2).saturating_sub(2).min(span), car))
-            .collect();
+        let frames = &self.network.frames;
+        let first_time = f64::from(self.first_time);
+        let tick_of = |x: usize| ((f64::from(frames[x].time) - first_time) * 120.0).round() as i64;
+        let interval_start = replay_tick as i64 - gap as i64;
+        let mut switches: Vec<(u64, &'a NetworkCar)> = Vec::new();
+        for &car in cars {
+            let Some(shift) = self.inference.control_shift(car.life) else {
+                switches.push(((gap / 2).saturating_sub(2).min(span), car));
+                continue;
+            };
+            let mut in_effect: Option<&'a NetworkCar> = None;
+            let mut later: Vec<(u64, &'a NetworkCar)> = Vec::new();
+            // The frames whose switch can fall in this interval: further back the larger the shift.
+            let back = 4 + shift.unsigned_abs() as usize / 3;
+            for g in f.saturating_sub(back)..=(f + 4).min(frames.len() - 1) {
+                let Some(other) = frames[g].cars.iter().find(|c| c.life == car.life) else {
+                    continue;
+                };
+                let spacing = if g == 0 {
+                    4
+                } else {
+                    tick_of(g) - tick_of(g - 1)
+                };
+                let switch = tick_of(g) - 2 - spacing / 2 + shift - interval_start;
+                if switch < 0 {
+                    in_effect = Some(other);
+                } else if switch as u64 <= span {
+                    later.push((switch as u64, other));
+                }
+            }
+            if let Some(other) = in_effect {
+                switches.push((0, other));
+            }
+            switches.extend(later);
+        }
         switches.sort_by_key(|(switch, _)| *switch);
         switches
     }
@@ -511,10 +583,15 @@ impl<'a> Simulator<'a, '_> {
         }
     }
 
-    /// Steps `ticks` ticks, flying the air schedules, then limits the reported velocities.
+    /// Steps `ticks` ticks, driving the air and ground schedules and pressing the pending dodges, then limits
+    /// the reported velocities.
     fn step(&mut self, ticks: u64, events: &mut Vec<SimEvent>) {
         for _ in 0..ticks {
             let sim_tick = self.arena.tick_count() + 1;
+            self.pending_dodges
+                .retain(|dodge| dodge.end_tick >= sim_tick);
+            self.ground_schedules
+                .retain(|(_, schedule)| schedule.end_tick >= sim_tick);
             self.air_schedules
                 .retain(|schedule| schedule.end_tick >= sim_tick);
             for schedule in &self.air_schedules {
@@ -535,6 +612,8 @@ impl<'a> Simulator<'a, '_> {
                 controls.roll = air.roll;
                 self.arena.set_car_controls(slot, controls);
             }
+            self.drive_ground_schedules(sim_tick);
+            self.press_dodges(sim_tick);
             events.extend(
                 self.arena
                     .step_tick()
@@ -544,6 +623,74 @@ impl<'a> Simulator<'a, '_> {
             );
         }
         updates::limit_velocities(&mut self.arena, self.players.len());
+    }
+
+    /// The ground schedules' controls at `sim_tick`; from its press tick a pending dodge drives the car.
+    fn drive_ground_schedules(&mut self, sim_tick: u64) {
+        for (player, schedule) in &self.ground_schedules {
+            if self
+                .pending_dodges
+                .iter()
+                .any(|dodge| dodge.player == *player && sim_tick >= dodge.start_tick)
+            {
+                continue;
+            }
+            let Some(entry) = schedule.entries.iter().rev().find(|e| e.0 <= sim_tick) else {
+                continue;
+            };
+            let slot = player.get();
+            let mut controls = *self.arena.get_car_controls(slot);
+            controls.throttle = entry.1;
+            controls.steer = entry.2;
+            controls.handbrake = entry.3;
+            controls.boost = entry.4;
+            if let Some(jump) = entry.5 {
+                controls.jump = jump;
+            }
+            self.arena.set_car_controls(slot, controls);
+        }
+    }
+
+    /// The pending dodges at `sim_tick`: jump released before the press (so the press is a new edge), jump with
+    /// the direction on the press tick, then the pitch cancel. An air schedule solved around the dodge owns the
+    /// controls except on the press tick.
+    fn press_dodges(&mut self, sim_tick: u64) {
+        for dodge in &self.pending_dodges {
+            let slot = dodge.player.get();
+            if sim_tick != dodge.start_tick
+                && self.air_schedules.iter().any(|s| s.player == dodge.player)
+            {
+                if sim_tick < dodge.start_tick {
+                    let mut current = *self.arena.get_car_controls(slot);
+                    current.jump = false;
+                    self.arena.set_car_controls(slot, current);
+                }
+                continue;
+            }
+            let mut controls = dodge.base;
+            controls.jump = false;
+            if sim_tick < dodge.start_tick {
+                // A ground schedule of the same car sets the jump input itself.
+                if !self
+                    .ground_schedules
+                    .iter()
+                    .any(|(p, _)| *p == dodge.player)
+                {
+                    self.arena.set_car_controls(slot, controls);
+                }
+            } else if sim_tick == dodge.start_tick {
+                controls.jump = true;
+                controls.pitch = dodge.pitch;
+                controls.yaw = dodge.yaw;
+                // The dodge direction is (-pitch, yaw + roll): a roll left in `base` would turn it.
+                controls.roll = 0.0;
+                self.arena.set_car_controls(slot, controls);
+            } else {
+                let sign = self.arena.get_car_state(slot).flip_rel_torque.y.signum();
+                controls.pitch = dodge.cancel * sign;
+                self.arena.set_car_controls(slot, controls);
+            }
+        }
     }
 
     fn update_ball(&mut self, ctx: &mut FrameContext, body: &crate::decode::NetworkBody) {

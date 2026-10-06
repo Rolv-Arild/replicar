@@ -9,9 +9,9 @@ use super::updates::{
     apply_update, dodge_impulse_unseen, dodge_torque, jump_impulse_unseen, network_controls,
     zero_sleeping_velocity,
 };
-use super::{FittedKind, FrameContext, HoldSource, Simulator};
+use super::{FittedKind, FrameContext, HoldSource, PendingDodge, Simulator};
 use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkValue};
-use crate::infer::AirScheduleQuery;
+use crate::infer::{AirScheduleQuery, FitQuery, PressInFlight};
 
 /// What the simulation keeps per car life.
 #[derive(Debug, Clone, Default)]
@@ -76,19 +76,142 @@ impl Simulator<'_, '_> {
             state.boost = boost.value;
             dirty = true;
         }
-        let (press, changed) = self.actions(ctx, car, &mut state, new_life);
+        let (press, changed) = self.actions(ctx, car, &mut state, new_life, player);
         dirty |= changed;
         if dirty {
             self.arena.set_car_state(slot, state);
             // RocketSim asks for this after teleporting a car mid-drive.
             self.arena.refresh_car_sticky_gate(slot);
         }
-        let controls = self.controls(ctx, car, &state, new_life, &press);
+        let (controls, airborne) = self.controls(ctx, car, &state, new_life, &press, player);
+        if airborne
+            && !press.jump
+            && !state.is_flipping
+            && ctx.in_play
+            && !new_life
+            && !self.dodge_pending(player)
+        {
+            self.plan_dodge(ctx, car, player, &state, &controls);
+        }
+        // The jump control at the end of the previous interval: a ground schedule's presses are rising edges
+        // from it.
+        let previous_jump = self.arena.get_car_controls(slot).jump;
         self.arena.set_car_controls(slot, controls);
         let updated_now = car.body.position.as_ref().is_some_and(|p| p.frame == frame);
         if ctx.simulated && ctx.in_play && !new_life && !press.jump && updated_now {
             self.plan_air(ctx, car, player);
         }
+        if ctx.simulated && !new_life && updated_now {
+            self.plan_ground(ctx, car, player, &controls, previous_jump);
+        }
+    }
+
+    fn dodge_pending(&self, player: PlayerIndex) -> bool {
+        self.pending_dodges
+            .iter()
+            .any(|dodge| dodge.player == player)
+    }
+
+    /// What every fit question carries.
+    fn fit_query<'q>(
+        &self,
+        ctx: &FrameContext,
+        car: &'q NetworkCar,
+        player: PlayerIndex,
+        state: &'q rocketsim::CarState,
+        controls: &'q CarControls,
+        new_life: bool,
+    ) -> FitQuery<'q> {
+        FitQuery {
+            index: ctx.index.get(),
+            car,
+            state,
+            controls,
+            ticks_before: self.car_ticks(car, ctx.index.get(), ctx.simulated, ctx.gap),
+            now: self.arena.tick_count(),
+            ball: *self.arena.get_ball_state(),
+            hitbox: self.players.players[player.get()].hitbox,
+            in_play: ctx.in_play,
+            new_life,
+        }
+    }
+
+    /// Queues a fitted dodge press and records it.
+    fn queue_dodge(
+        &mut self,
+        ctx: &mut FrameContext,
+        player: PlayerIndex,
+        plan: &crate::infer::DodgePlan,
+        base: CarControls,
+    ) {
+        let now = self.arena.tick_count();
+        ctx.fitted.push((
+            player,
+            now + plan.start_offset,
+            FittedKind::Dodge {
+                pitch: plan.pitch,
+                yaw: plan.yaw,
+                cancel: plan.cancel,
+                activation_frame: plan.activation_frame,
+            },
+        ));
+        self.pending_dodges.push(PendingDodge {
+            player,
+            start_tick: now + plan.start_offset,
+            end_tick: now + plan.duration,
+            pitch: plan.pitch,
+            yaw: plan.yaw,
+            cancel: plan.cancel,
+            base,
+        });
+    }
+
+    /// A fitted dodge start for an airborne car about to dodge.
+    fn plan_dodge(
+        &mut self,
+        ctx: &mut FrameContext,
+        car: &NetworkCar,
+        player: PlayerIndex,
+        state: &CarState,
+        controls: &CarControls,
+    ) {
+        let query = self.fit_query(ctx, car, player, state, controls, false);
+        if let Some(plan) = self.inference.dodge_start(&query) {
+            self.queue_dodge(ctx, player, &plan, *controls);
+        }
+    }
+
+    /// Replaces the car's ground schedule with a fitted one: control timing, else a jump, else a jump and the
+    /// dodge after it.
+    fn plan_ground(
+        &mut self,
+        ctx: &mut FrameContext,
+        car: &NetworkCar,
+        player: PlayerIndex,
+        controls: &CarControls,
+        previous_jump: bool,
+    ) {
+        self.ground_schedules.retain(|(p, _)| *p != player);
+        let state = *self.arena.get_car_state(player.get());
+        let pending = self.dodge_pending(player);
+        let query = self.fit_query(ctx, car, player, &state, controls, false);
+        let Some(choice) = self.inference.ground_schedule(&query, pending) else {
+            return;
+        };
+        if let Some(plan) = &choice.dodge {
+            self.queue_dodge(ctx, player, plan, *controls);
+        }
+        // Each press of the schedule is a rising edge of the jump control.
+        let mut jumping = previous_jump;
+        for entry in &choice.schedule.entries {
+            if let Some(jump) = entry.5 {
+                if jump && !jumping {
+                    ctx.fitted.push((player, entry.0, FittedKind::Jump));
+                }
+                jumping = jump;
+            }
+        }
+        self.ground_schedules.push((player, choice.schedule));
     }
 
     /// Replaces the car's air schedule with one to its next update, when the inference has one.
@@ -103,9 +226,34 @@ impl Simulator<'_, '_> {
             state: &state,
             ticks_before: self.car_ticks(car, ctx.index.get(), ctx.simulated, ctx.gap),
             player,
+            hitbox: self.players.players[player.get()].hitbox,
             now,
         };
-        if let Some(schedule) = self.inference.air_schedule(&query) {
+        let press = self
+            .pending_dodges
+            .iter()
+            .find(|d| d.player == player && d.start_tick > now)
+            .map(|d| PressInFlight {
+                start_tick: d.start_tick,
+                pitch: d.pitch,
+                yaw: d.yaw,
+            });
+        if let Some((schedule, shift)) = self.inference.air_schedule(&query, press) {
+            if shift != 0 {
+                // The solution moved the flip's start: a pending press by the shift, a flip under way by its
+                // flip time.
+                if let Some(d) = self
+                    .pending_dodges
+                    .iter_mut()
+                    .find(|d| d.player == player && d.start_tick > now)
+                {
+                    d.start_tick = (d.start_tick as i64 + i64::from(shift)) as u64;
+                } else if state.is_flipping {
+                    let mut adjusted = state;
+                    adjusted.flip_time = (adjusted.flip_time + shift as f32 / 120.0).max(0.0);
+                    self.arena.set_car_state(player.get(), adjusted);
+                }
+            }
             ctx.fitted.push((
                 player,
                 now,
@@ -287,11 +435,13 @@ impl Simulator<'_, '_> {
         car: &NetworkCar,
         state: &mut CarState,
         new_life: bool,
+        player: PlayerIndex,
     ) -> (Press, bool) {
         let frame = ctx.index;
         let mut press = Press::default();
         let mut dirty = false;
-        let pending_dodge = false;
+        let pending_dodge = self.dodge_pending(player);
+        let handled = self.inference.dodge_handled(car.life, frame.get());
         let track = self.cars.entry(car.life).or_default();
         let fresh = |value: &Option<NetworkValue<u8>>| {
             value.as_ref().filter(|v| v.frame == frame).map(|v| v.value)
@@ -305,7 +455,10 @@ impl Simulator<'_, '_> {
             if activated && torque.is_some() {
                 self.diagnostics.dodge_activations += 1;
             }
-            if activated && let Some([tx, ty, _]) = torque {
+            if activated
+                && !handled
+                && let Some([tx, ty, _]) = torque
+            {
                 let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
                 if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
                     if dodge_impulse_unseen(car, frame, state) {
@@ -407,7 +560,8 @@ impl Simulator<'_, '_> {
         state: &CarState,
         new_life: bool,
         press: &Press,
-    ) -> CarControls {
+        player: PlayerIndex,
+    ) -> (CarControls, bool) {
         let frame = ctx.index;
         let mut controls = network_controls(car);
         let track = self.cars.entry(car.life).or_default();
@@ -432,6 +586,10 @@ impl Simulator<'_, '_> {
             controls.roll = air.roll;
             air_controls_applied = true;
         }
+        let query = self.fit_query(ctx, car, player, state, &controls, new_life);
+        if let Some(pitch) = self.inference.flip_pitch(&query, airborne, press.jump) {
+            controls.pitch = pitch;
+        }
         if !air_controls_applied && airborne {
             if controls.handbrake {
                 controls.roll = controls.steer;
@@ -446,6 +604,6 @@ impl Simulator<'_, '_> {
             // The dodge direction is (-pitch, yaw + roll): a roll left over would turn it.
             controls.roll = 0.0;
         }
-        controls
+        (controls, airborne)
     }
 }

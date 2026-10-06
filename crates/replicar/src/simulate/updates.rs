@@ -90,7 +90,7 @@ pub(super) fn zero_sleeping_velocity(
 
 /// The controls the network values say: throttle, steer and handbrake, boost and jump from their action
 /// counters (odd while active). Pitch, yaw and roll are not in the replay.
-pub(super) fn network_controls(car: &NetworkCar) -> CarControls {
+pub(crate) fn network_controls(car: &NetworkCar) -> CarControls {
     let inputs = &car.inputs;
     CarControls {
         throttle: inputs.throttle.as_ref().map_or(0.0, |v| v.value),
@@ -136,7 +136,7 @@ pub(super) fn dodge_impulse_unseen(car: &NetworkCar, frame: FrameIndex, state: &
 /// when it changes (a dodge in the same direction as the last has an old stamp: 22% of activations on a host
 /// replay), and it can arrive a frame after the counter: the value visible a frame later is the one in
 /// effect, unless the car has no later frame.
-pub(super) fn dodge_torque(
+pub(crate) fn dodge_torque(
     frames: &[NetworkFrame],
     g: usize,
     car: &NetworkCar,

@@ -336,6 +336,8 @@ pub fn simulated_frame_v2(frame: &replicar::simulate::SimulatedFrame) -> serde_j
         "updated_players": frame.updated_players.iter().map(|p| usize::from(p.0)).collect::<Vec<_>>(),
         "fitted": frame.fitted.iter().map(|f| match f.kind {
             replicar::simulate::FittedKind::Air { span_ticks } => format!("{} air {} {:?}", f.player.0, f.replay_tick, Some(span_ticks)),
+            replicar::simulate::FittedKind::Jump => format!("{} jump {} 0 0 0 0", f.player.0, f.replay_tick),
+            replicar::simulate::FittedKind::Dodge { pitch, yaw, cancel, activation_frame } => format!("{} dodge {} {pitch} {yaw} {cancel} {activation_frame}", f.player.0, f.replay_tick),
         }).collect::<Vec<_>>(),
     })
 }
@@ -350,7 +352,7 @@ pub fn simulation_v1(summary: &replicar_v1::conversion::ConversionSummary) -> se
             d.cars_started_from_spawn_trajectory, d.goal_explosion_demolitions, d.dead_shells_inferred,
             d.dead_shells_after_demolition, d.dead_shells_released, d.sleeping_ball_packets, d.shadowed_car_frames,
             d.ball_lag_frames, d.car_lag_frames, d.dodge_activations],
-        "inference": [d.air_bvp_planned, d.air_bvp_refused],
+        "inference": [d.air_bvp_planned, d.air_bvp_refused, d.dodge_starts_fitted],
     })
 }
 
@@ -367,6 +369,6 @@ pub fn simulation_v2(
             d.cars_started_from_spawn_pose, d.goal_explosion_demolitions, d.wrecks_inferred,
             d.wrecks_after_demolition, d.wrecks_released, d.sleeping_ball_updates, d.shadowed_car_frames,
             d.ball_tick_frames, d.car_tick_frames, d.dodge_activations],
-        "inference": [inference.air_schedules_planned, inference.air_schedules_refused],
+        "inference": [inference.air_schedules_planned, inference.air_schedules_refused, inference.dodge_starts_fitted],
     })
 }

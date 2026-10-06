@@ -9,6 +9,8 @@
 //!   `infer_air_controls_from_lookahead`, `align_contacts`): each frame's state, events, applied ticks and holds.
 //! - `simulate_air_lookahead`: the same with the air-control lookahead on in both.
 //! - `simulate_air_bvp`: the same with the air boundary-value solve on in both.
+//! - `simulate_input_fits`: the same with the input fits on in both.
+//! - `simulate_all_fits`: every fit on in both except contact alignment.
 //!
 //! Prints one line per replay (`equal`, or the first difference) and a summary; exits non-zero when any
 //! replay differs or fails.
@@ -54,6 +56,7 @@ fn update_ticks(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
 struct Rung {
     air_lookahead: bool,
     air_bvp: bool,
+    input_fits: bool,
 }
 
 /// The rung without fits: the simulation alone.
@@ -83,12 +86,35 @@ fn simulate_air_bvp(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
     )
 }
 
+/// The rung with the input fits.
+fn simulate_input_fits(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    simulate_rung(
+        bytes,
+        Rung {
+            input_fits: true,
+            ..Rung::default()
+        },
+    )
+}
+
+/// Every fit except contact alignment.
+fn simulate_all_fits(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    simulate_rung(
+        bytes,
+        Rung {
+            air_lookahead: true,
+            air_bvp: true,
+            input_fits: true,
+        },
+    )
+}
+
 fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Error>> {
     let replay = replicar::parse(bytes)?;
     let observations =
         replicar_v1::observations::extract(&replay).ok_or("v1 found no network frames")?;
     let options = replicar_v1::conversion::ConvertOptions {
-        input_fits: false,
+        input_fits: rung.input_fits,
         air_bvp: rung.air_bvp,
         infer_air_controls_from_lookahead: rung.air_lookahead,
         align_contacts: false,
@@ -113,6 +139,8 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         replicar::infer::InferenceOptions {
             air_lookahead: rung.air_lookahead,
             air_schedules: rung.air_bvp,
+            input_fits: rung.input_fits,
+            ..Default::default()
         },
         withheld,
     );
@@ -147,7 +175,7 @@ fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     args.retain(|a| a != "--final-assessment");
-    let usage = "usage: parity <decode|update_ticks|simulate|simulate_air_lookahead|simulate_air_bvp> <replay or folder>... [--final-assessment]";
+    let usage = "usage: parity <decode|update_ticks|simulate|simulate_air_lookahead|simulate_air_bvp|simulate_input_fits|simulate_all_fits> <replay or folder>... [--final-assessment]";
     let (Some(stage), true) = (args.first().cloned(), args.len() >= 2) else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
@@ -158,6 +186,8 @@ fn main() -> ExitCode {
         "simulate" => simulate,
         "simulate_air_lookahead" => simulate_air_lookahead,
         "simulate_air_bvp" => simulate_air_bvp,
+        "simulate_input_fits" => simulate_input_fits,
+        "simulate_all_fits" => simulate_all_fits,
         other => {
             eprintln!("unknown stage {other}\n{usage}");
             return ExitCode::FAILURE;
