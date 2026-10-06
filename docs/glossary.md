@@ -15,7 +15,7 @@ file schema against this page (v2 plan, story 9.2).
 - **Provenance in the name only where it is not the group's.** A column in `state` is simulated or corrected
   state; one in `network` is what the replay sent. Inside a group, a value with another origin says so:
   `simulated_touches`, `car_status_inferred`.
-- **Future-derived values** start with `label_`, and the file's header marks them.
+- **Future-derived values** start with `future_` and live in the `future` group, so the warning is in the name.
 - **Null means unknown or not applicable, never zero.** The Python arrays use NaN for floats and -1 for integers.
 - **One word per concept.** If two things need two names, both are in this glossary, and each says how it
   differs from the other.
@@ -26,12 +26,14 @@ file schema against this page (v2 plan, story 9.2).
 
 **Frame** (also *replay frame*). One network frame of the replay: the bundle of actor updates the recording
 client stored at one moment. About 30 per second in online replays; other rates occur (a 10 fps LAN client). A
-replicar file has one row per frame. The `frame` column is its index from 0.
+replicar file has one row per frame **in play** (see *play segment*); the `frame` column is the frame's index in
+the replay, counted from 0, so gaps show where pauses were left out.
 
 **Replay time** (`replay_time`, seconds). The frame's timestamp as the replay stores it.
 
 **Replay tick** (`replay_tick`). Replay time on the 120 Hz scale, counted from the first frame and rounded:
-the timeline of the whole replay, pauses and goal replays included. It never goes backwards.
+the timeline of the whole replay, pauses and goal replays included, so it jumps between play segments. It never
+goes backwards.
 
 **Sim tick** (`sim_tick`). RocketSim's own tick count for the arena. It advances only while the match is
 simulated (continuous active play), so it falls behind the replay tick at every pause. Use the replay tick to
@@ -56,7 +58,18 @@ time of the frame that carried the body's last update. Observed (it uses no infe
 **Clock phase** (`clock_phase`). Where the match clock is: `pregame`; `countdown` (before a kickoff); `kickoff`
 (cars released, clock held until the first touch); `running`; `expired` (regulation at 0, waiting for the ball
 to touch the ground); `decided` (the ball touched the ground after expiry); `goal_pause` (celebration and goal
-replay). **Active play** means `kickoff`, `running` or `expired`.
+replay). Within play segments only `kickoff`, `running`, `expired` and `decided` occur.
+
+**In play.** The replay's game state is `Active`: from the frame where the kickoff countdown has ended and the
+cars can move **[verify]** until play stops.
+
+**Play segment** (`segment`, 0..n). A stretch of play from a kickoff to the frame that reports the goal, or to
+the last frame in play when no goal follows (regulation ending, before overtime). The overtime kickoff starts a
+new segment. Countdowns, goal celebrations, goal replays and everything before the first kickoff or after the
+match are **outside** play segments. A replicar file holds only frames in play segments, unless it was written
+with `--all-frames`; then the other frames are included with a null `segment`. Records (events, contacts,
+pickups) outside play segments, such as a goal explosion's demolitions, are left out with their frames.
+(v1 called these *episodes*.)
 
 **Period** (`period`). `regulation` or `overtime`.
 
@@ -107,9 +120,18 @@ time. What the `state` group holds at an updated frame.
 **Inferred.** Estimated by replicar from the replay, not stated by it: update ticks, when an input happened, air
 controls, spawn poses, ball contacts, the fractional clock.
 
-**Future-derived.** Computed from frames after the one it describes (the `label_` columns). Never use as model
+**Future-derived.** Computed from frames after the one it describes (the `future` group). Never use as model
 input. Some inferences also look ahead (the fits use later updates); that is what makes replicar an offline
-reconstruction, and it is why labels are kept apart: they say what happens next by construction.
+reconstruction, and it is why the future group is kept apart: it says what happens next by construction.
+
+**Future group** (`future`; v1 *labels*). Training targets read from the frames after the one they describe:
+`future_goal_team` (the team that scores the next goal, null when none follows),
+`future_seconds_until_goal` (null when none follows) and `future_seconds_until_segment_end`. The match result
+(final score, winner) is in the header, never per frame.
+
+**Inferred** versus **resimulation group.** Many values are inferred (air controls in `state`, update ticks in
+`updates`). The `resimulation` group is a specific set: the inferred values the simulator needs to reproduce
+`state` without fitting. It is named for that purpose to avoid the ambiguity.
 
 ## Reconstruction
 
@@ -137,12 +159,13 @@ later update: control timings, presses, air controls, contact alignment.
 next update. Part of update-tick inference.
 
 **Inference** (code: the `Inference` trait). The part of replicar that makes these choices. *Fitted inference*
-computes them; *recorded inference* reads them back from a file's `inferred` group.
+computes them; *recorded inference* reads them back from a file's `resimulation` group. Each value it hands the
+simulator is a **choice** (code: `Choice`): an update tick, a control timing, a press, an air-control segment.
 
 **Simulator** (code). The part that applies updates at their ticks, steps RocketSim and applies the controls
 the inference gives it. It contains no fitting.
 
-**Resimulate** (`replicar resimulate`). Rebuild the `state` group from the replay and a file's `inferred` group,
+**Resimulate** (`replicar resimulate`). Rebuild the `state` group from the replay and a file's `resimulation` group,
 without fitting: the same states, about ten times faster than a conversion, needing the same replicar and
 RocketSim versions.
 
@@ -166,7 +189,8 @@ the named car's path (`verified`; another car's path that reaches it is `suggest
 
 ## Files
 
-**replicar file.** One Parquet file per replay, one row per frame, holding the column groups asked for. Its
+**replicar file.** One ordinary Parquet file (`.parquet`) per replay, one row per frame in play, holding the
+column groups asked for. Any Parquet reader opens it; replicar's reader adds conveniences. Its
 **header** (JSON in the Parquet key-value metadata) has the format version, the replay's SHA-256, the replicar and
 RocketSim versions, the configuration, the groups and precision, the players, the pad layout and diagnostics.
 
@@ -174,13 +198,13 @@ RocketSim versions, the configuration, the groups and precision, the players, th
 
 | Group | Default | Holds |
 | --- | --- | --- |
-| (always) | yes | `frame`, `replay_time`, `replay_tick`, `sim_tick` |
+| (always) | yes | `frame`, `segment`, `replay_time`, `replay_tick`, `sim_tick` |
 | `state` | yes | ball and car physics, car internals, controls, boost, pads, car status |
 | `game` | yes | scoreboard (`clock_phase`, `period`, scores, clock), events, ball contacts, boost pickups |
 | `updates` | yes | updated, update tick, ticks and seconds since update, ping |
-| `labels` | (open question) | the `label_` columns |
+| `future` | yes | the `future_` columns: what happens next |
 | `network` | no | the network values with the frame of their last change |
-| `inferred` | no | what the fitted inference chose; enough to resimulate |
+| `resimulation` | no | what the fitted inference chose; enough to resimulate |
 | `diagnostics` | no | prediction errors before each correction, simulated touches and events |
 
 **Network group** (`network`). The replay's network feed, decoded: for each frame, every value replicar reads
@@ -188,7 +212,7 @@ RocketSim versions, the configuration, the groups and precision, the players, th
 replay's units, forward-filled, each with the frame of its last change. It omits what replicar does not read
 (cosmetics, camera settings, most stats), so it is not a lossless copy of the replay.
 
-**Inferred group** (`inferred`). Each update's tick, the times observed controls took effect, presses, air
+**Resimulation group** (`resimulation`). Each update's tick, the times observed controls took effect, presses, air
 controls and the other choices of the fitted inference, per frame. With the replay, this is everything RocketSim
 needs to reproduce the `state` group exactly.
 
@@ -198,6 +222,9 @@ quaternion components to 1/32767; readers return float32). The header records it
 
 **Index file** (`index.parquet`). Written by a folder conversion: one row per replay with its file, status or
 error, size, players and score.
+
+**`--all-frames`.** Also write the frames outside play segments (countdowns, goal pauses and replays), with a null
+`segment`. Off by default.
 
 ## Evaluation (for contributors)
 
@@ -228,11 +255,16 @@ assessment; the evaluation tools refuse it without `--final-assessment`).
 | `scoreboard_clock_state` | `clock_phase` |
 | observations (`frame_json.observations`) | network values, `network` group |
 | `touches` | `simulated_touches` |
-| `fitted_inputs` | presses and air controls in the `inferred` group |
+| `fitted_inputs` | presses and air controls in the `resimulation` group |
+| episode (`label_episode`) | play segment (`segment`, a core column) |
+| labels (`label_*`) | the `future` group (`future_*`) |
+| `label_next_scoring_team`, `label_seconds_until_next_goal`, `label_episode_seconds_remaining` | `future_goal_team`, `future_seconds_until_goal`, `future_seconds_until_segment_end` |
+| every frame of the replay | frames in play segments (`--all-frames` for all) |
 | `pad_pickups` | pad records in the `network` group |
 | `goal_scored_on`, `demolish`, `dodge_refreshed` | `goal`, `demolition`, `flip_reset` |
 | `ConvertOptions` | `Config` |
 | `position_residuals` | prediction errors, `diagnostics` group |
 | (planner, executor in the v2 draft of 2026-10-06) | inference, simulator |
-| (plan, plan file) | `inferred` group |
+| (`Decision`, then `Inferred`, in drafts) | `Choice`: one value the inference chose |
+| (plan, plan file; `inferred` in the fourth draft) | `resimulation` group |
 | (`exact`, `compact` precision) | `float32`, `quantized` |

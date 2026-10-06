@@ -1,11 +1,12 @@
 # replicar v2: design and migration plan
 
-Status: proposal, fourth draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented.
+Status: proposal, fifth draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented.
 
 Earlier drafts:
 - `ac4b8c4`: a refactor of v1 in place;
 - `95b0fd6`: the first ground-up draft;
-- `1c33303`: the third draft (column groups, `exact`/`compact`), before the names were settled.
+- `1c33303`: the third draft (column groups, `exact`/`compact`), before the names were settled;
+- `a67e23d`: the fourth draft with the glossary, before the frames were limited to play segments.
 
 Sources and conventions:
 - Facts about v1 cite files at `master` = `5a7da58`.
@@ -40,6 +41,10 @@ Sources and conventions:
   - **No stopgap.** Nothing will be run until v2 is done.
   - **The network values are opt-in** (the `network` group): they are essentially the replay's network feed.
   - **Names must be clear**, with a terminology reference (`docs/glossary.md`, section 8).
+  - **Only play is core data.** Rows run from the kickoff (countdown at 0, cars free) to the goal; countdowns,
+    goal celebrations and goal replays are left out unless asked for (`--all-frames`).
+  - **The future-derived columns are in the default groups**, under a better name than "labels" (`future`).
+  - **Plain `.parquet`.** `inferred` was ambiguous (now `resimulation`).
 
 ## 2. What the measurements say
 
@@ -88,27 +93,32 @@ internals:
 | Simulation with given lags, no fits | 0.15–0.32 s |
 | Full default conversion | 2.3–5.5 s |
 
-The fits take 90–95% of a conversion. This is why resimulation from the `inferred` group (section 3.3) is cheap:
+The fits take 90–95% of a conversion. This is why resimulation from the `resimulation` group (section 3.3) is cheap:
 35,000–70,000 frames per second.
 
 ## 3. Outputs
 
 ### 3.1 One format, column groups
 
-**There is one file format.** A replicar file is a single Parquet file with one row per replay frame. Its header
+**There is one file format.** A replicar file is a single ordinary Parquet file with one row per replay frame
+**in a play segment**: from the frame where the kickoff countdown has ended and the cars can move to the frame
+that reports the goal (or the last frame in play, when regulation ends without one). This is v1's episode rule
+(`labels.rs:10-23`), so the definition and its tests exist already. `--all-frames` adds the frames outside play
+(countdowns, goal celebrations and replays) with a null `segment`; the simulation does not change, because v1
+already simulates only in play (`conversion/mod.rs:1281`: a frame is simulated only when it and the previous one are `Active`), and those rows were 16–23% of frames. Its header
 (players, teams, versions, configuration, diagnostics, pad layout) is JSON in the file's key-value metadata. What a
 file contains is a choice of **column groups**, and the header lists the groups it has. Every name in this section
 is defined in `docs/glossary.md`.
 
 | Group | Default | Contents |
 | --- | --- | --- |
-| (always) | yes | `frame`, `replay_time`, `replay_tick`, `sim_tick` |
+| (always) | yes | `frame`, `segment`, `replay_time`, `replay_tick`, `sim_tick` |
 | `state` | yes | ball and car physics, car internals (what restoration needs), controls, boost, pads, car status |
 | `game` | yes | scoreboard, events, ball contacts and boost pickups (as `list<struct>` columns) |
 | `updates` | yes | whether each body was updated, its update tick, ticks and seconds since its last update, ping |
-| `labels` | open (section 9) | the future-derived `label_` columns |
+| `future` | yes | the future-derived `future_` columns: next goal's team, seconds until it, seconds until the segment ends |
 | `network` | no | the replay's network feed as replicar decodes it: each value with the frame of its last change |
-| `inferred` | no | what the fitted inference chose; with the replay, enough to resimulate `state` exactly (3.3) |
+| `resimulation` | no | what the fitted inference chose; with the replay, enough to resimulate `state` exactly (3.3) |
 | `diagnostics` | no | prediction errors before each correction, simulated touches, RocketSim's own events |
 
 `--precision float32|quantized` sets how `state` is stored:
@@ -129,9 +139,9 @@ convenience (NumPy arrays, decoding of quantized columns, the header).
 | --- | --- | --- | --- |
 | **default** | none | the default groups | pyarrow (or any Parquet reader) |
 | small | `--precision quantized` | the same, quantized state | pyarrow |
-| resimulable | `--with inferred` | the default groups + `inferred` | pyarrow; replicar + the replay only to resimulate |
-| inferred only | `--groups game,updates,inferred` | no `state` | replicar + the replay |
-| research | `--with network,diagnostics` | more | pyarrow |
+| resimulable | `--with resimulation` | the default groups + `resimulation` | pyarrow; replicar + the replay only to resimulate |
+| without states | `--groups game,updates,future,resimulation` | no `state` | replicar + the replay |
+| research | `--with network,diagnostics --all-frames` | more | pyarrow |
 
 `--with` adds groups to the default set; `--groups` names the whole set.
 
@@ -139,9 +149,9 @@ The **default needs neither the replay parser nor the simulator to read**. A fil
 from the replay: `replicar.read("x.parquet", replay="x.replay")` resimulates the missing group and returns the
 same object a full file gives. Python users therefore use one function whichever file they have.
 
-### 3.3 The inferred group and resimulation
+### 3.3 The resimulation group
 
-The `inferred` group holds what the fitted inference chose, per frame, so that the replay can be resimulated
+The `resimulation` group holds what the fitted inference chose, per frame, so that the replay can be resimulated
 without fitting:
 - the update ticks;
 - the times observed control changes took effect;
@@ -149,7 +159,7 @@ without fitting:
 - the air-control segments;
 - the other state edits (dodge starts, contact-aligned ticks).
 
-These are `inferred_*` columns, using `list<struct>` where a frame has several values. The header records the
+These are `resim_*` columns, using `list<struct>` where a frame has several values. The header records the
 replicar and RocketSim versions, the configuration, and a checksum of a few resimulated states. A build that would
 diverge then refuses the file instead of silently producing other states.
 
@@ -176,9 +186,26 @@ resets" is RocketSim's own way to reproduce a run. Three lessons, and one thing 
   read from anything else. Parquet with Arrow types is about as compact (rlpr compresses its whole file with
   zstd too) and readable everywhere.
 
-### 3.4 A corpus
+### 3.4 Where files go, and who can read them
 
-`replicar convert replays/ -o out/ --jobs N` writes one file per replay plus `out/index.parquet`. The index has
+**One replay, one file.** `replicar convert match.replay -o match.parquet` writes exactly that file, and nothing
+beside it: v1's seven record tables (`match.touches.parquet`, ...) are columns now. The file is self-contained
+(its header has the players, versions, configuration and pad layout), so a folder per conversion would add a
+level without adding anything. The file is written under a temporary name in the same directory and renamed
+when complete, so a failed run leaves no partial file.
+
+**Plain `.parquet`.** A replicar file is an ordinary Parquet file, and the extension should say so: every tool
+recognizes it, and the header says it is a replicar file (format version, groups). A double extension would
+only help someone who cannot open the file. To keep "any Parquet reader" true, the schema uses only types that
+mainstream readers handle: numbers, booleans, strings, lists and structs. It uses no nullable fixed-size lists,
+because Parquet drops the child values of a null list and PyArrow then reads them wrongly (RESULTS.md, "Parquet
+columns and record tables"); a missing player's values are NaN or -1 inside a present list, plus `car_status`
+`absent`. **[verify]** with pyarrow, polars and DuckDB in story 7.1.
+
+**A corpus**
+
+`replicar convert replays/ -o out/ --jobs N` writes one file per replay plus `out/index.parquet`, mirroring
+the input's subfolders (`replays/2v2/x.replay` becomes `out/2v2/x.parquet`). The index has
 one row per replay: file name, SHA-256, status or error, frames, duration, map, game size, players and teams,
 final score, and the groups and precision written.
 - A failed replay becomes a row with its error, not an aborted batch.
@@ -194,7 +221,7 @@ bytes --parse----> boxcars::Replay
       --time-----> UpdateTicks       each update's tick (update chains, ball runs, contact alignment)
       --run------> for each frame:   the Simulator applies updates at their ticks and steps RocketSim;
                                      where v1 fits, it asks the Inference (fitted, or recorded)
-      --annotate-> ball contacts, pickups, updates, scoreboard, labels
+      --annotate-> ball contacts, pickups, updates, scoreboard, future, play segments
       --write----> one file, the column groups asked for
 ```
 
@@ -222,9 +249,9 @@ The **inference** answers the simulator's questions at the moments v1's fits run
 There is one trait with two implementations:
 - **`FittedInference`**: v1's fits (`fits.rs`, `air.rs`, the jump/dodge logic of the loop), each in its own module.
   It reads the future only through a `Lookahead` view that knows which frames a masked evaluation withholds.
-- **`RecordedInference`**: answers from a file's `inferred` group.
+- **`RecordedInference`**: answers from a file's `resimulation` group.
 
-Every answer is a value of one enum, `Inferred`. Writing the `inferred` group means writing the answers down as
+Every answer is a value of one enum, `Choice`. Writing the `resimulation` group means writing the answers down as
 they are given; resimulating means handing them back. So there is no second simulation path, no special mode in
 the simulator, and nothing for the two to disagree about. A run without fits is the simulator with an inference
 that never changes anything. Masked evaluation is an inference configuration (`Holdout`).
@@ -283,14 +310,14 @@ Other conventions:
 ```rust
 let meshes = replicar::Meshes::load("collision_meshes")?;      // checks the soccar meshes; rocketsim::init once
 let converter = replicar::Converter::new(&meshes, Config::default());
-let output = Output::default().with(Group::Inferred).precision(Precision::Quantized);   // groups and precision
+let output = Output::default().with(Group::Resimulation).precision(Precision::Quantized);   // groups and precision
 converter.convert_to_file(&bytes, "match.parquet", &output)?;  // one file, written atomically
 let replay = converter.convert(&bytes)?;                       // or frames in memory
 let frames = replicar_format::read("match.parquet")?;          // reading needs no simulator
 ```
 
 ```
-replicar convert match.replay -o match.parquet [--precision float32|quantized] [--with GROUPS | --groups GROUPS]
+replicar convert match.replay -o match.parquet [--precision float32|quantized] [--with GROUPS | --groups GROUPS] [--all-frames]
 replicar convert replays/ -o out/ --jobs 16 [--skip-existing] ...   # folder: one file per replay + index.parquet
 replicar resimulate match.parquet --replay match.replay -o full.parquet
 replicar inspect match.replay | match.parquet
@@ -301,7 +328,7 @@ replicar verify match.parquet
 ```python
 import replicar                                    # pure Python: reading
 f = replicar.read("match.parquet")                 # .header, .arrays() (NumPy float32), .records() (pyarrow)
-f = replicar.read("inferred_only.parquet", replay="match.replay")  # resimulates: needs replicar[convert]
+f = replicar.read("no_states.parquet", replay="match.replay")      # resimulates: needs replicar[convert]
 for batch in replicar.iter_frames("match.parquet", replay="match.replay", batch_frames=4096): ...
 replicar.convert("match.replay", "match.parquet", precision="quantized")            # replicar[convert]
 replicar.convert_many(paths, "out/", jobs=16)
@@ -317,9 +344,9 @@ revision, so the comparison runs in one process. **[verify]** that cargo unifies
 1. **States, bit for bit, in memory.** For each of the 120 train and validation replays, v2 must equal v1 exactly
    on:
    - every frame's ball and car state (physics, timers, flags, controls), the pad states and the arena tick;
-   - the records, the scoreboard and the labels.
+   - the records, the scoreboard, the play segments and the future columns.
 
-   This compares the converters themselves, before the file encoding.
+   This compares the converters themselves, before the file encoding, on every frame (play segments or not).
 2. **A ladder of configurations**, so that a difference points at one part:
    - the simulator without fits, against v1 with `input_fits`, `air_bvp`, `infer_air_controls_from_lookahead` and
      `align_contacts` off;
@@ -332,7 +359,7 @@ revision, so the comparison runs in one process. **[verify]** that cargo unifies
 4. **Files.**
    - `float32`: rotations within 1e-6 and everything else bit-identical after a write and a read.
    - `quantized`: every value within its quantum.
-   - The `inferred` group: resimulated states bit-identical to the conversion that wrote it, in another process,
+   - The `resimulation` group: resimulated states bit-identical to the conversion that wrote it, in another process,
      and on a second machine if one is available **[verify]**.
 5. **Size and speed** on the fixed replay list: size per group and precision; conversion, resimulation and read
    time; mean and maximum against v1.
@@ -367,18 +394,18 @@ C is the complexity. Work happens on a `v2` branch, and the record files are upd
 | 4.3 | Actions: counters, jump gate, dodge refresh; pads | rung "no fits" equal | M |
 | 4.4 | Determinism of the simulator across processes | equal states on 120 replays | L |
 | **5** | **Inference** | | |
-| 5.1 | `Inference` trait, `Inferred`, `Lookahead` with withheld frames; air lookahead and persistence | rung "air lookahead" equal; the masked leak test passes | M |
+| 5.1 | `Inference` trait, `Choice`, `Lookahead` with withheld frames; air lookahead and persistence | rung "air lookahead" equal; the masked leak test passes | M |
 | 5.2 | Air boundary-value solve (`air.rs`) | rung "air_bvp" equal | H |
 | 5.3 | Input fits: ground timing, jump, dodge start and first-update tick, flip cancel (`fits.rs`) | rung "input_fits" equal, then the defaults | H |
 | 5.4 | Held-out variants | evaluator rungs equal | M |
 | 5.5 | `RecordedInference`; inferences recorded and replayed in memory | replayed equals recorded on 120 replays; volume measured | M |
 | **6** | **Annotate** | | |
 | 6.1 | Touches, ball contacts, boost pickups | records equal | M |
-| 6.2 | Scoreboard, updates, labels | equal | M |
+| 6.2 | Scoreboard, updates, play segments, future | equal | M |
 | **7** | **Format** (`replicar-format`) | | |
-| 7.1 | Schema with column groups, `float32` precision, writer, atomic write | values equal to v1's Parquet columns; sizes recorded | M |
+| 7.1 | Schema with column groups, play-segment rows and `--all-frames`, `float32` precision, writer, atomic write | values equal to v1's Parquet columns on the same frames; opens in pyarrow, polars and DuckDB; sizes recorded | M |
 | 7.2 | `quantized` precision with scales in field metadata | errors within the quantum; sizes recorded | M |
-| 7.3 | `inferred` group; resimulate from a file | resimulated equals recorded, from a file, in another process | M |
+| 7.3 | `resimulation` group; resimulate from a file | resimulated equals recorded, from a file, in another process | M |
 | 7.4 | `network` and `diagnostics` groups | match v1's `frame_json` content | M |
 | 7.5 | Rust reader; restoration from a file (quaternion tolerance) and by resimulation (exact) | all frames | M |
 | **8** | **Front ends** | | |
@@ -392,7 +419,7 @@ C is the complexity. Work happens on a `v2` branch, and the record files are upd
 
 Speed gains taken along the way, where they cost nothing in output:
 - the folder mode converts replays in parallel;
-- the `inferred` group removes the fits from every later use;
+- the `resimulation` group removes the fits from every later use;
 - contact alignment's first pass may not need to rebuild what the second pass rebuilds **[verify]**
   (`conversion/mod.rs:1075-1085`).
 
@@ -433,9 +460,10 @@ does not ship: story 9.2 adds a test that checks the file schema against it. The
 
 ## 9. Questions for the user
 
-1. **Labels in the default groups?** They are cheap (about 0.1 MB per replay) but future-derived: they say what
-   happens next by construction. Options: in the default set, flagged as now; or opt-in like `network`.
-2. **File names.** Keep plain `.parquet`, so that every tool recognizes the files, with the format identified in
-   the header? Or a double extension such as `match.replicar.parquet`, which says what the file is at a glance?
-3. **The glossary's names**, especially `replay_tick` / `sim_tick`, *update tick*, the player index and the
-   group names: anything unclear, or a word you would rather use?
+1. **The `future` group's name.** `future` puts the warning in every column name (`future_goal_team`); the
+   alternative `outcome` (`outcome_goal_team`) reads more naturally as a training target but hides where the value
+   comes from. Recommendation: `future`.
+2. **A play segment that ends without a goal** (regulation running out): it is kept, with `future_goal_team`
+   null or naming the overtime goal's team (v1 looks across segments to the next goal). Recommendation: keep v1's
+   rule, so the next goal is the next goal wherever it is, and `future_seconds_until_segment_end` marks the
+   segment's own end.
