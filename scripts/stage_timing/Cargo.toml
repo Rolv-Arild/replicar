@@ -1,0 +1,10 @@
+[package]
+name = "v2probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+replicar = { path = "../.." }  # build with CARGO_TARGET_DIR=../../target to share artifacts
+[profile.release]
+debug = false

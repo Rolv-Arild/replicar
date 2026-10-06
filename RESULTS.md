@@ -2220,3 +2220,23 @@ Decision: adopt `9910c58` (no regression; respawn contact handling and API kept 
 
 Branch `cleanup-release` from `master` (tagged `pre-cleanup`, which keeps every removed tool and option). Removed: 41 one-off experiment binaries and 16 analysis scripts whose results are recorded above; the measured-and-rejected options (low-air angular holds, the hit-impulse workaround for RocketSim before `0b02051`, the packet-interval control rule, boost-pickup lookahead, the scratch-contact reset, the alternative flip-cancel sources, the hand-tuned air-persistence gates, the legacy non-exact lag chains, `lag_boundary`); the always-on feature switches, now plain code; the tools' ablation flags (the evaluator keeps the eight its protocol and README use); unused diagnostic counters and tracing. `ConvertOptions` went from 63 fields to 22; the four input-timing fits share `input_fits`; numeric knobs are constants. `conversion.rs` is split into `conversion/{mod,packet_lags,fits,air}.rs`; the code is `cargo fmt`-formatted and clippy-clean (four structural lints allowed in `Cargo.toml` with reasons) and the API docs build without warnings. MIT license, README rewritten, field reference in `docs/output-format.md`, `CHANGELOG.md`, version 1.0.0. Verification: the default JSONL of all 120 development replays, converted before and after, has byte-identical frames and headers identical apart from the options list (checked after the removals, after the options rework, and on the final tree); on the final tree 7 headers differed in the run made while the test suite ran alongside, and all 7 matched the reference when re-run alone, as did repeated runs of both builds (not reproduced; frames identical in every run); `cargo test --all-targets` and the Python tests pass. The test-split result therefore still describes the converter's state.
 
+
+## Output size and conversion cost (2026-10-06)
+
+For the v2 design (`docs/v2-plan.md`); no converter change. Three train replays, one per game size (`1v1/0000a984`, 0.83 MB; `2v2/000c0390`, 0.75 MB; `3v3/00054e5d`, 1.61 MB), converted to Parquet with the release `convert_replay` at `5a7da58` (RocketSim `9910c58`), on the development machine. Reproduce: `python scripts/measure_output_size.py <export.parquet>...` (PyArrow 25.0.1; nothing is written) and, from `scripts/stage_timing/`, `CARGO_TARGET_DIR=../../target cargo run --release -- <replay>...`.
+
+**Where the bytes go.** The main file is 12.45 / 12.09 / 28.14 MB (15.0x / 16.1x / 17.5x the replay); the seven record tables add 0.17 / 0.2 / 0.32 MB. `frame_json` is 72% of the main file (8.85 / 8.64 / 20.19 MB). The typed columns alone are 3.61 / 3.48 / 7.55 MB, of which the car rotation matrices are the largest (0.96 / 1.16 / 2.92 MB).
+
+| Re-encoding of the typed columns (PyArrow) | 1v1 | 2v2 | 3v3 |
+| --- | ---: | ---: | ---: |
+| without `frame_json`, zstd 3 | 3.61 | 3.48 | 7.55 |
+| + rotations as quaternions (size proxy) | 2.69 | 2.58 | 5.83 |
+| + BYTE_STREAM_SPLIT on floats | 1.79 | 1.77 | 4.05 |
+| + zstd 9 | 1.75 | 1.72 | 3.95 |
+| + zstd 19 | 1.65 | 1.66 | 3.79 |
+
+What only `frame_json` holds, as typed columns (zstd 9, split floats): the other car-state fields (timers, flags, previous controls) 0.22 / 0.27 / 0.56 MB; the observations with their update frames 0.92 / 1.13 / 2.75 MB; the position residuals (16,971 / 15,520 / 35,932 rows) 1.23 / 1.17 / 2.69 MB. A lossless state file of the v2 kind is then about 1.97 / 1.99 / 4.51 MB (2.4x / 2.6x / 2.8x the replay). Car state quantized to integers (0.01 UU, 0.01 UU/s, 1e-4 rad/s, rotation 1/30000) with delta encoding in a car-sorted layout: 0.55 / 0.63 / 1.52 MB against 0.94 / 1.11 / 2.72 MB as split floats (lossy). Limits: the quaternion figure uses component magnitudes (signs not resolved), so it is a size estimate; one replay per size.
+
+Frames by clock state: running 77.0 / 80.2 / 84.4%, countdown 10.0 / 8.9 / 6.6%, goal pause 6.9 / 6.6 / 4.1%, kickoff 5.6 / 4.3 / 3.2%, expired 0.6 / 0 / 1.7%.
+
+**Where the time goes** (one run each, wall time): parse 0.01 / 0.00 / 0.01 s, observation extraction 0.02 / 0.02 / 0.04 s, packet-lag inference 0.04 / 0.01 / 0.02 s, conversion with those lags and no fits (`input_fits`, `air_bvp`, `infer_air_controls_from_lookahead`, `align_contacts` off) 0.18 / 0.15 / 0.32 s, the same with the air lookahead on 0.16 / 0.15 / 0.31 s, the full default 2.32 / 2.41 / 5.45 s. The fits are 90-95% of a conversion; RocketSim and the bookkeeping 34,000-65,000 frames per second.

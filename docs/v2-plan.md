@@ -1,478 +1,389 @@
 # replicar v2: design and migration plan
 
-Status: proposal, 2026-10-06, branch `v2-plan` from `master` (`5a7da58`). Nothing here is implemented.
-Every statement about the current code cites a file and line at `5a7da58`. Every statement about VirxEC's
-converter cites `external/replay-to-rocketsim` at `bc61b66`, the upstream tip of 2026-09-27, cloned there
-for reference and git-ignored. Items marked **[decide]** need the user. Items marked **[verify]** are
-assumptions to check before the story that depends on them starts.
+Status: proposal, second draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented. The first draft
+(`ac4b8c4`), which refactored v1 in place, is superseded. Facts about v1 cite files at `master` = `5a7da58`.
+Facts about VirxEC's converter cite `external/replay-to-rocketsim` (`bc61b66`, git-ignored). The measurements
+are in RESULTS.md, "Output size and conversion cost (2026-10-06)", with the scripts that reproduce them.
+**[decide]** marks a choice for the user, and **[verify]** an assumption a story must check before relying on it.
 
-## 1. What v2 is for
+## 1. What the user asked for (2026-10-06)
 
-v2 should make the same reconstruction (the same accuracy and speed) much easier to use and to read:
+- **Outputs that are simple and small.** JSONL takes too much space, and the Parquet export is eight files per
+  replay. The target corpus is about **140,000 replays**, so file size is a first-order constraint. The
+  conversion is also too slow to embed in a streaming pipeline.
+- **Code that is not opaque**, redesigned from the ground up.
+- **The same accuracy.** Speed must be no worse (mean +3%, no replay +10%), and we take obvious gains along the
+  way, but speed is not the focus yet.
+- **Decisions already taken:**
+  - The sealed-split guard moves out of the user-facing CLI into the evaluation tools.
+  - `thiserror`, `clap`, `pyo3`/`maturin` and `criterion` may be added.
+  - Aim for crates.io and PyPI releases.
+  - Update RocketSim to the latest compatible revision **before** the work, and run every comparison on that
+    one revision.
+  - Leave the collision meshes to the user.
 
-- **Python/ML users**: `pip install` a package, then `replicar.convert("match.replay")` returns arrays and
-  tables. No `sys.path` edits and no subprocess.
-- **Rust users**: a small, documented API (`Converter`, `Config`, a few output types). It accepts bytes,
-  never panics on a bad replay, and returns typed errors.
-- **CLI users**: one `replicar` binary with subcommands, batch conversion of a folder, and sensible defaults.
-- **Contributors**: a pipeline of named stages, each in a file short enough to read in one sitting, with
-  the per-car state in one struct instead of forty maps. Evaluators and diagnostics live in their own
-  crate.
+## 2. What the measurements say
 
-### Done means
+Three train replays were measured, one per game size, converted with the v1 release build. RESULTS.md has the
+table and the method.
 
-1. **Accuracy.** On all 120 train and validation replays, with the same RocketSim revision and toolchain
-   on both sides, v2's default JSONL **frame records are byte-identical** to v1's (SHA-256 per replay).
-   The header may differ only in fields this plan names (section 6). Where we choose to change the output
-   (section 6.3), `evaluate_corpus` (default and `--aligned-targets`, train and validation) shows no
-   material regression against the v1 reference, judged on validation. This follows the user's rule of
-   2026-10-06: aim for byte-identical, but do not bend over backwards for it.
-2. **Speed.** Mean and maximum wall time per replay no worse than v1 within noise. The v1 figures to
-   beat: mean 9 s and maximum 24 s over the 120 replays with four converting in parallel; one 3v3
-   replay 11.4 s, one 1v1 3.3 s (RESULTS.md:1684). Measured with `python/benchmark_conversion.py` on a
-   fixed replay list (proposed threshold: mean +3%, no replay +10%; **[decide]**).
-3. **Usability.** The four entry points in section 4 work as written in the README, from a clean checkout
-   and from a pip install, with tests.
-4. **Readability.** No function over about 150 lines in the library (today one is about 1,830). Per-car
-   state lives in a struct. No string-typed enums in the public API.
+**Size.**
+- A v1 Parquet export is **15–17.5× the replay** (1v1: 12.45 MB for a 0.83 MB replay; 3v3: 28.1 MB for
+  1.61 MB). JSONL is about 150×.
+- **72% of the Parquet file is the `frame_json` column**, a complete JSON copy of every frame.
+- Some of what only that column holds is needed. As typed columns:
+  - the state fields still needed to restore a RocketSim car (timers, flags, previous controls): 0.2–0.6 MB;
+  - the observations with their update frames: 0.9–2.8 MB;
+  - the evaluator's position residuals: 1.2–2.7 MB.
+- The rest of `frame_json` repeats what typed columns already hold, or repeats constants on every frame:
+  boost-pad positions, and Dropshot and Heatseeker fields that never change in soccar.
 
-### Out of scope
+| Lossless encoding of the state (typed columns) | 1v1 | 2v2 | 3v3 |
+| --- | ---: | ---: | ---: |
+| v1 file | 12.45 MB | 12.09 MB | 28.14 MB |
+| without `frame_json` | 3.61 | 3.48 | 7.55 |
+| + rotations as quaternions | 2.69 | 2.58 | 5.83 |
+| + BYTE_STREAM_SPLIT float encoding, zstd 9 | 1.75 | 1.72 | 3.95 |
+| + the remaining car-state fields | **1.97 (2.4× replay)** | **1.99 (2.6×)** | **4.51 (2.8×)** |
 
-- No algorithmic change during the rewrite. Physics, timing inference, fits and their constants move
-  verbatim; the golden gate (section 6) enforces it. Improvements come after parity, as ordinary measured
-  changes (section 9).
-- No new game modes. VirxEC's mode and mutator handling (`src/arena_config.rs`) is a later, separate
-  feature (PLAN.md "Next action").
-- The test split stays sealed. v2 is verified on train and validation only.
+Quantizing car state to 0.01 UU and storing it as delta-coded integers halves the car columns again; this is
+lossy (3v3 cars: 2.72 to 1.52 MB). Frames outside play (countdown, goal pause, kickoff hold) are 16–23% of all
+frames and cost little, because they barely change.
 
-## 2. What VirxEC's converter does better, and what we leave alone
+**Time.**
 
-VirxEC's crate is about 7.2k lines; ours is about 16.5k lines of library and 29k with the tools. The size
-difference is mostly algorithm, not structure: VirxEC places packets by rounding frame time
-(`src/timing.rs:34`) and has no packet-lag inference, input-timing fits, contact alignment or
-boundary-value air solve. The accuracy numbers in RESULTS.md come from those parts, so we keep them. Its
-structure is still worth taking.
+| Stage | Time per replay |
+| --- | --- |
+| Parse | 0.01 s |
+| Observation extraction | 0.02–0.04 s |
+| Packet-lag inference | 0.01–0.04 s |
+| Simulation with given lags, no fits | **0.15–0.32 s** |
+| Full default conversion | **2.3–5.5 s** |
 
-| VirxEC practice | Where | Adopt? |
+**About 90–95% of the time is the fits** (input timing, the air boundary-value solve, contact alignment), not
+RocketSim.
+
+**For 140,000 replays.** A replay averages 1.23 MB over the 120 development replays, so the replays come to about
+172 GB. v1 Parquet would be about 2.8 TB, and a lossless v2 state file about 410–480 GB. Converting costs about
+4 s × 140,000 = 150 CPU hours with today's fits.
+
+**The second idea of this draft: store the fits' decisions, not the states.**
+- **Cost.** Replaying recorded decisions costs what the simulation without fits costs: 0.15–0.32 s per replay,
+  about 35,000–70,000 frames per second. That is fast enough to generate states on the fly in a training
+  pipeline, and the decisions are small.
+- **Why it is feasible.** v1 already changes the main arena only through explicit calls (`set_car_state`,
+  `set_car_controls`, `set_ball_state`, `set_boost_pad_state`, `add_car`: 21 call sites in `conversion/mod.rs`
+  before line 2898, plus `step_ticks` and `limit_reported_velocities`, which go through the same calls). The fits run in scratch arenas and hand back values.
+- **What must be verified.** RocketSim must be deterministic for identical inputs on the same build
+  **[verify]** (story 4.4).
+
+## 3. Outputs
+
+### 3.1 Principles
+
+- **One file per replay.** Everything about a replay lives in one Parquet file:
+  - the per-frame columns;
+  - the variable-length records (events, touches, contacts, pickups, fitted inputs), as `list<struct>` columns
+    on the frame they belong to;
+  - the replay header (players, teams, slots, versions, options, diagnostics), as JSON in the file's key-value
+    metadata.
+
+  v1 split the records into seven files because a frame row had only fixed-width lists (RESULTS.md, "Parquet
+  columns and record tables"). Variable-length list columns hold them directly, and empty lists should cost
+  almost nothing **[verify]**.
+- **Typed columns only.** No JSON copy of the frame. Anything a user needs is a column. Anything only an
+  evaluator needs is not in the default file.
+- **Profiles instead of everything.** A file states which profile it has:
+  - `default`: state, controls, scoreboard, events, freshness, labels;
+  - `+observations`: the raw replay fields with their update frames, as exact integers where the replay
+    quantizes them (positions appear with two decimals, e.g. `512.04`) **[verify]**;
+  - `+diagnostics`: the position residuals.
+- **Same semantics as v1.**
+  - Null means unknown, never zero.
+  - Observed, inferred and future-derived values stay apart: the labels are a column group with a `label_`
+    prefix and a header flag.
+  - The 120 Hz timeline and the arena tick stay separate columns.
+- **Encodings chosen per column:** BYTE_STREAM_SPLIT for floats, dictionary encoding for small enumerations,
+  delta encoding for ticks and frame numbers, and zstd level 9. **[verify]** that the `parquet` 60 writer
+  supports BYTE_STREAM_SPLIT for `f32`; the measurements above used PyArrow's.
+
+### 3.2 The state file
+
+`match.parquet` has one row per replay frame. The column groups (names are a proposal):
+
+| Group | Columns | Notes |
 | --- | --- | --- |
-| One `Converter` value with builder methods; `convert_bytes(&[u8])` and `convert_replay(&Replay)` | `src/converter.rs:34-90` | **Yes**, with our `Config` (section 4.1) |
-| `thiserror` error enum with structured variants (`MissingActor(ActorId)`, `NonFiniteRigidBody { actor_id, field }`) | `src/error.rs` | **Yes**. Ours mixes a hand-written enum (`conversion/mod.rs:30-54`) with `Box<dyn Error>` and string errors (7 places in `src/`, e.g. `parquet_export.rs:526-533`) |
-| One module per concern: `actor/`, `phys.rs` (per-field freshness), `controls.rs`, `body.rs`, `timing.rs`, `metadata/` | `src/lib.rs:30-41` | **Yes**: the module tree in section 3 |
-| Every network property name as a `const` in `attributes.rs` | `src/attributes.rs` (88 lines) | **Yes**: `observations.rs` has 44 inline `"TAGame.…"`/`"Engine.…"` literals |
-| Re-export `rocketsim` so users get matching glam types | `src/lib.rs:55` | **Yes**: we depend on `glam` separately (`Cargo.toml:18`, 47 `glam::` uses), and RocketSim re-exports glam at our pin (`rocketsim/src/lib.rs:56`, `pub use glam_inc::*`) |
-| Crate docs that explain the timing model and the two event streams up front | `src/lib.rs:1-28` | **Yes**: our `lib.rs:1-5` still says "the conversion pipeline is being built incrementally" |
-| `examples/` for runnable usage, `benches/` with criterion, `tests/api.rs` for the public surface | `examples/`, `benches/parse_replays.rs`, `tests/api.rs` | **Yes**. We have 27 binaries in `src/bin` and no example or benchmark |
-| `clippy::pedantic` as warnings, rustfmt config | `Cargo.toml:21-27`, `rustfmt.toml` | **Yes**, phased in (pedantic over 16k lines is a story of its own) |
-| `rocketsim` from crates.io (`0.2.0`) | `Cargo.toml:17` | **[decide]**. crates.io has `rocketsim` 0.2.7 from ZealanL's repository (`cargo info rocketsim@0.2.7`). Depending on it would let replicar itself go to crates.io (our git pin forbids it: `Cargo.toml:11-12`). It must be the latest compatible revision (user rule, 2026-10-06) and needs its own measured update step |
-| `predicted_states` beside `states`: the simulation just before each correction, kept for audits | `src/converter.rs:246` | **Partly**. Our `position_residuals` carry the same information more compactly; v2 keeps them and offers the pre-correction state through the eval feature |
-| Parallel per-frame vectors in the output (`states`, `frames`, `frame_metadata`, `cars`, …) | `src/converter.rs:239-276` | **No**. One `Frame` struct per frame reads better in Rust; the Python side gets columns anyway |
-| Timestamp-rounded ticks, kickoff `prediction_valid` heuristic, rlgym-tools-style edge shifts | `src/converter.rs:134-176`, `AGENTS.md` | **No**: less accurate than what we measured (RESULTS.md) |
+| time | `frame` u32, `replay_time` f32, `timeline_tick` u32, `arena_tick` u32 | |
+| ball | `ball_position`, `ball_velocity`, `ball_angular_velocity` f32[3], `ball_quaternion` f32[4] | |
+| cars (fixed list per slot) | `car_position`, `car_velocity`, `car_angular_velocity` f32[slots × 3], `car_quaternion` f32[slots × 4], `car_boost`, `car_present`, `car_demolished`, `car_on_ground` | |
+| car internals | `car_jump_ticks`, `car_flip_time`, `car_air_time`, flags (`has_jumped`, `has_double_jumped`, `has_flipped`, …), `car_previous_controls` | what exact restoration needs (0.2–0.6 MB) |
+| controls | `control_axes` f32[slots × 5], `control_buttons` bool/u8[slots × 3] | the action applied from this state, as in v1 |
+| pads | `pad_active` (a bitmask per frame), `pad_cooldown` | pad positions once, in the metadata |
+| scoreboard | `scores`, `scoreboard_period`, `scoreboard_clock_state`, `scoreboard_seconds_remaining`, `scoreboard_overtime_seconds` | |
+| records | `events`, `touches`, `ball_contacts`, `boost_pickups`, `fitted_inputs` as `list<struct>` | v1's record tables, folded in |
+| freshness | `ball_fresh`, `car_fresh`, `ball_packet_lag`, `car_packet_lag` (u8 ticks), update ages, `ping_raw` | v1's `packet_lags` table becomes a u8 column |
+| labels | `label_episode`, `label_episode_seconds_remaining`, `label_next_scoring_team`, `label_seconds_until_next_goal` | future-derived; drop as a block |
 
-Its `ActorTracker` also holds about 20 per-actor maps (`src/actor.rs:25-50`). What makes VirxEC's code
-nicer is clear boundaries between modules, not an absence of state, and that is what v2 copies.
+**[decide] Rotation.** Quaternions save about a quarter of the state columns. But a matrix rebuilt from a
+quaternion is not bit-identical to RocketSim's, so a v2 state file restores a RocketSim state only to float
+rounding (about 1e-7). v1's restores it exactly (80,246 of 80,246 exact round trips: RESULTS.md, "Soccar state
+restoration"). Exact restoration stays available through the plan file (3.3). Recommended: quaternions.
 
-## 3. Where v1 hurts (evidence)
+**[decide] Lossy profile.** A `compact` profile with integer-quantized state (0.01 UU, 0.01 UU/s, 1e-4 rad/s)
+would be about 1.5–1.8× smaller again, and is cheap to add later. The converter's own error is far above the
+quantum (p90 3.5 UU on the test split). It stays out of the first release unless you want it.
 
-1. **One function holds the converter.** `convert_observations_with` runs from `conversion/mod.rs:1065` to
-   `2897`, about 1,830 lines. Before its frame loop it declares about 40 mutable locals, most of them maps
-   keyed by `(actor_id, created_frame)` tuples (`1101-1257`). Inside the loop, the per-car body of the
-   phase loop is about 780 lines (`1566-2350`), stepping goes through a local `advance_to!` macro
-   (`1471-1521`), and one closure reads a `RefCell` (`lag_overrides`, `1250`). A reader has to hold all
-   of this in their head to change any one rule.
-2. **Contact alignment is hidden recursion.** With `align_contacts`, the function computes lags, clones the
-   options with `external_packet_lags` set, and calls itself (`1075-1085`). This two-pass structure is the
-   most important timing step, and the code doesn't show it as one.
-3. **`ConvertOptions` mixes three kinds of switch** (`57-114`): user choices (`use_loadout_hitboxes`,
-   `seed`), evaluator hold-outs that only make sense in a masked run (`withheld_frames`,
-   `fit_on_next_packet`, `flip_cancel_holdout`, `infer_dodge_first_packet_tick`) and experiment hooks
-   (`external_packet_lags`, documented as "Experiments only"). It also lets you build invalid
-   combinations: `zero_packet_lag`, `infer_packet_lag` and `external_packet_lags` are three ways to set
-   one thing, and `align_contacts` silently does nothing unless lags are inferred. `impl ConvertOptions {}`
-   is empty (`116`). The mesh path is in the options, and `rocketsim::init` runs inside every conversion
-   (`1091`).
-4. **The output types are wide and stringly typed.** `ConvertedFrame` has 20 public fields (`249-300`) that
-   mix state, simulated events, replay evidence and provenance. Enums are `&'static str`:
-   `AppliedPacketLag::source` (`"chain"`, `"frame_median"`, `"default"`), `FittedInput::kind`, and
-   `DeadShellHold::source`. The game state is compared as a string, `== "Active"` (`ball_evidence.rs:81`,
-   among others). Identity is raw `i32`/`usize` and `String` player keys, so a slot, an actor id and a
-   frame index have the same type. A past tick bug lived in exactly that gap (RESULTS.md "Audit fix batch
-   5: tick rebase").
-5. **Export runs its own conversion.** `write_parquet_with_tables` takes replay bytes and converts
-   internally (`parquet_export.rs:522-533`), so an existing `ConversionOutput` can't be written to
-   Parquet. JSONL goes the other way: it materializes the whole output first (`convert_replay.rs:97-103`).
-   The atomic publish (write to temporary names, back up, rename, roll back) is about 100 lines inside the
-   CLI binary (`convert_replay.rs:86-190`), so Python or library users can't reuse it.
-6. **Python access is two script files.** `python/replicar.py` (JSONL) and `python/replay_columnar.py`
-   (Parquet) are loaded with `sys.path.insert(0, "python")` (README "Reading the output in Python"). There
-   is no package, and converting from Python means launching the CLI.
-7. **The public API carries tool-only items.** `rebase_tick`, `step_arena_tick`, `hitbox_config`,
-   `quaternion` and `rotation_error_degrees` are `pub` for the binaries and tools. `activation_torque`,
-   `controls_from_observation` and `check_soccar_meshes` are `pub` with no user outside `conversion/` at
-   all. `pub use air::*` and `pub use packet_lags::*` (`24-26`) export the solvers wholesale.
-8. **Tests live far from the code they test.** 41 of the 91 tests are in `conversion/mod.rs` (`2898-6105`,
-   about 3,200 lines), testing fits, air solves and lag inference that live in other files.
-9. **Twenty-seven binaries share one crate.** `cargo build` compiles the user's converter together with 26
-   evaluators, calibrations and diagnostics, and all of them shape the library's public surface (point 7).
-   The README lists only some of them.
-10. **One possible nondeterminism.** During the release clean-up, 7 headers differed in a run made while
-    the test suite ran at the same time, then matched when re-run alone (RESULTS.md, "Release clean-up").
-    This was never reproduced. A golden gate needs determinism, so story 0.2 looks into it first. One
-    candidate to check is iteration over `std::collections::HashMap` (random order) wherever the order
-    reaches output **[verify]**.
+### 3.3 The plan file
 
-## 4. The v2 surface
+`match.plan.parquet` holds what the fits decided, so that `replicar` can regenerate the states of
+`match.replay` without fitting:
+- the packet ticks (a u8 lag per object per frame);
+- the timed control changes and presses per car;
+- the air-control segments;
+- the state edits the fits made (dodge starts and cancels, lag overrides).
 
-### 4.1 Rust
+Its header holds the replay's SHA-256, the replicar and RocketSim versions, the configuration, and a checksum of
+a few regenerated states. A mismatched build is then refused instead of silently diverging.
 
-This is a design sketch of the proposed API; it has not been compiled. The RocketSim calls it relies on
-exist at our pin: `rocketsim::init(path, silent)` (`conversion/mod.rs:1091`), `Arena::new_with_config`,
-and `ArenaState`.
+Its size is unknown until it is written. v1's `fitted_inputs` and `packet_lags` tables, which hold part of it,
+are 0.13–0.26 MB per replay, and the air segments come on top **[verify]** (story 5.5).
+
+**The trade-off.**
+- Against: a plan file is tied to one replicar and RocketSim version. Reading it needs the replay and the
+  `replicar` package, and regenerating costs 0.15–0.3 s of CPU per replay.
+- For: storage is a small fraction of the state file, and generation streams.
+
+**[decide]** Which output should the 140,000 replays use first? Recommendation: plan files as the stored form
+(together with the replays, which you keep anyway), and state files written on demand or for subsets.
+
+### 3.4 A corpus
+
+`replicar convert replays/ -o out/ --jobs N` writes one file per replay plus `out/index.parquet`. The index has
+one row per replay: file name, SHA-256, status or error, frames, duration, map, game size, players and teams,
+final score.
+- A failed replay becomes a row with its error, not an aborted batch.
+- `--skip-existing` resumes an interrupted run.
+- Sharding many replays into a few files (with a `replay` column) can come later, if a training loader wants it.
+
+## 4. The code, from the ground up
+
+### 4.1 Pipeline
+
+```
+bytes --parse----> boxcars::Replay
+      --observe--> Observations      typed replay fields per frame with update frames; actor lifetimes; events
+      --time-----> PacketTimeline    each fresh packet's server tick (lag chains, ball runs, contact alignment)
+      --run------> for each frame:   Executor applies packets at their ticks and steps RocketSim;
+                                     at each decision point it asks a Planner (fitting or recorded)
+      --annotate-> touches, ball contacts, pickups, freshness, scoreboard, labels
+      --write----> state file | plan file | in-memory frames
+```
+
+Each arrow is a module with a function or a small struct, and each stage's output is a plain data type that can
+be tested and printed. Compare v1:
+- All of `run` and most of `annotate` are one function of about 1,830 lines (`conversion/mod.rs:1065-2897`),
+  with about 40 mutable locals declared before its loop (`1101-1257`).
+- Contact alignment is a recursive call of that function (`1075-1085`).
+- The `time` stage is spread over `packet_lags.rs`, `contact_alignment.rs` and the loop.
+
+### 4.2 Planner and executor
+
+This is the central split.
+
+The **executor** is small and does what RocketSim needs:
+- it owns the arena and the slot table;
+- it applies each packet's body at its tick;
+- it holds or releases cars (spawn poses, dead shells, observed demolitions);
+- it reconciles pads, steps ticks, and applies the controls it is given.
+
+It contains no fitting and no lookahead.
+
+The **planner** answers the executor's questions at the moments v1's fits run:
+- when a ground control change takes effect;
+- when a jump or dodge was pressed, with what direction and cancel;
+- which air controls to fly between two packets;
+- which tick the first packet after a dodge belongs to.
+
+It has two implementations:
+- `FittingPlanner`: v1's fits (`fits.rs`, `air.rs`, the jump/dodge logic of the loop), each in its own module.
+  It reads the future only through a `Lookahead` view that knows which frames a masked evaluation withholds.
+  Today the withheld check is spread over `frame_withheld` and `options.withheld_frames`.
+- `RecordedPlanner`: answers from a plan file. Recording a plan just means writing down the fitting planner's
+  answers.
+
+Masked evaluation then becomes a planner configuration (`Holdout`), not a set of conversion options. A run without
+fits is the executor with a planner that never changes anything; in v1 that is `input_fits = false`,
+`air_bvp = false`, `infer_air_controls_from_lookahead = false`.
+
+### 4.3 Types
+
+- **Newtypes for identity and time:** `Slot`, `ActorId`, `Lifetime { actor, created_frame }`, `PlayerKey`,
+  `TimelineTick`, `ArenaTick`, `FrameIndex`. In v1 a slot, an actor id and a frame index are all `usize` or
+  `i32`, and a tick-rebase bug lived in exactly that gap (RESULTS.md, "Audit fix batch 5").
+- **Per-car state in one struct:** `CarTrack` per lifetime and `SlotState` per slot. They replace v1's maps keyed
+  by `(actor, created_frame)` tuples (`conversion/mod.rs:1105-1257`): `spawn_started`, `spawn_held`,
+  `spawn_demolished`, `gated_jump_active`, `last_dodge_raw`, `last_double_raw`, `last_counters`,
+  `ground_counters`, `car_shifts`, `handled_dodges`, `flip_cache`, `flip_last`, `lag_overrides` (a `RefCell`
+  today), `dead_shells`, `demo_hold_until`, `last_contact_tick` and `slot_bodies`.
+- **Enums for v1's strings:** `LagSource`, `FittedInput { Jump, Dodge { pitch, yaw, cancel }, Air { span } }`,
+  `HoldSource`, `GameState`. The game state is compared as `== "Active"` today (e.g. `ball_evidence.rs:81`).
+- **Network property names as constants**, as VirxEC does (`src/attributes.rs`). `observations.rs` has 44 inline
+  literals.
+- **One `thiserror` error type.** No `Box<dyn Error>` or string errors in the library (v1 has 7 such sites).
+
+### 4.4 Crates
+
+```
+crates/replicar          library: observe, time, execute, plan, annotate, write, read, restore
+crates/replicar-cli      the `replicar` binary: convert (file or folder), regenerate, inspect, verify
+crates/replicar-python   pyo3 module + python/replicar package (maturin)
+crates/replicar-eval     publish = false: evaluate_corpus, error_budget, rlbot_*, dump_reconstruction, the
+                         consistency checks, the v1 parity checks; the sealed test-split guard lives here
+```
+
+The library's modules mirror the pipeline: `observe/`, `time/`, `execute/`, `plan/` (with `fits/` and `air/`),
+`annotate/`, `format/` (the Arrow schema) and `restore.rs`.
+- No function over about 150 lines.
+- Tests sit next to the code they test. 41 of v1's 91 tests are in `conversion/mod.rs`, testing code in other
+  files.
+- Taken from VirxEC:
+  - a `Converter` builder;
+  - the `rocketsim` re-export instead of a separate `glam` pin;
+  - crate docs that explain the timing model and the event streams first;
+  - `examples/`, a criterion benchmark and a public-API test.
+
+### 4.5 Using it
 
 ```rust
-use replicar::{Converter, Config, Meshes};
-
-let meshes = Meshes::load("collision_meshes")?;     // checks the soccar *.cmf files, calls rocketsim::init once
-let converter = Converter::new(&meshes, Config::default());
-let replay = converter.convert(&std::fs::read("match.replay")?)?;   // -> Reconstruction
-
-for frame in &replay.frames {
-    let state = &frame.state;                         // rocketsim::ArenaState at the frame time
-    let clock = &frame.scoreboard;
-    for goal in frame.events.replay.goals() { /* observed */ }
-    for touch in &frame.events.ball_contacts { /* from ball packets */ }
-}
-replay.write_parquet("match.parquet")?;               // atomic: complete output or nothing, with record tables
-
-// Streaming: snapshot memory bounded to one frame (the observations stay resident, as in v1)
-converter.convert_into(&bytes, replicar::export::ParquetSink::create("match.parquet")?)?;
+let meshes = replicar::Meshes::load("collision_meshes")?;      // checks the soccar meshes; rocketsim::init once
+let converter = replicar::Converter::new(&meshes, Config::default());
+let replay = converter.convert(&bytes)?;                       // frames in memory
+replay.write("match.parquet", Profile::Default)?;              // one file, written atomically
+converter.record(&bytes)?.write("match.plan.parquet")?;        // decisions only
+for frame in converter.regenerate(&bytes, &plan)? { ... }      // streams, no fitting
 ```
 
-**`Config`** has the user-facing knobs only. Each field of v1's `ConvertOptions` maps to v2 like this:
-
-| v1 field (`conversion/mod.rs:57-114`) | v2 |
-| --- | --- |
-| `collision_meshes` | `Meshes` (a loaded resource, not an option) |
-| `seed` | `Config::seed` |
-| `use_loadout_hitboxes` | `Config::hitboxes: Hitboxes::{Loadout, Octane}` |
-| `infer_packet_lag`, `zero_packet_lag`, `align_contacts` | `Config::packet_timing: PacketTiming::{Inferred { align_contacts: bool }, LagFree, FrameTime}`. Invalid combinations can no longer be written |
-| `external_packet_lags` | `PacketTiming::External(Arc<PacketLags>)`, only with the `eval` feature |
-| `input_fits` | `Config::input_fits: bool` |
-| `infer_air_controls_from_lookahead`, `air_bvp` | `Config::air: AirConfig { lookahead: bool, boundary_value: bool }`. These stay two switches because they are layered, not alternatives: lookahead first, then the past-persistence fallback that has no switch, then the boundary-value schedule at fresh packets (`1955-2226`) |
-| `block_sim_pad_pickups` | `Config::simulated_pad_pickups: bool` (inverted, default `false`) |
-| `disable_simulated_demolitions` | `Config::simulated_demolitions: bool` (inverted, default `false`) |
-| `withheld_frames`, `fit_on_next_packet`, `flip_cancel_holdout`, `infer_dodge_first_packet_tick` | `eval::Holdout` (feature `eval`). Its default reproduces today's offline defaults; evaluators build the held-out variants |
-
-**Output types.** `Frame { time, state, scoreboard, events, inferred, freshness, observed }`:
-
-- `time: FrameTime { index, replay_time, timeline: TimelineTick, arena: ArenaTick }`. The two tick kinds
-  are distinct newtypes, so mixing them doesn't compile (AGENTS.md: keep the 120 Hz timeline separate from
-  packet cadence).
-- `events: FrameEvents { replay, simulated, touches, ball_contacts, boost_pickups }`. These stay separate
-  streams, as v1 and VirxEC both insist.
-- `inferred: Inferred { packet_lags, fitted_inputs, holds: Holds { dead_shells, spawn_pose, sleeping_velocity, demolitions } }`.
-- Enums replace the strings: `LagSource::{Chain, FrameMedian, Default}`,
-  `FittedInput::{Jump, Dodge { pitch, yaw, cancel }, Air { span_ticks }}` and
-  `HoldSource::{Observed, Inferred}`. Serde attributes (`rename`, `tag`, `skip_serializing_if`) reproduce
-  today's JSON exactly. This is how the byte-identical goal survives the type change.
-- Newtypes: `Slot`, `ActorId`, `Lifetime { actor, created_frame }`, `PlayerKey`.
-
-**Errors**: one `replicar::Error` (`thiserror`) with `Parse`, `NoNetworkFrames`, `UnsupportedMode`,
-`Meshes`, `InvalidTime { frame, time }`, `NoCarSlots`, `Io` and `Export(parquet/arrow)` variants. No
-`Box<dyn Error>` in the library.
-
-### 4.2 CLI
-
 ```
-replicar convert match.replay -o match.parquet            # or .jsonl; record tables beside it by default
-replicar convert replays/ -o out/ --jobs 8 --skip-existing # batch; one failure doesn't stop the rest
-replicar inspect match.replay                              # header, players, slots, diagnostics (text or --json)
-replicar verify match.parquet                              # restoration check (today: verify_state_restoration)
-  common: --meshes DIR (else $REPLICAR_MESHES, else ./collision_meshes), --octane-hitbox, --no-tables
+replicar convert match.replay -o match.parquet [--profile default|observations|diagnostics] [--octane-hitbox]
+replicar convert replays/ -o out/ --jobs 16 [--skip-existing] [--plan]   # folder: one file per replay + index.parquet
+replicar regenerate match.replay match.plan.parquet -o match.parquet
+replicar inspect match.replay | match.parquet                            # header, players, slots, diagnostics
+replicar verify match.parquet                                            # restoration and schema checks
+  --meshes DIR, else $REPLICAR_MESHES, else ./collision_meshes
 ```
-
-Argument parsing with `clap` (derive) **[decide: new dependency]**. Batch mode converts replays in parallel
-and writes a summary of failures at the end, since the conversion is single-threaded per replay.
-
-**[decide] The sealed-split guard.** Today `convert_replay` refuses any input path with a component named
-`test` (`lib.rs:19-49`, `convert_replay.rs:85`). That is right for this project's protocol and wrong for a
-user whose folder happens to be called `test`. Proposal: the guard moves to `replicar-eval` and the
-repository's scripts, where the protocol runs, and the published `replicar` CLI drops it. This changes the
-test-split protection, so it needs the user's agreement.
-
-### 4.3 Python
 
 ```python
-import replicar                                   # pip install replicar (maturin wheel)
-replicar.set_meshes("collision_meshes")           # or REPLICAR_MESHES
-replay = replicar.convert("match.replay")         # bytes or path; releases the GIL while converting
-replay.header                                     # dict, as read_columnar_header returns today
-arrays = replay.arrays()                          # same keys and dtypes as load_columnar_numpy
-tables = replay.tables()                          # dict of pyarrow.Table, as read_record_tables
-replay.write("match.parquet")                     # same atomic export as the CLI
-old = replicar.read("match.parquet")              # existing exports, pure Python (today's loaders)
-replicar.convert_many(paths, out_dir, jobs=8, skip_existing=True)
+import replicar
+replicar.set_meshes("collision_meshes")
+replay = replicar.convert("match.replay")            # GIL released; .header, .arrays() (NumPy), .records() (pyarrow)
+replicar.read("match.parquet")                       # same object from a file; pure pyarrow, no Rust needed
+for batch in replicar.regenerate("match.replay", "match.plan.parquet", batch_frames=4096):
+    ...                                              # NumPy batches for a training loop
+replicar.convert_many(paths, "out/", jobs=16, plan=True)
 ```
 
-The in-memory path reuses what we have instead of adding a second schema. Rust writes the Parquet export
-into a byte buffer (the writer needs `Write + Send`, not `File`), and Python reads it with pyarrow and the
-existing column logic from `replay_columnar.py`. One schema, one implementation, already tested against
-JSONL (`verify_direct_parquet.py`). The pure-Python loaders merge into the package as `replicar.read`.
-Type stubs (`.pyi`) ship with it.
+## 5. Proving it is the same reconstruction
 
-Collision meshes can't ship in the wheel: they are extracted from the game, and the README says to supply
-them. **[decide]** whether to document a download or dump route (for example the user's
-`RLArenaCollisionDumper`) or leave it to the user as today.
+v1 stays the oracle. `replicar-eval` depends on v1 at the tag `v1-final` through a renamed git dependency (e.g.
+`replicar_v1 = { package = "replicar", git = ..., tag = "v1-final" }`). Both depend on the same RocketSim
+revision, so the comparison runs in one process. **[verify]** that cargo unifies the RocketSim dependency and that
+`rocketsim::init` tolerates being called a second time.
 
-## 5. The v2 layout
+1. **States, bit for bit.** For each of the 120 train and validation replays, v2 must equal v1 exactly on:
+   - every frame's ball and car state (physics, timers, flags, controls), the pad states and the arena tick;
+   - the records (events, touches, contacts, pickups, fitted inputs, packet lags);
+   - the scoreboard and the labels.
+2. **A ladder of configurations**, so that a difference points at one part:
+   - the executor without fits, against v1 with `input_fits`, `air_bvp`, `infer_air_controls_from_lookahead` and
+     `align_contacts` off;
+   - then each fit switched on;
+   - then the defaults;
+   - then the evaluators' held-out variants (`flip_cancel_holdout`, `fit_on_next_packet` off, withheld frames).
 
-```
-Cargo.toml                       workspace
-crates/replicar/                 the library (publishable if rocketsim comes from crates.io)
-  src/lib.rs                     crate docs: pipeline, timing model, observed/inferred/future-derived vocabulary
-  src/converter.rs               Converter, Config, Meshes; runs the stages in order (target under 300 lines)
-  src/error.rs                   Error
-  src/ids.rs, src/time.rs        Slot, ActorId, Lifetime, PlayerKey; TimelineTick, ArenaTick, FrameTime
-  src/observe/                   stage 1, from observations.rs (1,474 lines)
-    attributes.rs                every network property name as a const
-    actors.rs                    actor graph, lifetimes, player links, ID reuse
-    header.rs  events.rs  mod.rs Observations, ObservedFrame, Value<T>, Source
-  src/analyze/                   stage 2: whole-replay, offline, before the main simulation
-    timing/                      packet_lags.rs (802), lag-free detection, ball runs; contact_alignment.rs (398)
-    ball_evidence.rs  scoreboard.rs
-    pads.rs                      pad name -> pad index votes (conversion/mod.rs:1125-1180 today)
-  src/reconstruct/               stage 3: the simulation
-    mod.rs                       Reconstructor::run: the per-frame loop as named steps (section 5.1)
-    plan.rs                      FramePlan: object lags, phases, control switches (1384-1467 today)
-    stepping.rs                  step_ticks and advance_to (896-985, 1471-1521 today)
-    slots.rs                     SlotTable: player -> slot, hitbox, loadout changes
-    car.rs                       CarTrack: everything kept per car lifetime (section 5.2)
-    lifecycle.rs                 spawn-pose holds, dead shells, demolition holds
-    actions.rs                   jump/dodge counters, jump gate, dodge refresh
-    pads.rs                      pad cooldowns, blocked simulated pickups
-    lookahead.rs                 Lookahead: the only door to future packets; refuses withheld frames by construction
-    fits/                        from fits.rs (1,392): ground timing, jump, dodge start, flip cancel; ScratchArenas pool
-    air/                         from air.rs (942): inverse model, span solve, boundary-value solve
-  src/annotate/                  stage 4: from the exported poses
-    touches.rs  contacts.rs  pickups.rs  freshness.rs  labels.rs
-  src/model/                     output types and their serde shape (frozen against the golden files)
-  src/export/                    stage 5
-    sink.rs                      FrameSink trait; VecSink
-    jsonl.rs                     from serialization.rs
-    parquet/                     from parquet_export.rs (1,101) and parquet_tables.rs (1,205)
-    atomic.rs                    publish-on-complete, from convert_replay.rs:86-190
-  src/restore.rs                 from restoration.rs
-  examples/  benches/  tests/
-crates/replicar-cli/             the `replicar` binary
-crates/replicar-python/          pyo3 bindings + python/replicar/ package (maturin)
-crates/replicar-eval/            publish = false: evaluate_corpus, error_budget, rlbot_*, dump_reconstruction,
-                                 check_scoreboard, count_demolitions, consistency_counts, diagnostics; the sealed guard
-docs/                            getting-started, concepts, output-format, evaluation, contributing
-```
+   v1 already has an option for every rung (`conversion/mod.rs:57-114`).
+3. **Evaluator reports.** `evaluate_corpus`, ported to v2, must print the same numbers as v1's reference run
+   (default and `--aligned-targets`, train and validation). If the states are identical this follows
+   automatically, but it is still run, because the evaluator itself is ported.
+4. **Plan replay.** States regenerated from a plan file must equal the states of the conversion that recorded it,
+   on all 120 replays, in a second process, and on a second machine if one is available. **[verify]**
+   cross-machine determinism. The plan file's checksum makes a mismatch loud.
+5. **Size and speed** on the fixed replay list in RESULTS.md: file size per profile; conversion, recording and
+   regeneration time; mean and maximum against v1.
 
-The library's `eval` feature exposes what the evaluators need (`Holdout`, `PacketTiming::External`,
-pre-correction states, the solvers) under `replicar::eval`. It stays out of the default public surface.
+An intentional change of output (a v1 behaviour found to be wrong during the rewrite) goes in a separate commit
+with the full protocol: a paired `run_reference.sh` run against v1; counts and p50/p90/p99 per game size and per
+replay; the decision made on validation; an entry in RESULTS.md. The test split stays sealed.
 
-### 5.1 The per-frame loop, as it should read
+## 6. Stories
 
-```rust
-for frame in observations.frames() {
-    let clock = self.clock.advance(frame)?;              // timeline tick, gap, simulated? (1259-1300 today)
-    let plan = FramePlan::new(frame, &clock, &self.timing, &self.cars);   // lags, phases, control switches
-    for phase in plan.phases() {
-        self.step_to(phase.tick, &plan.switches);         // advance_to!
-        self.apply_ball_packet(frame, phase);
-        for car in phase.cars() { self.cars.track(car).apply_packet(&mut self.arena, car, &ctx)?; }
-    }
-    self.step_to(plan.end, &plan.switches);
-    self.finish_interval(frame, &clock);                  // demolitions, dodge refresh, pads (2360-2570 today)
-    let frame_out = self.annotate(frame, &clock);         // touches, contacts, pickups, freshness (2576-2832)
-    sink.frame(&frame_out)?;
-}
-```
+Each story is one reviewable commit that passes `cargo test --all-targets` and the parity check of its rung.
+C is the complexity. Work happens on a `v2` branch, and the record files are updated at each milestone.
 
-`CarTrack::apply_packet` is the 780-line body of today's per-car loop, split into the steps its comments
-already name: slot resolution, body and spawn pose, spawn hold, sleeping packet, dead shell, boost, dodge
-and double-jump counters, the jump gate, air controls (lookahead, then persistence), the boundary-value
-schedule, and the input fits.
+| # | Story | Acceptance | C |
+| --- | --- | --- | --- |
+| **0** | **Baseline** | | |
+| 0.1 | RocketSim to the latest compatible revision (crates.io 0.2.7 or `v3-rust` `dc5d60e`; **[verify]** which is newer and whether they are the same code); ROCKETSIM_NOTES re-run | measured like the 2026-10-04 update | M |
+| 0.2 | Tag `v1-final`; v1 reference reports on train and validation; speed baseline | recorded in RESULTS.md | L |
+| 0.3 | Determinism: run v1 twice, and alongside `cargo test` (7 headers differed once in such a run: RESULTS.md, "Release clean-up") | equal, or the cause found | M |
+| **1** | **Skeleton** | | |
+| 1.1 | Workspace, four crates, CI commands, `thiserror` error, newtypes | builds; unit tests | M |
+| 1.2 | `replicar-eval parity` harness against `replicar_v1` | v1 compared with itself is equal | M |
+| **2** | **Observe** | | |
+| 2.1 | Attribute constants; actor graph and lifetimes | `hash_observations` equal to v1 on 120 replays | H |
+| 2.2 | Players, teams, events, pads, header and diagnostics | same | M |
+| **3** | **Time** | | |
+| 3.1 | Packet chains, lag-free detection, ball runs (`packet_lags.rs`) | lags equal to v1 on 120 replays | H |
+| 3.2 | Contact alignment as a stage (`contact_alignment.rs`, `ball_evidence.rs`) | aligned lags equal | H |
+| **4** | **Execute** | | |
+| 4.1 | Executor: slots, packets at their ticks, stepping | rung "no fits" equal | H |
+| 4.2 | Lifecycle: spawn holds, dead shells, observed demolitions, sleeping packets | rung "no fits" equal, including the hold lists | H |
+| 4.3 | Actions: counters, jump gate, dodge refresh; pads | rung "no fits" equal | M |
+| 4.4 | Determinism of the executor across processes | equal states, 120 replays | L |
+| **5** | **Plan** | | |
+| 5.1 | Planner interface and `Lookahead` with withheld frames; air lookahead and persistence | rung "air lookahead" equal; the masked leak test passes | M |
+| 5.2 | Air boundary-value solve (`air.rs`) | rung "air_bvp" equal | H |
+| 5.3 | Input fits: ground timing, jump, dodge start and first-packet tick, flip cancel (`fits.rs`) | rung "input_fits" equal, then the defaults | H |
+| 5.4 | Held-out variants | evaluator rungs equal | M |
+| 5.5 | `RecordedPlanner` and the plan file | regenerated equals recorded on 120 replays; plan size measured | M |
+| **6** | **Annotate** | | |
+| 6.1 | Touches, ball contacts, boost pickups | records equal | M |
+| 6.2 | Scoreboard, freshness, labels | equal | M |
+| **7** | **Formats** | | |
+| 7.1 | State file schema and writer, profiles, atomic write | values equal to v1 Parquet column by column; size measured per profile | M |
+| 7.2 | Reader (Rust and pure Python) and restoration | restores every frame within the rotation tolerance; exactly from a plan | M |
+| **8** | **Front ends** | | |
+| 8.1 | CLI: convert (file, or folder with `index.parquet`), regenerate, inspect, verify | train converted as a folder equals file-by-file | M |
+| 8.2 | Python: convert, read, regenerate (batches), convert_many; type stubs; wheels | Python tests; arrays equal to the Rust reader's | M |
+| **9** | **Evaluation and release** | | |
+| 9.1 | Port `evaluate_corpus` and the tools the protocol uses to `replicar-eval` | reports equal to v1's reference | H |
+| 9.2 | Docs (concepts, output format, evaluation, contributing), examples, benchmark | `cargo doc` clean | M |
+| 9.3 | Final check (section 5), CHANGELOG 2.0.0, crates.io and PyPI | all of section 5 | M |
 
-### 5.2 Per-car state in one struct
+Speed gains taken along the way, where they cost nothing in output:
+- the folder mode converts replays in parallel;
+- the plan file removes the fits from every later use;
+- contact alignment's first pass may not need to rebuild what the second pass rebuilds **[verify]**
+  (`conversion/mod.rs:1075-1085`, `contact_alignment.rs`).
 
-These v1 maps move into `CarTrack` (keyed by `Lifetime`) or `SlotState` (keyed by `Slot`). Line numbers
-are their declarations in `conversion/mod.rs`:
+The deeper gains wait for parity; the boundary-value solve is the largest single cost (RESULTS.md, "Code review
+before the freeze, and what a conversion costs").
 
-- Per lifetime: `spawn_started`, `spawn_demolished`, `gated_jump_active`, `last_dodge_raw`,
-  `last_double_raw`, `last_counters`, `ground_counters`, `car_shifts`, `handled_dodges`, `flip_cache` and
-  `flip_last` (keyed by lifetime plus frame), and `lag_overrides`, whose `RefCell` goes away (1105-1257).
-- Per slot: `spawn_held`, `dead_shells`, `demo_hold_until`, `last_contact_tick`, `slot_bodies`.
-- Shared, replay-wide: `pad_actor_to_index`, `pad_cooldowns`, `pad_name_to_index`, `last_pad_counter`
-  (to `reconstruct/pads.rs` and `analyze/pads.rs`); `recent_poses` and `recent_touch_ticks` (to
-  `annotate`); the scratch arenas `ground_scratch` and `flip_scratch` (to `fits::ScratchArenas`).
+## 7. Risks
 
-A slot's or a car's whole state is then visible in one `Debug` print, which also helps the frame-by-frame
-window inspections AGENTS.md asks for.
+- **A rewrite drifts.** The parity ladder is the guard: no story is done while its rung differs from v1, and each
+  rung isolates one part.
+- **Floating-point order.** Bit-identical states require the same operations in the same order. Ported code keeps
+  its arithmetic as written, and differences are found rung by rung, not at the end.
+- **Determinism of plan replay.** If RocketSim is not deterministic across processes or machines, the plan file
+  degrades to "same build, same machine". Story 4.4 finds out early.
+- **Cost.** This is a larger project than the first draft's refactor, but the milestones are useful on their own:
+  the plan file exists after story 5.5, and the state file after milestone 7.
 
-## 6. How parity is checked
+## 8. Questions for the user
 
-### 6.1 The golden gate (every story)
-
-- **Story 0.1** writes `replicar-eval golden`. For each of the 120 train and validation replays, it records
-  the SHA-256 of the default JSONL frame lines, the header with the `options` block removed, and the
-  Parquet column contents. They go in `target/golden/<commit>/manifest.json` (hashes only; no replay
-  content; ignored by git). It extends the existing `hash_observations` binary, which already hashes
-  extracted observations for parser changes (`src/bin/hash_observations.rs:1-4`).
-- Before every story is committed, the manifest of the v1 tag `v1-final` (made in story 0.1) must equal
-  the manifest of the story's tree. Both are built with the same RocketSim revision and toolchain. Any
-  difference blocks the story until it is explained.
-- Floating-point order matters: moving code must keep expression order. The gate catches it when it
-  doesn't.
-
-### 6.2 Headers
-
-v2 serializes a **v1-compatible options record**: the v1 field names and values, derived from `Config`
-and `Holdout`. This keeps the header's `options` block and the record tables' `options_sha256` identical,
-so even headers can stay byte-identical. When we later want to show the v2 names, that is a schema-v2
-change made on purpose (section 9), not a by-product of the rewrite.
-
-### 6.3 Intentional output changes
-
-Stories in this plan should not need any. If one turns out to be preferable (for example a behaviour that
-only the old structure produced and that the evidence says is wrong), it goes in its own commit. That
-commit gets the full protocol: `scripts/run_reference.sh` (default and aligned, train and validation)
-against the v1 reference at the same RocketSim revision; counts and p50/p90/p99 pooled, per game size and
-per replay; windows inspected for material changes; the decision made on validation; and an entry in
-RESULTS.md.
-
-### 6.4 Speed
-
-`python/benchmark_conversion.py` on a fixed list (3 replays per game size from train, one warm-up, three
-repetitions), v1 and v2 built from `git archive`, plus the corpus wall time from `run_reference.sh`.
-Checked at the end of milestones 3, 5 and 8.
-
-### 6.5 RocketSim
-
-The rewrite keeps one RocketSim revision from start to finish, so every comparison runs on the same
-version (user rule, 2026-10-06). Updating RocketSim to the latest compatible revision (`dc5d60e` on
-`v3-rust` at 2026-10-06, or crates.io 0.2.7 **[verify]** whether these are the same code) is a separate
-step before story 0.1 or after story 8.3. It gets its own measurement and a re-run of the issues in
-ROCKETSIM_NOTES.md. Recommended: **before**. The golden reference is then made on the newest RocketSim,
-and v2 never has to straddle an update.
-
-## 7. Stories
-
-Each story fits one reviewable commit (at most about 300 changed lines of logic, apart from moved code; at
-most about 3 files of new logic) and passes `cargo test --all-targets` and the golden gate. Complexity:
-L(ow), M(edium), H(igh). Work happens on a `v2` branch. The record files (PLAN, RESULTS, README) are
-updated at each milestone.
-
-**Milestone 0: baseline**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 0.1 | `golden` subcommand and `v1-final` tag; manifest for 120 replays | Two runs of the same build give equal manifests | Long runtime (about 9 min with four parallel) | M |
-| 0.2 | Determinism check: run the golden build twice in parallel with `cargo test`; look into the unreproduced header differences (section 3, point 10) | 3 repeated runs equal; cause found or ruled out | May not reproduce again | M |
-| 0.3 | Speed baseline on the fixed list | Recorded in RESULTS.md | Machine noise | L |
-
-**Milestone 1: workspace without behaviour change**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 1.1 | Cargo workspace; library moves to `crates/replicar` unchanged | Golden equal; all tests pass | Paths in tests (`CARGO_MANIFEST_DIR` + `replays/`) | M |
-| 1.2 | Binaries move to `crates/replicar-eval` (multi-bin first, subcommands later); `run_reference.sh` and README updated | Every binary builds; golden equal | Tools using `pub` internals: gather them behind the `eval` feature | M |
-| 1.3 | `glam` usage through `rocketsim`'s re-export; drop the direct dependency if every type used is re-exported **[verify]** | Builds; golden equal | Version skew if the re-export differs | L |
-
-**Milestone 2: types**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 2.1 | `ids.rs`, `time.rs` (newtypes, `TimelineTick`/`ArenaTick`) | Unit tests; golden equal | Wide but mechanical change | M |
-| 2.2 | Enums for `LagSource`, `FittedInput`, `HoldSource`, `GameState`, with serde shapes matching v1 | Serde round-trip tests against v1 JSON snippets; golden equal | A serde detail (field order, skip rules) differs | M |
-| 2.3 | `thiserror` `Error`; export functions return it | No `Box<dyn Error>` in the library | Messages change (CLI text only) | L |
-
-**Milestone 3: configuration and stages before the simulation**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 3.1 | `Config`, `PacketTiming`, `AirConfig`, `eval::Holdout`; v1 options record for the header | Mapping table of section 4.1 tested both ways; golden including headers | A default flips by mistake (the inverted booleans) | M |
-| 3.2 | `Meshes` resource; `rocketsim::init` once per process | Missing-mesh test still passes (`conversion/mod.rs:3911`) | `init` is global in RocketSim: two different mesh paths in one process **[verify]** behaviour | L |
-| 3.3 | `analyze/pads.rs` (pad name votes) | Unit test on a synthetic replay; golden | HashMap iteration in the vote (`1170-1179` sorts, **[verify]** ties) | L |
-| 3.4 | Contact alignment as an explicit stage in place of the recursive call (`1075-1085`) | Golden; the stage order is visible in `converter.rs` | The second pass's options differ subtly (`align_contacts = false`) | M |
-
-**Milestone 4: the simulation loop (highest risk; one group of state per story)**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 4.1 | `Reconstructor` struct holds the arena and the replay-wide state; the loop body unchanged inside a method | Golden | Borrow checker around `on_frame` and the arena | M |
-| 4.2 | `FrameClock` and `FramePlan` (lags, phases, switches) | Golden; unit test of phase order | Order of equal lags (`sort_unstable_by` + `dedup`, `1387-1388`) | M |
-| 4.3 | `stepping.rs`: `advance_to!` becomes a method | Golden | Captures of the macro | M |
-| 4.4 | `CarTrack` with the spawn-pose hold state | Golden; the spawn tests (`3520-3910`) pass | Hold release rules across withheld frames | H |
-| 4.5 | Dead shells and demolition holds into `lifecycle.rs` | Golden; shell tests (`3128-3519`) pass | Hold start after the interval | H |
-| 4.6 | Counters, jump gate, dodge refresh into `actions.rs` | Golden; jump and dodge tests pass | Edge semantics across intervals | H |
-| 4.7 | Air control layering and the boundary-value schedule into `car.rs`/`air/` | Golden; air tests pass | Held-jump rising-edge rule (RESULTS "Before the freeze") | H |
-| 4.8 | Input fits behind `fits::FitContext` with a `ScratchArenas` pool and `Lookahead`; `RefCell` removed | Golden; fit tests pass; `Lookahead` refuses withheld frames (existing leak test) | Cache keys; withholding coverage | H |
-| 4.9 | `finish_interval`: demolitions, sleeping packets, pads | Golden | Pad cooldown ordering | M |
-
-**Milestone 5: after the simulation, and export**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 5.1 | `annotate/`: touches, ball contacts, boost pickups, freshness | Golden | Recent-pose window bounds | M |
-| 5.2 | `FrameSink`; JSONL and Parquet as sinks; `Reconstruction::write_*` | Golden for both formats; `verify_direct_parquet.py` passes | Parquet slot widths need `car_slot_count` before the pass (`parquet_export.rs:538`) | M |
-| 5.3 | `export/atomic.rs` from the CLI | The CLI's rollback behaviour has tests (it has none today **[verify]**) | Windows rename semantics | M |
-| 5.4 | Tests move next to their modules; synthetic `testkit` builder for `Observations` | Test count not lower (91); `cargo test` time recorded | Duplicate helpers | M |
-| 5.5 | Speed check (section 6.4) | Within budget | — | L |
-
-**Milestone 6: CLI**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 6.1 | `replicar convert` (single file), `inspect`, `verify` | Same files as `convert_replay`; help text | — | M |
-| 6.2 | Batch mode with `--jobs`, `--skip-existing`, failure summary | Converting train in a batch equals single-file runs | Memory with many jobs (replay-sized observations each) | M |
-
-**Milestone 7: Python**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 7.1 | `replicar-python` crate (pyo3, maturin) with `convert` returning Parquet bytes | `replay.arrays()` equals `load_columnar_numpy` of the CLI's file | pyo3/maturin versions **[decide]**; GIL release | M |
-| 7.2 | Package `replicar` (merging `replicar.py`, `replay_columnar.py`), `read`, `convert_many`, stubs | The existing Python tests pass against the package | Import path change for current users (keep the old modules as shims for one release) | M |
-
-**Milestone 8: documentation and release**
-
-| # | Story | Acceptance | Risk | C |
-| --- | --- | --- | --- | --- |
-| 8.1 | Crate docs, `docs/` pages, `examples/` (convert, stream, inspect events), criterion bench | `cargo doc` without warnings; examples run | — | M |
-| 8.2 | `clippy::pedantic` as warnings, module by module | Clean or allowed with reasons | Churn; golden guards it | M |
-| 8.3 | Final verification: golden, `run_reference.sh` against v1, speed; CHANGELOG 2.0.0 | Section 1 "Done means" met | — | M |
-
-## 8. Risks
-
-- **Hidden order dependencies.** Moving state out of one function can change the order of side effects on
-  the arena, for example a car's controls set before or after another car's packet. The golden gate
-  catches it, and stories in milestone 4 are small so a difference points at a few lines.
-- **Withholding leaks.** Today the withheld check is scattered (`frame_withheld`, `options.withheld_frames`).
-  In v2 the `Lookahead` type is the only way to read future packets, and it carries the mask, which makes
-  the property structural. The existing leak test (cutting the replay after a window leaves masked
-  predictions unchanged, TEST_PROTOCOL.md section 2) must pass unchanged.
-- **Scope creep.** Every "while we're here" improvement goes to section 9, not into a refactor story.
-- **Parallel record files.** RESULTS.md and the protocol cite v1 binary names and lines. The README and
-  TEST_PROTOCOL keep a short "v1 name → v2 command" table, and the test-assessment tag stays reproducible
-  as v1.
-
-## 9. After parity (candidates, each measured on its own)
-
-- Speed: the air boundary-value solve is about half the base cost; a coarse-to-fine ground shift search
-  and an LM stall rule are open (RESULTS.md:1684, PLAN.md backlog item 8).
-- Schema v2: v2 names in the header options, enums as strings in Parquet dictionaries, and a published
-  JSON Schema for the frame record.
-- Modes and mutators, after VirxEC's `arena_config.rs`: detect from the replay, simulate when RocketSim
-  supports them, refuse clearly otherwise.
-- crates.io and PyPI releases, if the user wants them **[decide]**.
-
-## 10. Questions for the user
-
-1. **Sealed-split guard** in the published CLI: move it to the eval crate (recommended) or keep it?
-2. **New dependencies**: `thiserror`, `clap`, `pyo3` + `maturin`; `criterion` for development. All are
-   standard; each is a new pin.
-3. **Publishing**: crates.io (needs `rocketsim` from crates.io) and PyPI, or local and git installs only?
-4. **RocketSim update** before the golden reference (recommended) or after v2?
-5. **Speed budget**: mean +3% and no replay +10% acceptable?
-6. **Meshes for pip users**: document a route, or leave it as today?
+1. **Plan file or state file** as the stored form for the 140,000 replays (3.3)? Recommendation: plan files, with
+   state files on demand.
+2. **Quaternions** in the state file, with exact restoration only from plan files (3.2)?
+3. **Observations** (raw replay fields with freshness) in an opt-in profile rather than the default file?
+4. **A lossy compact profile**: wanted now, later, or never?
+5. **Python:** the oldest version to support (the measurements used 3.11)?
