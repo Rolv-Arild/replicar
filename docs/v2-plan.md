@@ -1,6 +1,6 @@
 # replicar v2: design and migration plan
 
-Status: proposal, sixth draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented.
+Status: sixth draft, 2026-10-06, branch `v2-plan`; in progress on branch `v2` since 2026-10-07 (PLAN.md has the stories done).
 
 Earlier drafts:
 - `ac4b8c4`: a refactor of v1 in place;
@@ -392,7 +392,7 @@ C is the complexity. Work happens on a `v2` branch, and the record files are upd
 | 2.2 | Players, teams, events, pads, header and diagnostics | same | M |
 | **3** | **Time** | | |
 | 3.1 | Update chains, lag-free detection, ball runs (v1 `packet_lags.rs`) | update ticks equal to v1 on 120 replays | H |
-| 3.2 | Contact alignment as a stage (`contact_alignment.rs`, `ball_evidence.rs`) | aligned lags equal | H |
+| 3.2 | Contact alignment as a stage (`contact_alignment.rs`, `ball_evidence.rs`); **after 6.1**: its first pass is a conversion without the expensive fits, whose ball contacts it refits | aligned lags equal | H |
 | **4** | **Execute** | | |
 | 4.1 | Simulator: players, updates at their ticks, stepping | rung "no fits" equal | H |
 | 4.2 | Car status: spawning cars, wrecks, observed demolitions, sleeping updates | rung "no fits" equal, including the hold lists | H |

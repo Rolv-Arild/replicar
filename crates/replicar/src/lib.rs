@@ -7,6 +7,10 @@
 
 pub mod decode;
 mod error;
+pub mod hitbox;
+#[cfg(test)]
+mod testkit;
+pub mod update_ticks;
 
 pub use error::Error;
 pub use replicar_format::{FrameIndex, PlayerIndex, ReplayTick, SimTick, TICKS_PER_SECOND, Team};

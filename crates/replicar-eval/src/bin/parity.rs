@@ -4,6 +4,7 @@
 //!
 //! Stages:
 //! - `decode`: v2's decoded network feed against v1's observations (`observations::extract`).
+//! - `update_ticks`: v2's update-tick inference against v1's packet lags (`infer_packet_lags`, default options).
 //!
 //! Prints one line per replay (`equal`, or the first difference) and a summary; exits non-zero when any
 //! replay differs or fails.
@@ -26,17 +27,35 @@ fn decode(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
     Ok(first_difference(&expected, &actual))
 }
 
+fn update_ticks(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    let replay = replicar::parse(bytes)?;
+    let observations =
+        replicar_v1::observations::extract(&replay).ok_or("v1 found no network frames")?;
+    let v1 = replicar_v1::conversion::infer_packet_lags(
+        &observations,
+        &replicar_v1::conversion::ConvertOptions::default(),
+    );
+    let network = replicar::decode::decode(&replay)?;
+    let v2 =
+        replicar::update_ticks::infer(&network, true, replicar::update_ticks::Withheld::default());
+    Ok(first_difference(
+        &v1_shape::canonical_lags_v1(&v1),
+        &v1_shape::canonical_lags_v2(&v2),
+    ))
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     args.retain(|a| a != "--final-assessment");
-    let usage = "usage: parity <decode> <replay or folder>... [--final-assessment]";
+    let usage = "usage: parity <decode|update_ticks> <replay or folder>... [--final-assessment]";
     let (Some(stage), true) = (args.first().cloned(), args.len() >= 2) else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
     };
     let check: Check = match stage.as_str() {
         "decode" => decode,
+        "update_ticks" => update_ticks,
         other => {
             eprintln!("unknown stage {other}\n{usage}");
             return ExitCode::FAILURE;

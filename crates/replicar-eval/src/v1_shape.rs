@@ -188,3 +188,100 @@ pub fn observed_replay(replay: &NetworkReplay) -> v1::ObservedReplay {
         },
     }
 }
+
+/// v1's packet lags in a canonical form: car runs sorted by (actor, creation frame, first frame), and each
+/// car update's run named by that identity instead of v1's index (v1 builds its runs from a `HashMap`, so
+/// their order varies between runs of the program).
+pub fn canonical_lags_v1(lags: &replicar_v1::conversion::PacketLags) -> serde_json::Value {
+    let run_id = |run: &replicar_v1::conversion::CarRun| {
+        format!(
+            "{}:{}:{}",
+            run.actor,
+            run.created,
+            run.entries.first().map_or(0, |e| e.0)
+        )
+    };
+    let mut runs: Vec<serde_json::Value> = lags
+        .car_runs
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "id": run_id(run),
+                "entries": run.entries.iter().map(|&(f, k)| (f, k)).collect::<Vec<_>>(),
+                "lo": run.lo, "hi": run.hi, "start": run.start,
+            })
+        })
+        .collect();
+    runs.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let mut cars: Vec<(String, f32, String)> = lags
+        .car_actor
+        .iter()
+        .map(|(&(actor, created, frame), &lag)| {
+            let run = lags
+                .car_run_of
+                .get(&(actor, created, frame))
+                .map_or_else(String::new, |&i| run_id(&lags.car_runs[i]));
+            (format!("{actor}:{created}:{frame}"), lag, run)
+        })
+        .collect();
+    cars.sort_by(|a, b| a.0.cmp(&b.0));
+    serde_json::json!({
+        "ball": lags.ball,
+        "car_median": lags.cars,
+        "cars": cars,
+        "ball_car_offset": lags.ball_car_offset,
+        "bridged_hits": lags.bridged_hits,
+        "lag_free": lags.lag_free,
+        "car_runs": runs,
+    })
+}
+
+/// v2's update ticks in the same canonical form.
+pub fn canonical_lags_v2(ticks: &replicar::update_ticks::UpdateTicks) -> serde_json::Value {
+    let run_id = |run: &replicar::update_ticks::CarRun| {
+        format!(
+            "{}:{}:{}",
+            run.life.actor.0,
+            run.life.created.0,
+            run.entries.first().map_or(0, |e| e.0.0)
+        )
+    };
+    let mut runs: Vec<serde_json::Value> = ticks
+        .car_runs
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "id": run_id(run),
+                "entries": run.entries.iter().map(|&(f, k)| (f.0, k)).collect::<Vec<_>>(),
+                "lo": run.lo, "hi": run.hi, "start": run.start,
+            })
+        })
+        .collect();
+    runs.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let as_f32 = |v: &[Option<u32>]| v.iter().map(|x| x.map(|x| x as f32)).collect::<Vec<_>>();
+    let mut cars: Vec<(String, f32, String)> = ticks
+        .cars
+        .iter()
+        .map(|(&(life, frame), &lag)| {
+            let run = ticks
+                .car_run_of
+                .get(&(life, frame))
+                .map_or_else(String::new, |&i| run_id(&ticks.car_runs[i]));
+            (
+                format!("{}:{}:{}", life.actor.0, life.created.0, frame.0),
+                lag as f32,
+                run,
+            )
+        })
+        .collect();
+    cars.sort_by(|a, b| a.0.cmp(&b.0));
+    serde_json::json!({
+        "ball": as_f32(&ticks.ball),
+        "car_median": as_f32(&ticks.car_median),
+        "cars": cars,
+        "ball_car_offset": ticks.ball_car_offset,
+        "bridged_hits": ticks.bridged_hits,
+        "lag_free": ticks.lag_free,
+        "car_runs": runs,
+    })
+}
