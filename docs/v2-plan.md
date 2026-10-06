@@ -1,12 +1,13 @@
 # replicar v2: design and migration plan
 
-Status: proposal, fifth draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented.
+Status: proposal, sixth draft, 2026-10-06, branch `v2-plan`. Nothing here is implemented.
 
 Earlier drafts:
 - `ac4b8c4`: a refactor of v1 in place;
 - `95b0fd6`: the first ground-up draft;
 - `1c33303`: the third draft (column groups, `exact`/`compact`), before the names were settled;
-- `a67e23d`: the fourth draft with the glossary, before the frames were limited to play segments.
+- `a67e23d`: the fourth draft with the glossary, before the frames were limited to play segments;
+- `4d7919f`: the fifth draft, whose future columns still looked across segments to the next goal.
 
 Sources and conventions:
 - Facts about v1 cite files at `master` = `5a7da58`.
@@ -45,6 +46,7 @@ Sources and conventions:
     goal celebrations and goal replays are left out unless asked for (`--all-frames`).
   - **The future-derived columns are in the default groups**, under a better name than "labels" (`future`).
   - **Plain `.parquet`.** `inferred` was ambiguous (now `resimulation`).
+  - **A segment that ends without a goal is marked as such**, not given the next segment's goal.
 
 ## 2. What the measurements say
 
@@ -116,7 +118,7 @@ is defined in `docs/glossary.md`.
 | `state` | yes | ball and car physics, car internals (what restoration needs), controls, boost, pads, car status |
 | `game` | yes | scoreboard, events, ball contacts and boost pickups (as `list<struct>` columns) |
 | `updates` | yes | whether each body was updated, its update tick, ticks and seconds since its last update, ping |
-| `future` | yes | the future-derived `future_` columns: next goal's team, seconds until it, seconds until the segment ends |
+| `future` | yes | the future-derived `future_` columns: how this play segment ends (`blue_goal`, `orange_goal`, `time_expired`, `replay_ended`, `other`) and the seconds until it ends |
 | `network` | no | the replay's network feed as replicar decodes it: each value with the frame of its last change |
 | `resimulation` | no | what the fitted inference chose; with the replay, enough to resimulate `state` exactly (3.3) |
 | `diagnostics` | no | prediction errors before each correction, simulated touches, RocketSim's own events |
@@ -364,7 +366,10 @@ revision, so the comparison runs in one process. **[verify]** that cargo unifies
 5. **Size and speed** on the fixed replay list: size per group and precision; conversion, resimulation and read
    time; mean and maximum against v1.
 
-An intentional change of output goes in a separate commit with the full protocol: a paired `run_reference.sh`
+The future group is an intentional change from v1, by the user's decision: v1's next-goal labels look across
+segments (`labels.rs:19-23`), v2's end of segment never does. It is checked against its own definition (segment
+boundaries and end kinds against the events and the clock) instead of against v1. Any other intentional change of
+output goes in a separate commit with the full protocol: a paired `run_reference.sh`
 run; counts and p50/p90/p99 per game size and per replay; the decision made on validation; an entry in RESULTS.md.
 The test split stays sealed.
 
@@ -401,7 +406,7 @@ C is the complexity. Work happens on a `v2` branch, and the record files are upd
 | 5.5 | `RecordedInference`; inferences recorded and replayed in memory | replayed equals recorded on 120 replays; volume measured | M |
 | **6** | **Annotate** | | |
 | 6.1 | Touches, ball contacts, boost pickups | records equal | M |
-| 6.2 | Scoreboard, updates, play segments, future | equal | M |
+| 6.2 | Scoreboard, updates, play segments, future | scoreboard and updates equal to v1; segment boundaries equal to v1's episodes; every segment's end kind agrees with the goal events and the clock | M |
 | **7** | **Format** (`replicar-format`) | | |
 | 7.1 | Schema with column groups, play-segment rows and `--all-frames`, `float32` precision, writer, atomic write | values equal to v1's Parquet columns on the same frames; opens in pyarrow, polars and DuckDB; sizes recorded | M |
 | 7.2 | `quantized` precision with scales in field metadata | errors within the quantum; sizes recorded | M |
@@ -460,10 +465,5 @@ does not ship: story 9.2 adds a test that checks the file schema against it. The
 
 ## 9. Questions for the user
 
-1. **The `future` group's name.** `future` puts the warning in every column name (`future_goal_team`); the
-   alternative `outcome` (`outcome_goal_team`) reads more naturally as a training target but hides where the value
-   comes from. Recommendation: `future`.
-2. **A play segment that ends without a goal** (regulation running out): it is kept, with `future_goal_team`
-   null or naming the overtime goal's team (v1 looks across segments to the next goal). Recommendation: keep v1's
-   rule, so the next goal is the next goal wherever it is, and `future_seconds_until_segment_end` marks the
-   segment's own end.
+None open. Decided on 2026-10-06: the group is named `future`; a segment's end is its own (`future_segment_end`),
+never a later segment's goal.

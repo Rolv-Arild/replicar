@@ -124,10 +124,16 @@ controls, spawn poses, ball contacts, the fractional clock.
 input. Some inferences also look ahead (the fits use later updates); that is what makes replicar an offline
 reconstruction, and it is why the future group is kept apart: it says what happens next by construction.
 
-**Future group** (`future`; v1 *labels*). Training targets read from the frames after the one they describe:
-`future_goal_team` (the team that scores the next goal, null when none follows),
-`future_seconds_until_goal` (null when none follows) and `future_seconds_until_segment_end`. The match result
-(final score, winner) is in the header, never per frame.
+**Future group** (`future`; v1 *labels*). Training targets read from the frames after the one they describe,
+about the frame's own play segment only (never a later one):
+- `future_segment_end`: how the segment ends. `blue_goal` or `orange_goal`; `time_expired` (regulation ran out
+  and the ball touched the ground); `replay_ended` (the replay stops during play, so the end is unknown); `other`
+  (play stopped some other way, for example a forfeit **[verify]** how a forfeit shows in a replay). Every
+  segment has a value: a segment without a goal says so instead of being null.
+- `future_seconds_until_segment_end`: replay time from this frame to the segment's last frame (0 there). For a
+  goal segment this is the time until the goal.
+
+The match result (final score, winner) is in the header, never per frame.
 
 **Inferred** versus **resimulation group.** Many values are inferred (air controls in `state`, update ticks in
 `updates`). The `resimulation` group is a specific set: the inferred values the simulator needs to reproduce
@@ -258,7 +264,8 @@ assessment; the evaluation tools refuse it without `--final-assessment`).
 | `fitted_inputs` | presses and air controls in the `resimulation` group |
 | episode (`label_episode`) | play segment (`segment`, a core column) |
 | labels (`label_*`) | the `future` group (`future_*`) |
-| `label_next_scoring_team`, `label_seconds_until_next_goal`, `label_episode_seconds_remaining` | `future_goal_team`, `future_seconds_until_goal`, `future_seconds_until_segment_end` |
+| `label_next_scoring_team`, `label_seconds_until_next_goal` (the next goal anywhere, null if none) | `future_segment_end` (this segment's own end, always set) |
+| `label_episode_seconds_remaining` | `future_seconds_until_segment_end` |
 | every frame of the replay | frames in play segments (`--all-frames` for all) |
 | `pad_pickups` | pad records in the `network` group |
 | `goal_scored_on`, `demolish`, `dodge_refreshed` | `goal`, `demolition`, `flip_reset` |
