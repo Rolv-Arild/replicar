@@ -172,6 +172,11 @@ impl Pads {
         Some(index)
     }
 
+    /// The pad a pad actor was matched to.
+    pub(super) fn index_of(&self, pad: ActorId) -> Option<usize> {
+        self.by_actor.get(&pad).copied()
+    }
+
     /// Holds every pad of the arena on cooldown (from the first tick of an interval).
     pub(super) fn hold(arena: &mut Arena) {
         for index in 0..arena.num_boost_pads() {

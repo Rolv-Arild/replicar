@@ -6,6 +6,7 @@
 //! here are defined in docs/glossary.md.
 
 pub mod air;
+pub mod annotate;
 pub mod decode;
 mod error;
 pub mod hitbox;

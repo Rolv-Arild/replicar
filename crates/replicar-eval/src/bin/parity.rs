@@ -125,7 +125,9 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         &observations,
         &options,
         |frame, _, _| {
-            expected.push(v1_shape::simulated_frame_v1(frame));
+            let mut value = v1_shape::simulated_frame_v1(frame);
+            value["annotations"] = v1_shape::annotations_v1(frame);
+            expected.push(value);
             Ok(())
         },
     )?;
@@ -144,6 +146,11 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         },
         withheld,
     );
+    let mut annotator = replicar::annotate::Annotator::new(replicar::annotate::ball_intervals(
+        &network.frames,
+        &ticks,
+        withheld,
+    ));
     let mut actual = Vec::new();
     let simulation = replicar::simulate::simulate(
         &network,
@@ -151,7 +158,11 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         &mut inference,
         &meshes,
         replicar::simulate::SimulationOptions::default(),
-        |frame| actual.push(v1_shape::simulated_frame_v2(&frame)),
+        |frame| {
+            let mut value = v1_shape::simulated_frame_v2(&frame);
+            value["annotations"] = v1_shape::annotations_v2(&annotator.annotate(&frame));
+            actual.push(value);
+        },
     )?;
     if actual.len() != expected.len() {
         return Ok(Some(format!(

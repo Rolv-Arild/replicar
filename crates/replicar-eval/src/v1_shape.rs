@@ -308,6 +308,29 @@ pub fn simulated_frame_v1(frame: &replicar_v1::conversion::ConvertedFrame) -> se
     })
 }
 
+/// v1's annotations of a frame: simulated touches, ball contacts, boost pickups.
+pub fn annotations_v1(frame: &replicar_v1::conversion::ConvertedFrame) -> serde_json::Value {
+    serde_json::json!({
+        "touches": frame.touches.iter().map(|t| format!("{} {} {:?}", t.car_slot, t.tick, t.contact_point)).collect::<Vec<_>>(),
+        "ball_contacts": frame.ball_contacts.iter().map(|c| format!("{} {} {} {} {:?} {:?} {} {}",
+            c.frame_a, c.tick, c.tick_from, c.tick_to, c.car_slot, c.gap_uu, c.velocity_residual, c.simulated_touch)).collect::<Vec<_>>(),
+        "boost_pickups": frame.boost_pickups.iter().map(|b| format!("{:?} {} {:?} {:?} {} {:?} {:?} {}",
+            b.pad_index, b.pad_actor_id, b.is_big, b.car_slot, b.verified, b.distance_uu, b.suggested_car_slot, b.tick)).collect::<Vec<_>>(),
+    })
+}
+
+/// The same for v2's annotations.
+pub fn annotations_v2(annotations: &replicar::annotate::Annotations) -> serde_json::Value {
+    let player = |p: Option<replicar::PlayerIndex>| p.map(|p| usize::from(p.0));
+    serde_json::json!({
+        "touches": annotations.simulated_touches.iter().map(|t| format!("{} {} {:?}", t.player.0, t.replay_tick, t.contact_point)).collect::<Vec<_>>(),
+        "ball_contacts": annotations.ball_contacts.iter().map(|c| format!("{} {} {} {} {:?} {:?} {} {}",
+            c.frame_a, c.replay_tick, c.tick_from, c.tick_to, player(c.player), c.gap, c.velocity_residual, c.simulated_touch)).collect::<Vec<_>>(),
+        "boost_pickups": annotations.boost_pickups.iter().map(|b| format!("{:?} {} {:?} {:?} {} {:?} {:?} {}",
+            b.pad_index, b.pad.0, b.is_big, player(b.player), b.verified, b.distance, player(b.suggested_player), b.replay_tick)).collect::<Vec<_>>(),
+    })
+}
+
 /// The same for v2's simulated frame.
 pub fn simulated_frame_v2(frame: &replicar::simulate::SimulatedFrame) -> serde_json::Value {
     use replicar::simulate::{HoldSource, TickSource};

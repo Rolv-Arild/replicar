@@ -132,6 +132,16 @@ struct PendingDodge {
     base: rocketsim::CarControls,
 }
 
+/// A pickup the replay reports in a frame (new, with an instigator), as the simulation matched it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickupMatch {
+    pub pad: ActorId,
+    /// RocketSim's index of the pad, when the record could be matched to one.
+    pub pad_index: Option<usize>,
+    /// The player of the instigator car.
+    pub player: Option<PlayerIndex>,
+}
+
 /// The simulation at one replay frame.
 #[derive(Debug, Clone)]
 pub struct SimulatedFrame {
@@ -160,6 +170,11 @@ pub struct SimulatedFrame {
     pub updated_players: Vec<PlayerIndex>,
     /// Inputs the inference chose at this frame's updates.
     pub fitted: Vec<FittedInput>,
+    /// The car life of each player's car in this frame (the frame's cars that resolved to a player, later
+    /// ones winning), as the creation frame of the car actor.
+    pub lives: Vec<(PlayerIndex, FrameIndex)>,
+    /// The new pickups the replay reports in this frame.
+    pub pickups: Vec<PickupMatch>,
 }
 
 /// What the simulation counted.
@@ -737,6 +752,32 @@ impl<'a> Simulator<'a, '_> {
                 car.demo_respawn_timer = 0.0;
             }
         }
+        let lives = frame
+            .current_cars()
+            .into_iter()
+            .chain(frame.cars.iter().filter(|car| car.player.is_none()))
+            .filter_map(|car| match self.players.by_actor.get(&car.life.actor) {
+                Some(&(player, created)) if created == car.life.created => Some((player, created)),
+                _ => None,
+            })
+            .collect();
+        let pickups = frame
+            .pad_records
+            .iter()
+            .filter(|r| !r.repeat && r.picked_up_raw != 255)
+            .filter_map(|r| {
+                let instigator = r.instigator_car?;
+                Some(PickupMatch {
+                    pad: r.pad,
+                    pad_index: self.pads.index_of(r.pad),
+                    player: self
+                        .players
+                        .by_actor
+                        .get(&instigator)
+                        .map(|&(player, _)| player),
+                })
+            })
+            .collect();
         let car_players = frame
             .cars
             .iter()
@@ -778,6 +819,8 @@ impl<'a> Simulator<'a, '_> {
                 .is_some_and(|p| p.frame == frame.index),
             updated_players,
             fitted,
+            lives,
+            pickups,
         }
     }
 }

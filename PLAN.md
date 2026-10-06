@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-04. Status: Phase 0 complete; Phases 1–4 in progress; Phase 5 JSONL, direct Rust Parquet/Python loading, and exact detached soccar `ArenaState` restoration implemented. Live simulation continuation and replay-sized observation memory remain open.
 
-Next action (2026-10-07): v2 in progress on branch `v2` (`docs/v2-plan.md`, section 6): stories 0.1-5.3 done (every fit equal to v1); next the annotations (6.1-6.2: touches, ball contacts, boost pickups, scoreboard, freshness, play segments and future), then contact alignment (3.2) and the held-out variants (5.4). Earlier next action (2026-10-04): renamed to `replicar` (1.0.1). Release 1.0.0 was cut from `cleanup-release` (RESULTS 'Release clean-up'): experiments removed (tag `pre-cleanup` keeps them), options from 63 to 22, `conversion/` split into modules, MIT license, README and `docs/output-format.md`, default output byte-identical. Follow-ups, on train and validation only: 1v1 masked car at 1 frame above its test band; contact recall 80.9% on test against 85%; re-anchor runs at lag junctions; advance a spawn-held car's pose; refuse or down-weight a weakly determined ball-car offset; optional: mode and mutator support as in VirxEC's converter. Needs the user: an online recording with a remote client and `include_boost_pads = true`.
+Next action (2026-10-07): v2 in progress on branch `v2` (`docs/v2-plan.md`, section 6): stories 0.1-5.3 and 6.1 done; next contact alignment (3.2), then the scoreboard, updates, play segments and future (6.2), the held-out variants (5.4) and the file format (7.x). Earlier next action (2026-10-04): renamed to `replicar` (1.0.1). Release 1.0.0 was cut from `cleanup-release` (RESULTS 'Release clean-up'): experiments removed (tag `pre-cleanup` keeps them), options from 63 to 22, `conversion/` split into modules, MIT license, README and `docs/output-format.md`, default output byte-identical. Follow-ups, on train and validation only: 1v1 masked car at 1 frame above its test band; contact recall 80.9% on test against 85%; re-anchor runs at lag junctions; advance a spawn-held car's pose; refuse or down-weight a weakly determined ball-car offset; optional: mode and mutator support as in VirxEC's converter. Needs the user: an online recording with a remote client and `include_boost_pads = true`.
 
 ## Goal and scope
 
@@ -313,6 +313,7 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-07: v2 `Inference` trait and air-control lookahead equal to v1 on all 120 replays (`parity simulate_air_lookahead`).
 - 2026-10-07: v2 air schedules (analytic boundary-value solve) equal to v1 on all 120 replays (`parity simulate_air_bvp`).
 - 2026-10-07: v2 input fits (ground timing, jump, ground flip, flip cancel, dodge start) and the air schedules' flip path equal to v1 on all 120 replays (`parity simulate_input_fits`, `parity simulate_all_fits`).
+- 2026-10-07: v2 annotations (simulated touches, ball contacts, boost pickups) equal to v1 on all 120 replays.
 
 ## Backlog (kept current; 2026-10-02)
 
