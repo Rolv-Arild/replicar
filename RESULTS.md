@@ -2240,3 +2240,19 @@ What only `frame_json` holds, as typed columns (zstd 9, split floats): the other
 Frames by clock state: running 77.0 / 80.2 / 84.4%, countdown 10.0 / 8.9 / 6.6%, goal pause 6.9 / 6.6 / 4.1%, kickoff 5.6 / 4.3 / 3.2%, expired 0.6 / 0 / 1.7%.
 
 **Where the time goes** (one run each, wall time): parse 0.01 / 0.00 / 0.01 s, observation extraction 0.02 / 0.02 / 0.04 s, packet-lag inference 0.04 / 0.01 / 0.02 s, conversion with those lags and no fits (`input_fits`, `air_bvp`, `infer_air_controls_from_lookahead`, `align_contacts` off) 0.18 / 0.15 / 0.32 s, the same with the air lookahead on 0.16 / 0.15 / 0.31 s, the full default 2.32 / 2.41 / 5.45 s. The fits are 90-95% of a conversion; RocketSim and the bookkeeping 34,000-65,000 frames per second.
+
+## v2 encodings: rotation and lossy state (2026-10-06)
+
+For `docs/v2-plan.md`; no converter change. The same three train exports as the section above, re-encoded by `python scripts/prototype_v2_encodings.py <export.parquet>...` (PyArrow 25.0.1, zstd 9, per column the better of plain and BYTE_STREAM_SPLIT; lossy variants also with per-series delta encoding). The physics columns are ball and car position, velocity, angular velocity and rotation; "rest" is every other typed v1 column except `frame_json` (0.44 / 0.39 / 0.83 MB); the car internals measured above (0.22 / 0.27 / 0.56 MB) are added to the totals.
+
+| Physics encoding | 1v1 | 2v2 | 3v3 | File with rest and internals (1v1 / 2v2 / 3v3) |
+| --- | ---: | ---: | ---: | --- |
+| float32, rotation 3x3 matrix (v1) | 1.68 | 1.72 | 4.11 | 2.34 / 2.38 / 5.49 MB |
+| float32, quaternion (Shepperd, w >= 0) | 1.18 | 1.23 | 2.95 | 1.85 / 1.90 / 4.34 |
+| float32, forward and up columns | 1.38 | 1.42 | 3.38 | 2.05 / 2.08 / 4.77 |
+| integers: 0.01 UU, 0.01 UU/s, 1e-4 rad/s, quaternion x32767 (int16) | 0.65 | 0.66 | 1.50 | 1.31 / 1.33 / 2.88 |
+| integers: 0.1 UU, 0.1 UU/s, 1e-3 rad/s, quaternion x32767 | 0.55 | 0.56 | 1.25 | 1.21 / 1.23 / 2.64 |
+
+Rotation alone (cars): matrix 0.61 / 0.71 / 1.78 MB, quaternion 0.26 / 0.31 / 0.78 MB; the matrix rebuilt from the quaternion differs from the exported one by at most 9.1e-7 per element. The fine integers have maximum errors 0.005 UU, 0.005 UU/s and 5e-5 rad/s and save 30-34% of the quaternion file; per-series delta beats interleaved integers by 12-23%. The coarse level saves 7-8% more. Projected to 140,000 replays at the development corpus's mean replay size (1.23 MB): about 380-460 GB lossless with quaternions, 280-310 GB with the fine integers (v1 Parquet about 2.8 TB). Limits: one replay per game size; the v2 "rest" columns will differ from v1's.
+
+**RocketSim's rlpr recordings, for comparison** (`rocketsim_test/src/rlpr/` at `9910c58`): per 120 Hz tick, one raw `repr(C)` record per car (604 bytes in format v9, with wheel suspension, contact and impulse records) and one for the ball, behind a magic, an endianness flag and a version that gates later fields (absent ones get sentinels such as `TOUCH_FRAME_UNKNOWN`); the whole file is zstd-compressed (the bundled 300 s recordings: 16 MB 2v2, 29-31 MB 3v3). Its replay mode (`examples/rlpr_replay/mod.rs`, `ReplayPlan`) drives each tick's recorded controls and restores state only at discontinuities (kickoff, demolition respawn).
