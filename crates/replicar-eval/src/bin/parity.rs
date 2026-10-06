@@ -8,6 +8,7 @@
 //! - `simulate`: v2's simulation against v1's conversion with every fit off (`input_fits`, `air_bvp`,
 //!   `infer_air_controls_from_lookahead`, `align_contacts`): each frame's state, events, applied ticks and holds.
 //! - `simulate_air_lookahead`: the same with the air-control lookahead on in both.
+//! - `simulate_air_bvp`: the same with the air boundary-value solve on in both.
 //!
 //! Prints one line per replay (`equal`, or the first difference) and a summary; exits non-zero when any
 //! replay differs or fails.
@@ -52,6 +53,7 @@ fn update_ticks(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
 #[derive(Clone, Copy, Default)]
 struct Rung {
     air_lookahead: bool,
+    air_bvp: bool,
 }
 
 /// The rung without fits: the simulation alone.
@@ -65,6 +67,18 @@ fn simulate_air_lookahead(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>
         bytes,
         Rung {
             air_lookahead: true,
+            ..Rung::default()
+        },
+    )
+}
+
+/// The rung with the air boundary-value solve.
+fn simulate_air_bvp(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    simulate_rung(
+        bytes,
+        Rung {
+            air_bvp: true,
+            ..Rung::default()
         },
     )
 }
@@ -75,7 +89,7 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         replicar_v1::observations::extract(&replay).ok_or("v1 found no network frames")?;
     let options = replicar_v1::conversion::ConvertOptions {
         input_fits: false,
-        air_bvp: false,
+        air_bvp: rung.air_bvp,
         infer_air_controls_from_lookahead: rung.air_lookahead,
         align_contacts: false,
         ..Default::default()
@@ -95,8 +109,10 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
     let meshes = replicar::Meshes::load("collision_meshes")?;
     let mut inference = replicar::infer::FittedInference::new(
         &network,
+        Some(&ticks),
         replicar::infer::InferenceOptions {
             air_lookahead: rung.air_lookahead,
+            air_schedules: rung.air_bvp,
         },
         withheld,
     );
@@ -123,7 +139,7 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
     }
     Ok(first_difference(
         &v1_shape::simulation_v1(&summary),
-        &v1_shape::simulation_v2(&simulation),
+        &v1_shape::simulation_v2(&simulation, &inference.diagnostics),
     ))
 }
 
@@ -131,7 +147,7 @@ fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     args.retain(|a| a != "--final-assessment");
-    let usage = "usage: parity <decode|update_ticks|simulate|simulate_air_lookahead> <replay or folder>... [--final-assessment]";
+    let usage = "usage: parity <decode|update_ticks|simulate|simulate_air_lookahead|simulate_air_bvp> <replay or folder>... [--final-assessment]";
     let (Some(stage), true) = (args.first().cloned(), args.len() >= 2) else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
@@ -141,6 +157,7 @@ fn main() -> ExitCode {
         "update_ticks" => update_ticks,
         "simulate" => simulate,
         "simulate_air_lookahead" => simulate_air_lookahead,
+        "simulate_air_bvp" => simulate_air_bvp,
         other => {
             eprintln!("unknown stage {other}\n{usage}");
             return ExitCode::FAILURE;

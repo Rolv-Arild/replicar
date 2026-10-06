@@ -16,7 +16,7 @@ use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, DemoMode, GameMode};
 pub use players::SimPlayer;
 
 use crate::decode::{ActorId, CarLife, GameState, NetworkCar, NetworkFrame, NetworkReplay};
-use crate::infer::Inference;
+use crate::infer::{AirSchedule, Inference};
 use crate::update_ticks::UpdateTicks;
 use crate::{Error, Meshes};
 use car::CarTrack;
@@ -92,6 +92,22 @@ pub struct SimEvent {
     pub event: ArenaEvent,
 }
 
+/// An input the inference chose for a car, on the replay timeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FittedInput {
+    pub player: PlayerIndex,
+    /// The replay tick the input takes effect.
+    pub replay_tick: u64,
+    pub kind: FittedKind,
+}
+
+/// What kind of input was chosen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FittedKind {
+    /// Air controls solved tick by tick for `span_ticks` ticks.
+    Air { span_ticks: u64 },
+}
+
 /// The simulation at one replay frame.
 #[derive(Debug, Clone)]
 pub struct SimulatedFrame {
@@ -118,6 +134,8 @@ pub struct SimulatedFrame {
     pub ball_updated: bool,
     /// Players whose current car got an update in this frame.
     pub updated_players: Vec<PlayerIndex>,
+    /// Inputs the inference chose at this frame's updates.
+    pub fitted: Vec<FittedInput>,
 }
 
 /// What the simulation counted.
@@ -165,6 +183,8 @@ struct Holds {
 struct FrameContext {
     index: FrameIndex,
     replay_tick: u64,
+    /// Ticks since the previous frame.
+    gap: u64,
     simulated: bool,
     withheld: bool,
     in_play: bool,
@@ -172,6 +192,8 @@ struct FrameContext {
     selected: BTreeSet<PlayerIndex>,
     sleeping_velocity_zeroed: Vec<Option<ActorId>>,
     wrecks_inferred: Vec<ActorId>,
+    /// Inputs chosen at this frame's updates, with their sim tick.
+    fitted: Vec<(PlayerIndex, u64, FittedKind)>,
 }
 
 /// The ticks of one frame's interval and the control switches due in it.
@@ -192,6 +214,8 @@ struct Simulator<'a, 'i> {
     players: Players,
     cars: HashMap<CarLife, CarTrack>,
     holds: Holds,
+    /// The air schedules being flown.
+    air_schedules: Vec<AirSchedule>,
     pads: Pads,
     diagnostics: SimDiagnostics,
     first_time: f32,
@@ -232,6 +256,7 @@ pub fn simulate(
         players: Players::default(),
         cars: HashMap::new(),
         holds: Holds::default(),
+        air_schedules: Vec::new(),
         pads,
         diagnostics: SimDiagnostics::default(),
         first_time: network.frames.first().map_or(0.0, |frame| frame.time),
@@ -290,12 +315,14 @@ impl<'a> Simulator<'a, '_> {
         let mut ctx = FrameContext {
             index: frame.index,
             replay_tick,
+            gap,
             simulated,
             withheld,
             in_play,
             selected: BTreeSet::new(),
             sleeping_velocity_zeroed: Vec::new(),
             wrecks_inferred: Vec::new(),
+            fitted: Vec::new(),
         };
         let ball_ticks = self.ball_ticks(f, simulated, gap);
         let applied_ticks = self.applied_ticks(frame, &frame_cars, simulated, gap);
@@ -484,10 +511,30 @@ impl<'a> Simulator<'a, '_> {
         }
     }
 
-    /// Steps `ticks` ticks, then limits the reported velocities.
+    /// Steps `ticks` ticks, flying the air schedules, then limits the reported velocities.
     fn step(&mut self, ticks: u64, events: &mut Vec<SimEvent>) {
         for _ in 0..ticks {
             let sim_tick = self.arena.tick_count() + 1;
+            self.air_schedules
+                .retain(|schedule| schedule.end_tick >= sim_tick);
+            for schedule in &self.air_schedules {
+                let Some(&(_, air)) = schedule.entries.iter().rev().find(|e| e.0 <= sim_tick)
+                else {
+                    continue;
+                };
+                let slot = schedule.player.get();
+                let mut controls = *self.arena.get_car_controls(slot);
+                // A jump press in the air is a double jump or a flip, whose kind RocketSim takes from the
+                // same controls: the press keeps its own. A held jump is no press and flies the schedule.
+                let state = self.arena.get_car_state(slot);
+                if controls.jump && !state.prev_controls.jump && !state.is_on_ground {
+                    continue;
+                }
+                controls.pitch = air.pitch;
+                controls.yaw = air.yaw;
+                controls.roll = air.roll;
+                self.arena.set_car_controls(slot, controls);
+            }
             events.extend(
                 self.arena
                     .step_tick()
@@ -522,6 +569,17 @@ impl<'a> Simulator<'a, '_> {
         events: Vec<SimEvent>,
         applied_ticks: Vec<AppliedTick>,
     ) -> SimulatedFrame {
+        // Sim ticks to the replay timeline: the offset at the end of this frame.
+        let offset = replay_tick as i64 - self.arena.tick_count() as i64;
+        let fitted = ctx
+            .fitted
+            .iter()
+            .map(|&(player, tick, kind)| FittedInput {
+                player,
+                replay_tick: (tick as i64 + offset).max(0) as u64,
+                kind,
+            })
+            .collect();
         let mut state = self.arena.get_arena_state();
         // A car held out of collisions on its spawn pose is not demolished.
         for (info, car) in state.cars.iter_mut() {
@@ -572,6 +630,7 @@ impl<'a> Simulator<'a, '_> {
                 .and_then(|b| b.position.as_ref())
                 .is_some_and(|p| p.frame == frame.index),
             updated_players,
+            fitted,
         }
     }
 }

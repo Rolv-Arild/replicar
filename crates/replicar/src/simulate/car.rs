@@ -9,8 +9,9 @@ use super::updates::{
     apply_update, dodge_impulse_unseen, dodge_torque, jump_impulse_unseen, network_controls,
     zero_sleeping_velocity,
 };
-use super::{FrameContext, HoldSource, Simulator};
+use super::{FittedKind, FrameContext, HoldSource, Simulator};
 use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkValue};
+use crate::infer::AirScheduleQuery;
 
 /// What the simulation keeps per car life.
 #[derive(Debug, Clone, Default)]
@@ -84,6 +85,36 @@ impl Simulator<'_, '_> {
         }
         let controls = self.controls(ctx, car, &state, new_life, &press);
         self.arena.set_car_controls(slot, controls);
+        let updated_now = car.body.position.as_ref().is_some_and(|p| p.frame == frame);
+        if ctx.simulated && ctx.in_play && !new_life && !press.jump && updated_now {
+            self.plan_air(ctx, car, player);
+        }
+    }
+
+    /// Replaces the car's air schedule with one to its next update, when the inference has one.
+    fn plan_air(&mut self, ctx: &mut FrameContext, car: &NetworkCar, player: PlayerIndex) {
+        self.air_schedules
+            .retain(|schedule| schedule.player != player);
+        let state = *self.arena.get_car_state(player.get());
+        let now = self.arena.tick_count();
+        let query = AirScheduleQuery {
+            index: ctx.index.get(),
+            car,
+            state: &state,
+            ticks_before: self.car_ticks(car, ctx.index.get(), ctx.simulated, ctx.gap),
+            player,
+            now,
+        };
+        if let Some(schedule) = self.inference.air_schedule(&query) {
+            ctx.fitted.push((
+                player,
+                now,
+                FittedKind::Air {
+                    span_ticks: schedule.end_tick - now,
+                },
+            ));
+            self.air_schedules.push(schedule);
+        }
     }
 
     /// Spawn poses. Before its first rigid-body update a car starts from the replay's spawn pose (inferred),

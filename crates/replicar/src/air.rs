@@ -254,76 +254,6 @@ pub fn past_controls(
     Some((solved, interval_mid - span_mid))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pure inputs are recovered from the angular velocity they produce over one tick.
-    #[test]
-    fn the_inverse_recovers_pure_inputs() {
-        let rot = Mat3A::IDENTITY;
-        for controls in [
-            AirControls {
-                pitch: 0.7,
-                yaw: 0.0,
-                roll: 0.0,
-            },
-            AirControls {
-                pitch: 0.0,
-                yaw: -0.4,
-                roll: 0.0,
-            },
-            AirControls {
-                pitch: 0.0,
-                yaw: 0.0,
-                roll: 1.0,
-            },
-        ] {
-            let (_, end) = fly(rot, Vec3A::ZERO, &[(controls, 1)]);
-            let solved = invert(rot, Vec3A::ZERO, end, 1.0 / 120.0);
-            assert!(
-                (solved.pitch - controls.pitch).abs() < 1e-3,
-                "{solved:?} {controls:?}"
-            );
-            assert!(
-                (solved.yaw - controls.yaw).abs() < 1e-3,
-                "{solved:?} {controls:?}"
-            );
-            assert!(
-                (solved.roll - controls.roll).abs() < 1e-3,
-                "{solved:?} {controls:?}"
-            );
-        }
-    }
-
-    /// Over a span the refinement closes most of what the analytic start misses.
-    #[test]
-    fn the_span_solve_reaches_the_end_angular_velocity() {
-        let rot = Mat3A::from_quat(Quat::from_rotation_z(0.6));
-        let start = Vec3A::new(0.5, -1.0, 2.0);
-        let truth = AirControls {
-            pitch: 0.5,
-            yaw: -0.3,
-            roll: 0.2,
-        };
-        let (_, end) = fly(rot, start, &[(truth, 8)]);
-        let error = |iterations| {
-            let solved = solve_span(rot, start, end, 8, iterations);
-            (fly(rot, start, &[(solved, 8)]).1 - end).length()
-        };
-        assert!(error(1) < error(0));
-        assert!(error(1) < 0.05);
-    }
-
-    #[test]
-    fn persistence_needs_a_calibrated_magnitude_and_a_short_lag() {
-        assert_eq!(persistence(0, 0.05, 0.05), 0.0);
-        assert_eq!(persistence(0, 0.25, 0.5), 0.0);
-        assert_eq!(persistence(0, 0.05, 0.6), 0.758);
-        assert_eq!(persistence(2, 0.15, 0.95), 0.642);
-    }
-}
-
 /// The longest span, in frames, the lookahead bridges between two updates.
 const LOOKAHEAD_MAX_FRAMES: usize = 10_000;
 
@@ -426,4 +356,238 @@ pub fn lookahead_controls(
         (dt * 120.0).round().max(1.0) as u32,
         SPAN_REFINEMENTS,
     ))
+}
+
+/// A segment of constant air controls: the controls and their number of ticks.
+pub type Segment = (AirControls, u32);
+
+/// A forward model of free flight: the end rotation and angular velocity after consecutive segments.
+pub type ForwardModel<'f> = dyn FnMut(&[Segment]) -> (Mat3A, Vec3A) + 'f;
+
+/// The rotation vector (radians, world frame) that takes `from` to `to`.
+#[must_use]
+pub fn rotation_vector(from: Mat3A, to: Mat3A) -> Vec3A {
+    let delta = Quat::from_mat3a(&(to * from.transpose())).normalize();
+    let (axis, angle) = delta.to_axis_angle();
+    let angle = if angle > PI { angle - 2.0 * PI } else { angle };
+    Vec3A::from(axis) * angle
+}
+
+/// The boundary-value problem of free flight: per-segment air controls (segments of `ticks` ticks each) that
+/// carry a car from its start rotation and angular velocity to its end ones, under the analytic air model
+/// (`fly`). Returns the controls and the remaining end error (radians of rotation, rad/s of angular velocity).
+#[must_use]
+pub fn solve_bvp(
+    rot_start: Mat3A,
+    omega_start: Vec3A,
+    rot_end: Mat3A,
+    omega_end: Vec3A,
+    ticks: &[u32],
+    prior: &[AirControls],
+) -> (Vec<AirControls>, f32, f32) {
+    let mut analytic = |segments: &[(AirControls, u32)]| fly(rot_start, omega_start, segments);
+    solve_bvp_with(&mut analytic, rot_end, omega_end, ticks, prior)
+}
+
+/// `solve_bvp` with the forward model as a function of the segments (RocketSim itself for a flipping car): a
+/// Levenberg-Marquardt fit of the six end conditions that stays as close as possible to `prior` (one control
+/// per segment). Two or three segments pin the end state down; with more, the prior chooses among the
+/// solutions.
+pub fn solve_bvp_with(
+    forward: &mut ForwardModel<'_>,
+    rot_end: Mat3A,
+    omega_end: Vec3A,
+    ticks: &[u32],
+    prior: &[AirControls],
+) -> (Vec<AirControls>, f32, f32) {
+    // Residual units: half a degree of rotation, 0.05 rad/s of angular velocity.
+    const ROT_SCALE: f32 = 0.5 * PI / 180.0;
+    const OMEGA_SCALE: f32 = 0.05;
+    // The weight of staying at the prior, per unit of control.
+    const PRIOR_WEIGHT: f32 = 0.05;
+    let dim = 3 * ticks.len();
+    let to_vec = |c: &[AirControls]| -> Vec<f32> {
+        c.iter().flat_map(|c| [c.pitch, c.yaw, c.roll]).collect()
+    };
+    let from_vec = |v: &[f32]| -> Vec<AirControls> {
+        v.chunks(3)
+            .map(|c| AirControls {
+                pitch: c[0],
+                yaw: c[1],
+                roll: c[2],
+            })
+            .collect()
+    };
+    let mut residual = |u: &[f32]| -> [f32; 6] {
+        let segments: Vec<(AirControls, u32)> =
+            from_vec(u).into_iter().zip(ticks.iter().copied()).collect();
+        let (rot, omega) = forward(&segments);
+        let dr = rotation_vector(rot, rot_end) / ROT_SCALE;
+        let dw = (omega_end - omega) / OMEGA_SCALE;
+        [dr.x, dr.y, dr.z, dw.x, dw.y, dw.z]
+    };
+    let u0 = to_vec(prior);
+    let cost_of = |u: &[f32], r: &[f32; 6]| -> f32 {
+        let prior_cost: f32 = u.iter().zip(&u0).map(|(a, b)| (a - b) * (a - b)).sum();
+        r.iter().map(|x| x * x).sum::<f32>() + PRIOR_WEIGHT * PRIOR_WEIGHT * prior_cost
+    };
+    let mut u = u0.clone();
+    let mut lambda = 1.0f32;
+    let mut r = residual(&u);
+    let mut current = cost_of(&u, &r);
+    // The Jacobian is kept while steps are rejected: `u` does not change then, only `lambda`.
+    let mut jacobian: Option<Vec<[f32; 6]>> = None;
+    for _ in 0..12 {
+        if jacobian.is_none() {
+            // Finite differences, 6 x dim.
+            let mut jac = vec![[0.0f32; 6]; dim];
+            for (k, column) in jac.iter_mut().enumerate() {
+                let mut up = u.clone();
+                up[k] += 0.02;
+                let rp = residual(&up);
+                for i in 0..6 {
+                    column[i] = (rp[i] - r[i]) / 0.02;
+                }
+            }
+            jacobian = Some(jac);
+        }
+        let jac = jacobian.as_ref().expect("computed above");
+        // (J^T J + w^2 I + lambda I) delta = -(J^T r + w^2 (u - u0)).
+        let mut a = vec![vec![0.0f32; dim]; dim];
+        let mut g = vec![0.0f32; dim];
+        for p in 0..dim {
+            for q in 0..dim {
+                a[p][q] = (0..6).map(|i| jac[p][i] * jac[q][i]).sum();
+            }
+            a[p][p] += PRIOR_WEIGHT * PRIOR_WEIGHT + lambda;
+            g[p] = -((0..6).map(|i| jac[p][i] * r[i]).sum::<f32>()
+                + PRIOR_WEIGHT * PRIOR_WEIGHT * (u[p] - u0[p]));
+        }
+        let Some(delta) = solve_linear(a, g) else {
+            break;
+        };
+        let candidate: Vec<f32> = u
+            .iter()
+            .zip(&delta)
+            .map(|(a, d)| (a + d).clamp(-1.0, 1.0))
+            .collect();
+        let candidate_r = residual(&candidate);
+        let candidate_cost = cost_of(&candidate, &candidate_r);
+        if candidate_cost < current {
+            let improvement = current - candidate_cost;
+            u = candidate;
+            r = candidate_r;
+            jacobian = None;
+            current = candidate_cost;
+            lambda = (lambda * 0.3).max(1e-4);
+            if improvement < 1e-4 {
+                break;
+            }
+        } else {
+            lambda *= 4.0;
+            if lambda > 1e4 {
+                break;
+            }
+        }
+    }
+    let rot_error = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt() * ROT_SCALE;
+    let omega_error = (r[3] * r[3] + r[4] * r[4] + r[5] * r[5]).sqrt() * OMEGA_SCALE;
+    (from_vec(&u), rot_error, omega_error)
+}
+
+/// Solves `m x = b` by Gaussian elimination with partial pivoting; `None` for a (near) singular matrix.
+fn solve_linear(mut m: Vec<Vec<f32>>, mut b: Vec<f32>) -> Option<Vec<f32>> {
+    let dim = b.len();
+    for col in 0..dim {
+        let pivot = (col..dim)
+            .max_by(|&x, &y| m[x][col].abs().total_cmp(&m[y][col].abs()))
+            .unwrap_or(col);
+        if m[pivot][col].abs() < 1e-9 {
+            return None;
+        }
+        m.swap(col, pivot);
+        b.swap(col, pivot);
+        for row in col + 1..dim {
+            let factor = m[row][col] / m[col][col];
+            for k in col..dim {
+                m[row][k] -= factor * m[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    for col in (0..dim).rev() {
+        let tail: f32 = (col + 1..dim).map(|k| m[col][k] * b[k]).sum();
+        b[col] = (b[col] - tail) / m[col][col];
+    }
+    Some(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pure inputs are recovered from the angular velocity they produce over one tick.
+    #[test]
+    fn the_inverse_recovers_pure_inputs() {
+        let rot = Mat3A::IDENTITY;
+        for controls in [
+            AirControls {
+                pitch: 0.7,
+                yaw: 0.0,
+                roll: 0.0,
+            },
+            AirControls {
+                pitch: 0.0,
+                yaw: -0.4,
+                roll: 0.0,
+            },
+            AirControls {
+                pitch: 0.0,
+                yaw: 0.0,
+                roll: 1.0,
+            },
+        ] {
+            let (_, end) = fly(rot, Vec3A::ZERO, &[(controls, 1)]);
+            let solved = invert(rot, Vec3A::ZERO, end, 1.0 / 120.0);
+            assert!(
+                (solved.pitch - controls.pitch).abs() < 1e-3,
+                "{solved:?} {controls:?}"
+            );
+            assert!(
+                (solved.yaw - controls.yaw).abs() < 1e-3,
+                "{solved:?} {controls:?}"
+            );
+            assert!(
+                (solved.roll - controls.roll).abs() < 1e-3,
+                "{solved:?} {controls:?}"
+            );
+        }
+    }
+
+    /// Over a span the refinement closes most of what the analytic start misses.
+    #[test]
+    fn the_span_solve_reaches_the_end_angular_velocity() {
+        let rot = Mat3A::from_quat(Quat::from_rotation_z(0.6));
+        let start = Vec3A::new(0.5, -1.0, 2.0);
+        let truth = AirControls {
+            pitch: 0.5,
+            yaw: -0.3,
+            roll: 0.2,
+        };
+        let (_, end) = fly(rot, start, &[(truth, 8)]);
+        let error = |iterations| {
+            let solved = solve_span(rot, start, end, 8, iterations);
+            (fly(rot, start, &[(solved, 8)]).1 - end).length()
+        };
+        assert!(error(1) < error(0));
+        assert!(error(1) < 0.05);
+    }
+
+    #[test]
+    fn persistence_needs_a_calibrated_magnitude_and_a_short_lag() {
+        assert_eq!(persistence(0, 0.05, 0.05), 0.0);
+        assert_eq!(persistence(0, 0.25, 0.5), 0.0);
+        assert_eq!(persistence(0, 0.05, 0.6), 0.758);
+        assert_eq!(persistence(2, 0.15, 0.95), 0.642);
+    }
 }

@@ -301,6 +301,10 @@ pub fn simulated_frame_v1(frame: &replicar_v1::conversion::ConvertedFrame) -> se
         "car_players": frame.car_actor_slots,
         "ball_updated": frame.ball_fresh,
         "updated_players": frame.fresh_car_slots,
+        "fitted": frame.fitted_inputs.iter().map(|f| match f.kind {
+            "air" => format!("{} air {} {:?}", f.slot, f.tick, f.span_ticks),
+            kind => format!("{} {kind} {} {} {} {} {}", f.slot, f.tick, f.pitch, f.yaw, f.cancel, f.activation_frame),
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -330,6 +334,9 @@ pub fn simulated_frame_v2(frame: &replicar::simulate::SimulatedFrame) -> serde_j
         "car_players": frame.car_players.iter().map(|(a, p)| (a.0, usize::from(p.0))).collect::<Vec<_>>(),
         "ball_updated": frame.ball_updated,
         "updated_players": frame.updated_players.iter().map(|p| usize::from(p.0)).collect::<Vec<_>>(),
+        "fitted": frame.fitted.iter().map(|f| match f.kind {
+            replicar::simulate::FittedKind::Air { span_ticks } => format!("{} air {} {:?}", f.player.0, f.replay_tick, Some(span_ticks)),
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -343,11 +350,15 @@ pub fn simulation_v1(summary: &replicar_v1::conversion::ConversionSummary) -> se
             d.cars_started_from_spawn_trajectory, d.goal_explosion_demolitions, d.dead_shells_inferred,
             d.dead_shells_after_demolition, d.dead_shells_released, d.sleeping_ball_packets, d.shadowed_car_frames,
             d.ball_lag_frames, d.car_lag_frames, d.dodge_activations],
+        "inference": [d.air_bvp_planned, d.air_bvp_refused],
     })
 }
 
-/// The same for v2's simulation.
-pub fn simulation_v2(simulation: &replicar::simulate::Simulation) -> serde_json::Value {
+/// The same for v2's simulation and inference.
+pub fn simulation_v2(
+    simulation: &replicar::simulate::Simulation,
+    inference: &replicar::infer::InferenceDiagnostics,
+) -> serde_json::Value {
     let d = &simulation.diagnostics;
     serde_json::json!({
         "players": simulation.players.iter().map(|p| format!("{} {} {} {:?} {}", p.index.0, p.key.0, p.team.number(), p.body_product_id, p.hitbox.name())).collect::<Vec<_>>(),
@@ -356,5 +367,6 @@ pub fn simulation_v2(simulation: &replicar::simulate::Simulation) -> serde_json:
             d.cars_started_from_spawn_pose, d.goal_explosion_demolitions, d.wrecks_inferred,
             d.wrecks_after_demolition, d.wrecks_released, d.sleeping_ball_updates, d.shadowed_car_frames,
             d.ball_tick_frames, d.car_tick_frames, d.dodge_activations],
+        "inference": [inference.air_schedules_planned, inference.air_schedules_refused],
     })
 }
