@@ -5,14 +5,18 @@
 //! the replay does not say, annotate the result, and write it in the replicar file format. The words used
 //! here are defined in docs/glossary.md.
 
+pub mod air;
 pub mod decode;
 mod error;
 pub mod hitbox;
+mod meshes;
+pub mod simulate;
 #[cfg(test)]
 mod testkit;
 pub mod update_ticks;
 
 pub use error::Error;
+pub use meshes::Meshes;
 pub use replicar_format::{FrameIndex, PlayerIndex, ReplayTick, SimTick, TICKS_PER_SECOND, Team};
 pub use rocketsim;
 

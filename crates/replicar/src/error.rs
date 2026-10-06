@@ -11,4 +11,16 @@ pub enum Error {
 
     #[error("the replay has {0} frames, more than a frame index can count")]
     TooManyFrames(usize),
+
+    #[error("{0}")]
+    Meshes(String),
+
+    #[error("replicar simulates soccar; this replay is {0}")]
+    UnsupportedMode(String),
+
+    #[error("{frame} has an invalid time {time}")]
+    InvalidTime {
+        frame: replicar_format::FrameIndex,
+        time: f32,
+    },
 }

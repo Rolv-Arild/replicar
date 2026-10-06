@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-04. Status: Phase 0 complete; Phases 1–4 in progress; Phase 5 JSONL, direct Rust Parquet/Python loading, and exact detached soccar `ArenaState` restoration implemented. Live simulation continuation and replay-sized observation memory remain open.
 
-Next action (2026-10-07): v2 in progress on branch `v2` (`docs/v2-plan.md`, section 6): stories 0.1-3.1 done; next the simulator (4.1-4.4), rung "no fits". Earlier next action (2026-10-04): renamed to `replicar` (1.0.1). Release 1.0.0 was cut from `cleanup-release` (RESULTS 'Release clean-up'): experiments removed (tag `pre-cleanup` keeps them), options from 63 to 22, `conversion/` split into modules, MIT license, README and `docs/output-format.md`, default output byte-identical. Follow-ups, on train and validation only: 1v1 masked car at 1 frame above its test band; contact recall 80.9% on test against 85%; re-anchor runs at lag junctions; advance a spawn-held car's pose; refuse or down-weight a weakly determined ball-car offset; optional: mode and mutator support as in VirxEC's converter. Needs the user: an online recording with a remote client and `include_boost_pads = true`.
+Next action (2026-10-07): v2 in progress on branch `v2` (`docs/v2-plan.md`, section 6): stories 0.1-4.4 done; next the inference (5.1-5.5): the `Inference` trait and the fits, rung by rung. Earlier next action (2026-10-04): renamed to `replicar` (1.0.1). Release 1.0.0 was cut from `cleanup-release` (RESULTS 'Release clean-up'): experiments removed (tag `pre-cleanup` keeps them), options from 63 to 22, `conversion/` split into modules, MIT license, README and `docs/output-format.md`, default output byte-identical. Follow-ups, on train and validation only: 1v1 masked car at 1 frame above its test band; contact recall 80.9% on test against 85%; re-anchor runs at lag junctions; advance a spawn-held car's pose; refuse or down-weight a weakly determined ball-car offset; optional: mode and mutator support as in VirxEC's converter. Needs the user: an online recording with a remote client and `include_boost_pads = true`.
 
 ## Goal and scope
 
@@ -309,6 +309,7 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-07: branch `v2` from `v2-plan`. Story 0.1: RocketSim from git `9910c58` to crates.io 0.2.7 (= `v3-rust` `dc5d60e`), measured neutral (RESULTS 'RocketSim `9910c58` to crates.io 0.2.7'); `scripts/compare_reports.py` for per-replay A/B checks.
 - 2026-10-07: tag `v1-final` (`9e55dc7`); v1 deterministic over three runs of 120 replays; Cargo workspace (v1 as `replicar-v1`, v2 crates under `crates/`); v2 decode stage equal to v1 on all 120 replays (`parity decode`).
 - 2026-10-07: v2 update-tick inference equal to v1 on all 120 replays (`parity update_ticks`); contact alignment (story 3.2) moved after the simulator and annotation, since its first pass is a conversion.
+- 2026-10-07: v2 simulator without fits equal to v1 (every frame's state, events, ticks, holds) on all 120 replays (`parity simulate`).
 
 ## Backlog (kept current; 2026-10-02)
 

@@ -5,6 +5,8 @@
 //! Stages:
 //! - `decode`: v2's decoded network feed against v1's observations (`observations::extract`).
 //! - `update_ticks`: v2's update-tick inference against v1's packet lags (`infer_packet_lags`, default options).
+//! - `simulate`: v2's simulation against v1's conversion with every fit off (`input_fits`, `air_bvp`,
+//!   `infer_air_controls_from_lookahead`, `align_contacts`): each frame's state, events, applied ticks and holds.
 //!
 //! Prints one line per replay (`equal`, or the first difference) and a summary; exits non-zero when any
 //! replay differs or fails.
@@ -44,11 +46,63 @@ fn update_ticks(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
     ))
 }
 
+fn simulate(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    let replay = replicar::parse(bytes)?;
+    let observations =
+        replicar_v1::observations::extract(&replay).ok_or("v1 found no network frames")?;
+    // The rung without fits: the simulation alone (docs/v2-plan.md, section 5).
+    let options = replicar_v1::conversion::ConvertOptions {
+        input_fits: false,
+        air_bvp: false,
+        infer_air_controls_from_lookahead: false,
+        align_contacts: false,
+        ..Default::default()
+    };
+    let mut expected = Vec::new();
+    let summary = replicar_v1::conversion::convert_observations_with(
+        &observations,
+        &options,
+        |frame, _, _| {
+            expected.push(v1_shape::simulated_frame_v1(frame));
+            Ok(())
+        },
+    )?;
+    let network = replicar::decode::decode(&replay)?;
+    let ticks =
+        replicar::update_ticks::infer(&network, true, replicar::update_ticks::Withheld::default());
+    let meshes = replicar::Meshes::load("collision_meshes")?;
+    let mut actual = Vec::new();
+    let simulation = replicar::simulate::simulate(
+        &network,
+        Some(&ticks),
+        &meshes,
+        replicar::simulate::SimulationOptions::default(),
+        |frame| actual.push(v1_shape::simulated_frame_v2(&frame)),
+    )?;
+    if actual.len() != expected.len() {
+        return Ok(Some(format!(
+            "frames: v1 {} v2 {}",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    for (index, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        if let Some(difference) = first_difference(e, a) {
+            return Ok(Some(format!("frame {index}{difference}")));
+        }
+    }
+    Ok(first_difference(
+        &v1_shape::simulation_v1(&summary),
+        &v1_shape::simulation_v2(&simulation),
+    ))
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     args.retain(|a| a != "--final-assessment");
-    let usage = "usage: parity <decode|update_ticks> <replay or folder>... [--final-assessment]";
+    let usage =
+        "usage: parity <decode|update_ticks|simulate> <replay or folder>... [--final-assessment]";
     let (Some(stage), true) = (args.first().cloned(), args.len() >= 2) else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
@@ -56,6 +110,7 @@ fn main() -> ExitCode {
     let check: Check = match stage.as_str() {
         "decode" => decode,
         "update_ticks" => update_ticks,
+        "simulate" => simulate,
         other => {
             eprintln!("unknown stage {other}\n{usage}");
             return ExitCode::FAILURE;

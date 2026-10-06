@@ -285,3 +285,76 @@ pub fn canonical_lags_v2(ticks: &replicar::update_ticks::UpdateTicks) -> serde_j
         "car_runs": runs,
     })
 }
+
+/// One frame of v1's conversion, for the `simulate` stage: the state (as `Debug`, so equal text means equal
+/// bits), RocketSim's events, the applied ticks, the holds and provenance lists.
+pub fn simulated_frame_v1(frame: &replicar_v1::conversion::ConvertedFrame) -> serde_json::Value {
+    serde_json::json!({
+        "replay_tick": frame.timeline_tick,
+        "state": format!("{:?}", frame.state),
+        "events": frame.simulated_events.iter().map(|e| format!("{} {:?}", e.arena_tick, e.event)).collect::<Vec<_>>(),
+        "applied": frame.packet_lags.iter().map(|l| format!("{:?} {} {}", l.actor_id, l.ticks, l.source)).collect::<Vec<_>>(),
+        "sleeping": frame.sleeping_velocity_inferred,
+        "wrecks_inferred": frame.demolition_inferred,
+        "wrecks_held": frame.dead_shells_held.iter().map(|h| format!("{} {}", h.slot, h.source)).collect::<Vec<_>>(),
+        "spawning": frame.spawn_pose_held,
+        "car_players": frame.car_actor_slots,
+        "ball_updated": frame.ball_fresh,
+        "updated_players": frame.fresh_car_slots,
+    })
+}
+
+/// The same for v2's simulated frame.
+pub fn simulated_frame_v2(frame: &replicar::simulate::SimulatedFrame) -> serde_json::Value {
+    use replicar::simulate::{HoldSource, TickSource};
+    serde_json::json!({
+        "replay_tick": frame.replay_tick,
+        "state": format!("{:?}", frame.state),
+        "events": frame.events.iter().map(|e| format!("{} {:?}", e.sim_tick, e.event)).collect::<Vec<_>>(),
+        "applied": frame.applied_ticks.iter().map(|t| {
+            let source = match t.source {
+                TickSource::Chain => "chain",
+                TickSource::FrameMedian => "frame_median",
+                TickSource::Default => "default",
+                TickSource::DodgeFit => "dodge_fit",
+            };
+            format!("{:?} {} {source}", t.car.map(|a| a.0), t.ticks)
+        }).collect::<Vec<_>>(),
+        "sleeping": frame.sleeping_velocity_zeroed.iter().map(|a| a.map(|a| a.0)).collect::<Vec<_>>(),
+        "wrecks_inferred": frame.wrecks_inferred.iter().map(|a| a.0).collect::<Vec<_>>(),
+        "wrecks_held": frame.wrecks_held.iter().map(|(p, s)| format!("{} {}", p.0, match s {
+            HoldSource::Observed => "observed",
+            HoldSource::Inferred => "inferred",
+        })).collect::<Vec<_>>(),
+        "spawning": frame.spawning.iter().map(|p| usize::from(p.0)).collect::<Vec<_>>(),
+        "car_players": frame.car_players.iter().map(|(a, p)| (a.0, usize::from(p.0))).collect::<Vec<_>>(),
+        "ball_updated": frame.ball_updated,
+        "updated_players": frame.updated_players.iter().map(|p| usize::from(p.0)).collect::<Vec<_>>(),
+    })
+}
+
+/// v1's car slots and simulation counters, for the `simulate` stage.
+pub fn simulation_v1(summary: &replicar_v1::conversion::ConversionSummary) -> serde_json::Value {
+    let d = &summary.diagnostics;
+    serde_json::json!({
+        "players": summary.car_slots.iter().map(|s| format!("{} {} {} {:?} {}", s.slot, s.player_key, s.team, s.body_product_id, s.hitbox)).collect::<Vec<_>>(),
+        "counters": [d.skipped_timeline_ticks as usize, d.slot_loadout_changes, d.unlinked_car_frames, d.default_hitbox_players,
+            d.active_pawn_demo_corrections, d.dodge_refreshes_observed, d.dodge_refreshes_applied, d.sleeping_car_packets,
+            d.cars_started_from_spawn_trajectory, d.goal_explosion_demolitions, d.dead_shells_inferred,
+            d.dead_shells_after_demolition, d.dead_shells_released, d.sleeping_ball_packets, d.shadowed_car_frames,
+            d.ball_lag_frames, d.car_lag_frames, d.dodge_activations],
+    })
+}
+
+/// The same for v2's simulation.
+pub fn simulation_v2(simulation: &replicar::simulate::Simulation) -> serde_json::Value {
+    let d = &simulation.diagnostics;
+    serde_json::json!({
+        "players": simulation.players.iter().map(|p| format!("{} {} {} {:?} {}", p.index.0, p.key.0, p.team.number(), p.body_product_id, p.hitbox.name())).collect::<Vec<_>>(),
+        "counters": [d.skipped_replay_ticks as usize, d.player_loadout_changes, d.unlinked_car_frames, d.default_hitbox_players,
+            d.active_car_demolition_corrections, d.flip_resets_observed, d.flip_resets_applied, d.sleeping_car_updates,
+            d.cars_started_from_spawn_pose, d.goal_explosion_demolitions, d.wrecks_inferred,
+            d.wrecks_after_demolition, d.wrecks_released, d.sleeping_ball_updates, d.shadowed_car_frames,
+            d.ball_tick_frames, d.car_tick_frames, d.dodge_activations],
+    })
+}
