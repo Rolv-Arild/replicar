@@ -9,6 +9,7 @@ pub mod air;
 pub mod decode;
 mod error;
 pub mod hitbox;
+pub mod infer;
 mod meshes;
 pub mod simulate;
 #[cfg(test)]

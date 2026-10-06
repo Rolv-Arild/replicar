@@ -61,7 +61,7 @@ pub struct CarRun {
 pub struct Withheld<'a>(pub Option<&'a [bool]>);
 
 impl Withheld<'_> {
-    fn contains(self, frame: usize) -> bool {
+    pub(crate) fn contains(self, frame: usize) -> bool {
         self.0
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     }

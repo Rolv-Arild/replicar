@@ -16,6 +16,7 @@ use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, DemoMode, GameMode};
 pub use players::SimPlayer;
 
 use crate::decode::{ActorId, CarLife, GameState, NetworkCar, NetworkFrame, NetworkReplay};
+use crate::infer::Inference;
 use crate::update_ticks::UpdateTicks;
 use crate::{Error, Meshes};
 use car::CarTrack;
@@ -182,8 +183,9 @@ struct Interval<'a> {
     next_switch: usize,
 }
 
-struct Simulator<'a> {
+struct Simulator<'a, 'i> {
     network: &'a NetworkReplay,
+    inference: &'i mut dyn Inference,
     ticks: Option<&'a UpdateTicks>,
     options: SimulationOptions,
     arena: Arena,
@@ -199,10 +201,12 @@ struct Simulator<'a> {
 }
 
 /// Simulates the replay, calling `on_frame` with every frame in order. `ticks` places each update at its
-/// update tick; without it every update is applied at its frame's own tick.
+/// update tick; without it every update is applied at its frame's own tick. `inference` answers what the
+/// replay does not say.
 pub fn simulate(
     network: &NetworkReplay,
     ticks: Option<&UpdateTicks>,
+    inference: &mut dyn Inference,
     _meshes: &Meshes,
     options: SimulationOptions,
     mut on_frame: impl FnMut(SimulatedFrame),
@@ -221,6 +225,7 @@ pub fn simulate(
     let pads = Pads::new(&arena, &network.frames);
     let mut simulator = Simulator {
         network,
+        inference,
         ticks,
         options,
         arena,
@@ -243,7 +248,7 @@ pub fn simulate(
     })
 }
 
-impl<'a> Simulator<'a> {
+impl<'a> Simulator<'a, '_> {
     fn frame(&mut self, frame: &'a NetworkFrame) -> Result<SimulatedFrame, Error> {
         let f = frame.index.get();
         if !frame.time.is_finite() || frame.time < self.first_time {

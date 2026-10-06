@@ -10,7 +10,6 @@ use super::updates::{
     zero_sleeping_velocity,
 };
 use super::{FrameContext, HoldSource, Simulator};
-use crate::air;
 use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkValue};
 
 /// What the simulation keeps per car life.
@@ -39,7 +38,7 @@ struct Press {
     yaw: f32,
 }
 
-impl Simulator<'_> {
+impl Simulator<'_, '_> {
     /// Applies one car's update at its update tick.
     pub(super) fn update_car(&mut self, ctx: &mut FrameContext, car: &NetworkCar) {
         let frame = ctx.index;
@@ -395,21 +394,11 @@ impl Simulator<'_> {
         if airborne
             && !press.jump
             && ctx.in_play
-            && let Some((solved, lag)) =
-                air::past_controls(&self.network.frames, frame.get(), car, 50.0)
+            && let Some(air) = self.inference.air_controls(frame.get(), car, &controls)
         {
-            let keep = |axis: usize, value: f32| value * air::persistence(axis, lag, value.abs());
-            controls.pitch = keep(0, solved.pitch);
-            if car.inputs.steer.is_none() {
-                controls.yaw = keep(1, solved.yaw);
-                controls.roll = keep(2, solved.roll);
-            } else if controls.handbrake {
-                controls.roll = controls.steer;
-                controls.yaw = keep(1, solved.yaw);
-            } else {
-                controls.yaw = controls.steer;
-                controls.roll = keep(2, solved.roll);
-            }
+            controls.pitch = air.pitch;
+            controls.yaw = air.yaw;
+            controls.roll = air.roll;
             air_controls_applied = true;
         }
         if !air_controls_applied && airborne {

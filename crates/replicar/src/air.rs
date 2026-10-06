@@ -323,3 +323,107 @@ mod tests {
         assert_eq!(persistence(2, 0.15, 0.95), 0.642);
     }
 }
+
+/// The longest span, in frames, the lookahead bridges between two updates.
+const LOOKAHEAD_MAX_FRAMES: usize = 10_000;
+
+/// The constant control over the span between the car's latest update with an angular velocity (at or before
+/// `index`) and its next one: offline, it uses an update after `index`. `None` when either update is below
+/// `min_z`, the span crosses a dodge, a frame out of play or a withheld frame, or the car changed.
+#[must_use]
+pub fn lookahead_controls(
+    frames: &[NetworkFrame],
+    index: usize,
+    car: &NetworkCar,
+    min_z: f32,
+    withheld: crate::update_ticks::Withheld,
+) -> Option<AirControls> {
+    let ang0 = car.body.angular_velocity_raw.as_ref()?;
+    let rot0 = car.body.rotation.as_ref()?;
+    let start = ang0.frame.get();
+    if start > index
+        || rot0.frame.get() != start
+        || index - start >= LOOKAHEAD_MAX_FRAMES
+        || !car
+            .body
+            .position
+            .as_ref()
+            .is_some_and(|p| p.frame.get() == start && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let same_car = |candidate: &&NetworkCar| {
+        candidate.life == car.life
+            && candidate.player == car.player
+            && candidate.player_link_active == car.player_link_active
+    };
+    let in_play = |frame: &NetworkFrame| {
+        frame
+            .game_state
+            .as_ref()
+            .is_some_and(|s| s.value == GameState::Active)
+    };
+    let dodged_at = |candidate: &NetworkCar, f: usize| {
+        candidate
+            .inputs
+            .dodge_active_raw
+            .as_ref()
+            .is_some_and(|d| d.frame.get() == f && d.value % 2 == 1)
+    };
+    let start_frame = frames.get(start)?;
+    if !in_play(start_frame) || !start_frame.cars.iter().any(|c| same_car(&c)) {
+        return None;
+    }
+    for earlier in start + 1..=index {
+        let candidate = frames.get(earlier)?.cars.iter().find(same_car)?;
+        if dodged_at(candidate, earlier) {
+            return None;
+        }
+    }
+    let last = (start + LOOKAHEAD_MAX_FRAMES).min(frames.len() - 1);
+    let mut end = None;
+    for f in index + 1..=last {
+        let frame = &frames[f];
+        if !in_play(frame) {
+            return None;
+        }
+        let candidate = frame.cars.iter().find(same_car)?;
+        if dodged_at(candidate, f) {
+            return None;
+        }
+        if candidate
+            .body
+            .angular_velocity_raw
+            .as_ref()
+            .is_some_and(|a| a.frame.get() == f)
+        {
+            end = Some((f, candidate));
+            break;
+        }
+    }
+    let (end_index, end_car) = end?;
+    if (start + 1..end_index).any(|f| withheld.contains(f)) {
+        return None;
+    }
+    let ang1 = end_car.body.angular_velocity_raw.as_ref()?;
+    if !end_car
+        .body
+        .position
+        .as_ref()
+        .is_some_and(|p| p.frame.get() == end_index && p.value[2] > min_z)
+    {
+        return None;
+    }
+    let dt = frames[end_index].time - start_frame.time;
+    if dt.is_nan() || dt <= 0.0 {
+        return None;
+    }
+    let q0 = quaternion(rot0.value)?;
+    Some(solve_span(
+        Mat3A::from_quat(q0),
+        Vec3A::from(ang0.value) * 0.01,
+        Vec3A::from(ang1.value) * 0.01,
+        (dt * 120.0).round().max(1.0) as u32,
+        SPAN_REFINEMENTS,
+    ))
+}

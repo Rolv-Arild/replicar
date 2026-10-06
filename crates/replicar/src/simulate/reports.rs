@@ -3,7 +3,7 @@
 use super::{HoldSource, Simulator};
 use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkFrame};
 
-impl Simulator<'_> {
+impl Simulator<'_, '_> {
     /// Observed demolitions, after the interval (so that the bump of the demolition is still simulated). A
     /// repeated report is skipped, as is a victim that is gone from the frame or is not its player's current
     /// car. A goal explosion demolishes only a wreck (a car whose player link is inactive, or sleeping) and

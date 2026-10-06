@@ -7,6 +7,7 @@
 //! - `update_ticks`: v2's update-tick inference against v1's packet lags (`infer_packet_lags`, default options).
 //! - `simulate`: v2's simulation against v1's conversion with every fit off (`input_fits`, `air_bvp`,
 //!   `infer_air_controls_from_lookahead`, `align_contacts`): each frame's state, events, applied ticks and holds.
+//! - `simulate_air_lookahead`: the same with the air-control lookahead on in both.
 //!
 //! Prints one line per replay (`equal`, or the first difference) and a summary; exits non-zero when any
 //! replay differs or fails.
@@ -46,15 +47,36 @@ fn update_ticks(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
     ))
 }
 
+/// A rung of the ladder (docs/v2-plan.md, section 5): the fits it switches on, in v1 and v2; the others
+/// are off.
+#[derive(Clone, Copy, Default)]
+struct Rung {
+    air_lookahead: bool,
+}
+
+/// The rung without fits: the simulation alone.
 fn simulate(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    simulate_rung(bytes, Rung::default())
+}
+
+/// The rung with the air-control lookahead.
+fn simulate_air_lookahead(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
+    simulate_rung(
+        bytes,
+        Rung {
+            air_lookahead: true,
+        },
+    )
+}
+
+fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Error>> {
     let replay = replicar::parse(bytes)?;
     let observations =
         replicar_v1::observations::extract(&replay).ok_or("v1 found no network frames")?;
-    // The rung without fits: the simulation alone (docs/v2-plan.md, section 5).
     let options = replicar_v1::conversion::ConvertOptions {
         input_fits: false,
         air_bvp: false,
-        infer_air_controls_from_lookahead: false,
+        infer_air_controls_from_lookahead: rung.air_lookahead,
         align_contacts: false,
         ..Default::default()
     };
@@ -68,13 +90,21 @@ fn simulate(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
         },
     )?;
     let network = replicar::decode::decode(&replay)?;
-    let ticks =
-        replicar::update_ticks::infer(&network, true, replicar::update_ticks::Withheld::default());
+    let withheld = replicar::update_ticks::Withheld::default();
+    let ticks = replicar::update_ticks::infer(&network, true, withheld);
     let meshes = replicar::Meshes::load("collision_meshes")?;
+    let mut inference = replicar::infer::FittedInference::new(
+        &network,
+        replicar::infer::InferenceOptions {
+            air_lookahead: rung.air_lookahead,
+        },
+        withheld,
+    );
     let mut actual = Vec::new();
     let simulation = replicar::simulate::simulate(
         &network,
         Some(&ticks),
+        &mut inference,
         &meshes,
         replicar::simulate::SimulationOptions::default(),
         |frame| actual.push(v1_shape::simulated_frame_v2(&frame)),
@@ -101,8 +131,7 @@ fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     args.retain(|a| a != "--final-assessment");
-    let usage =
-        "usage: parity <decode|update_ticks|simulate> <replay or folder>... [--final-assessment]";
+    let usage = "usage: parity <decode|update_ticks|simulate|simulate_air_lookahead> <replay or folder>... [--final-assessment]";
     let (Some(stage), true) = (args.first().cloned(), args.len() >= 2) else {
         eprintln!("{usage}");
         return ExitCode::FAILURE;
@@ -111,6 +140,7 @@ fn main() -> ExitCode {
         "decode" => decode,
         "update_ticks" => update_ticks,
         "simulate" => simulate,
+        "simulate_air_lookahead" => simulate_air_lookahead,
         other => {
             eprintln!("unknown stage {other}\n{usage}");
             return ExitCode::FAILURE;
