@@ -7,6 +7,9 @@
 
 use std::path::PathBuf;
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use replicar_format::{Group, Precision, WriteOptions};

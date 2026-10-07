@@ -15,6 +15,8 @@ doc = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# The system allocator serializes the conversion threads on Windows (RESULTS.md, "v2: corpus throughput").
+mimalloc = { version = "0.1", default-features = false }
 replicar = { path = "../replicar" }
 replicar-format = { path = "../replicar-format" }
 serde_json.workspace = true

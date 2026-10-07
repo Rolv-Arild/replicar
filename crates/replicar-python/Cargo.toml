@@ -14,6 +14,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # One wheel for every CPython from 3.12 (the stable ABI).
 pyo3 = { version = "0.29", features = ["abi3-py312"] }
+# The system allocator serializes `convert_many`'s threads on Windows (RESULTS.md, "v2: corpus throughput").
+mimalloc = { version = "0.1", default-features = false }
 replicar = { path = "../replicar" }
 replicar-format = { path = "../replicar-format" }
 

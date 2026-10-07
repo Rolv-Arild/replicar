@@ -2429,3 +2429,20 @@ Reports against v1's reference run (`target/ref-v1-final/`, from tag `v1-final` 
 **Adopted: segments of about eight ticks for a flipping car's air schedule** (four for the analytic path, unchanged). The flipping-car solve flies RocketSim once per control per iteration, so half the controls is about half its cost. Time on the six profiling replays, no other load, two runs each: 23.0 / 22.8 s to 19.6 / 19.6 s (**15% faster**; the air schedules 9.2 to 6.0 s). Accuracy, offline-masked against the baseline: train per replay 66 p90 rows better, 59 worse (36 / 30 beyond 2%), pooled car position, velocity, rotation and angular velocity within 0.2% at every horizon; validation 65 better, 69 worse (32 / 29 beyond 2%), pooled within 0.3%; LAN truth unchanged to the printed precision on the host replays and mixed at the second decimal on the client ones (game 1 client, rotation without a fresh packet p50 0.41 to 0.39, p90 5.43 to 5.49 deg). The held-out `evaluate` reports (default and aligned) do not change, since they run without air schedules: they stay byte-identical to v1's.
 
 This is v2's first intentional difference from v1: the `parity` stages with the input fits and air schedules on (`simulate_all_fits`, `convert`) now differ from v1 at the first flipping-car schedule, as they should; the stages without them (`decode` to `simulate_input_fits`, `held_out`, `masked*`) and `recorded` are unaffected. A later refactoring that should not change results is checked against v2 itself (`scripts/compare_files.py` on files from the commit before) rather than against v1 for those stages.
+
+## v2: corpus throughput (2026-10-07)
+
+`python scripts/time_corpus.py <replicar> <folder> <scratch> <jobs>...` times `replicar convert <folder> --jobs N` with the process's peak memory, on this machine (AMD Ryzen 9 5950X, 16 cores / 32 threads, 64 GB, Windows 11). Inputs: the 120 train and validation replays (147 MB, 1.23 MB per replay, the corpus mean) and, for 16 jobs and more, the same 120 copied four times (480 replays) so that the last long replays do not dominate.
+
+**The system allocator serialized the threads.** With Rust's default (Windows heap) allocator, more threads were slower past 16 jobs: 480 replays at 16 / 24 / 32 jobs gave 8,287 / 5,580 / 4,337 replays per hour, while two processes of 16 jobs each converted the same 480 at 12,354 per hour (two of 8: 11,139), so the contention was inside one process. With mimalloc as the global allocator of the `replicar` command and the Python native module (`mimalloc` 0.1, a new dependency): 16 jobs 11,259 per hour (+36%), 32 jobs 13,656 per hour (3.1x); all 480 files identical to the default allocator's (`compare_files.py`).
+
+| Jobs | Replays per hour | Peak memory | 140,000 replays |
+| ---: | ---: | ---: | ---: |
+| 1 | 1,027 | 0.70 GB | 136 h (5.7 days) |
+| 2 | 1,957 | 0.83 GB | 72 h |
+| 4 | 4,032 | 1.03 GB | 35 h |
+| 8 | 7,361 | 1.49 GB | 19 h |
+| 16 | 11,259 | 2.61 GB | 12.4 h |
+| 32 | 13,656 | 4.18 GB | 10.3 h |
+
+(1-8 jobs on the 120 replays, 16 and 32 on the 480; with mimalloc.) One job takes 3.5 s per replay. Past 16 jobs the gain is the second hardware thread per core (+21%). Output: the 120 replays' default files are 367 MB, 3.06 MB per replay (2.5 times the replay), so about 430 GB for 140,000 replays in float32 and about a quarter less quantized.
