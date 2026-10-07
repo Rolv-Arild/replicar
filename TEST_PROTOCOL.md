@@ -201,7 +201,7 @@ A large gap between the test value and these is a finding about generalisation, 
 
 ## 7. Second run: version 2 (labelled; 2026-10-07)
 
-The user asked on 2026-10-07 for a final check before merging v2, and allowed running the test split again. This run is **the second, labelled run**: the split was seen once (section 3), so it is not an unseen estimate, and nothing is tuned on it. It measures the converter as merged: v2 at tag `test-assessment-2` (the commit that adds this section), RocketSim crate `0.2.7`, `Cargo.lock` as committed.
+The user asked on 2026-10-07 for a final check before merging v2, and allowed running the test split again. This run is **the second, labelled run**: the split was seen once (section 3), so it is not an unseen estimate, and nothing is tuned on it. It measures the converter as merged: v2 at tag `test-assessment-2` (the commit after the input changes of RESULTS.md, "v2: inputs between frames", whose evaluator reports equal `target/ref-v2-inputs/` byte for byte), RocketSim crate `0.2.7`, `Cargo.lock` as committed.
 
 **Frozen before the run.** The commands below; the acceptance bands rebuilt from the development reports of this converter, `target/ref-v2-inputs/{train,validation}-{default,aligned}.json` (after the input changes of RESULTS.md, "v2: inputs between frames"), into `target/acceptance-bands-2.json` with `scripts/acceptance.py bands`, before any test result. The first run's bands (`target/acceptance-bands.json`, from RocketSim `0b02051`) are also checked, for comparison with the first run. The method and the null of section 4 are unchanged.
 
