@@ -100,7 +100,9 @@ def test_other_files_are_refused(tmp_path):
         replicar.read(later)
 
 
-def test_a_file_without_states_needs_the_native_extra(tmp_path):
+def test_a_file_without_states_needs_the_native_extra(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "replicar_native", None)
     path = tmp_path / "s.parquet"
     write(path, {"frame": plain([0], pa.uint32())}, header={"groups": ["game", "resimulation"]})
     with pytest.raises(ImportError, match="native extra"):

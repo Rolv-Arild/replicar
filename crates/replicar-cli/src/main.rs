@@ -148,23 +148,6 @@ impl MeshArgs {
     }
 }
 
-fn convert_one(
-    converter: &replicar::Converter,
-    input: &Path,
-    output: &Path,
-    options: &WriteOptions,
-) -> Result<replicar::Conversion, String> {
-    let bytes = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-    let conversion = converter.convert(&bytes).map_err(|e| e.to_string())?;
-    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    conversion
-        .write(output, options)
-        .map_err(|e| e.to_string())?;
-    Ok(conversion)
-}
-
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Convert {
@@ -181,7 +164,9 @@ fn run(cli: Cli) -> Result<(), String> {
                 corpus::convert_folder(&meshes, &input, &output, &options, jobs, skip_existing)
             } else {
                 let converter = replicar::Converter::new(&meshes, replicar::Config::default());
-                convert_one(&converter, &input, &output, &options).map(|_| ())
+                replicar::corpus::convert_file(&converter, &input, &output, &options)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
         }
         Command::Resimulate {

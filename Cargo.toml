@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/replicar-format", "crates/replicar", "crates/replicar-cli", "crates/replicar-eval"]
+members = [".", "crates/replicar-format", "crates/replicar", "crates/replicar-cli", "crates/replicar-python", "crates/replicar-eval"]
 # Archived baselines under target/, reference projects under external/ and the measurement crates under scripts/
 # build on their own.
 exclude = ["target", "external", "scripts"]

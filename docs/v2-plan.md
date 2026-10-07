@@ -292,7 +292,8 @@ crates/replicar-cli      the `replicar` binary: convert (file or folder), resimu
 crates/replicar-python   pyo3 module (maturin) exposing convert / resimulate
 crates/replicar-eval     publish = false: evaluate_corpus, error_budget, rlbot_*, dump_reconstruction, the
                          consistency checks, the v1 parity checks; the sealed test-split guard
-python/replicar          pure-Python reader (pyarrow + numpy), installed alone
+python/v2                pure-Python reader `replicar` (pyarrow + numpy), installed alone; `python/replicar`
+                         once v1's Python files are retired. The native wheel is `replicar-native`.
 ```
 
 - **Python.** `pip install replicar` installs the pure-Python reader: any platform, no Rust, no simulator.

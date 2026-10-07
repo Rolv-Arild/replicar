@@ -9,6 +9,7 @@ pub mod air;
 pub mod align;
 pub mod annotate;
 mod convert;
+pub mod corpus;
 pub mod decode;
 mod diagnostics_columns;
 mod error;

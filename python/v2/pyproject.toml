@@ -12,7 +12,11 @@ license = { text = "MIT" }
 dependencies = ["numpy>=1.26", "pyarrow>=15"]
 
 [project.optional-dependencies]
+convert = ["replicar-native==2.0.0.dev0"]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+replicar = ["py.typed"]

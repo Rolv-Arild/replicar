@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-__all__ = ["FORMAT_VERSION", "ReplicarFile", "read"]
+__all__ = ["FORMAT_VERSION", "ReplicarFile", "convert", "convert_many", "iter_frames", "read", "resimulate"]
 
 #: The newest file format this reader reads.
 FORMAT_VERSION = 1
@@ -166,14 +167,66 @@ def read(path: str | Path, columns: list[str] | None = None, replay: str | Path 
             f"{path} is format version {header['format_version']}; this reader reads {FORMAT_VERSION} and earlier"
         )
     if replay is not None and "state" not in header.get("groups", []):
-        try:
-            from replicar import _native  # noqa: F401  (the native extra)
-        except ImportError as error:
-            raise ImportError(
-                "this file has no state group; resimulating it needs the native extra: pip install replicar[convert]"
-            ) from error
-        raise NotImplementedError("resimulation from Python comes with the native extra")
+        # Resimulate the states and read them with the file's own groups.
+        native = _native("reading a file without the state group")
+        with tempfile.TemporaryDirectory() as directory:
+            full = Path(directory) / "full.parquet"
+            groups = [g for g in header.get("groups", []) if g != "resimulation"] + ["state"]
+            native.resimulate(str(path), str(replay), str(full), precision=header.get("precision", "float32"),
+                              groups=groups, all_frames=header.get("all_frames", False))
+            opened = read(full, columns)
+            opened.table = opened.table.combine_chunks()
+            return ReplicarFile(path=path, header={**opened.header, "groups": header.get("groups", [])},
+                                table=opened.table)
     if columns is not None and "frame" not in columns:
         columns = ["frame", *columns]
     table = pq.read_table(path, columns=columns)
     return ReplicarFile(path=path, header=header, table=table)
+
+
+def _native(purpose: str):
+    try:
+        import replicar_native
+    except ImportError as error:
+        raise ImportError(f"{purpose} needs the native extra: pip install replicar[convert]") from error
+    return replicar_native
+
+
+def iter_frames(path: str | Path, replay: str | Path | None = None, batch_frames: int = 4096):
+    """The file's rows in pyarrow record batches of `batch_frames` (resimulating a file without states when
+    `replay` is given)."""
+    if replay is not None:
+        opened = read(path, replay=replay)
+        yield from opened.table.to_batches(max_chunksize=batch_frames)
+        return
+    yield from pq.ParquetFile(path).iter_batches(batch_size=batch_frames)
+
+
+def convert(replay: str | Path, output: str | Path, *, precision: str = "float32", groups: list[str] | None = None,
+            with_groups: list[str] | None = None, all_frames: bool = False, meshes: str | Path | None = None) -> None:
+    """Convert a replay to a replicar file (needs the native extra). `meshes`: RocketSim's collision meshes,
+    else $REPLICAR_MESHES, else ./collision_meshes."""
+    _native("converting").convert(str(replay), str(output), precision=precision, groups=groups,
+                                  with_groups=with_groups, all_frames=all_frames,
+                                  meshes_dir=None if meshes is None else str(meshes))
+
+
+def convert_many(replays: list[str | Path], output_dir: str | Path, *, jobs: int | None = None,
+                 skip_existing: bool = False, precision: str = "float32", groups: list[str] | None = None,
+                 with_groups: list[str] | None = None, all_frames: bool = False,
+                 meshes: str | Path | None = None) -> list[dict[str, Any]]:
+    """Convert replays to `output_dir/<name>.parquet`, `jobs` at a time, and write `output_dir/index.parquet`.
+    Returns one dict per replay; a failed one has its `error`."""
+    return _native("converting").convert_many(
+        [str(r) for r in replays], str(output_dir), jobs=jobs, skip_existing=skip_existing, precision=precision,
+        groups=groups, with_groups=with_groups, all_frames=all_frames,
+        meshes_dir=None if meshes is None else str(meshes))
+
+
+def resimulate(file: str | Path, replay: str | Path, output: str | Path, *, precision: str = "float32",
+               groups: list[str] | None = None, with_groups: list[str] | None = None, all_frames: bool = False,
+               meshes: str | Path | None = None) -> None:
+    """Rebuild a file from its replay and its `resimulation` group, without fitting (needs the native extra)."""
+    _native("resimulating").resimulate(str(file), str(replay), str(output), precision=precision, groups=groups,
+                                       with_groups=with_groups, all_frames=all_frames,
+                                       meshes_dir=None if meshes is None else str(meshes))

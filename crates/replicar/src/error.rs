@@ -21,6 +21,9 @@ pub enum Error {
     #[error("the file could not be read: {0}")]
     Read(#[from] replicar_format::ReadError),
 
+    #[error("{0}")]
+    Io(String),
+
     #[error("cannot resimulate: {0}")]
     Resimulation(String),
 

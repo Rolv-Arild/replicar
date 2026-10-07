@@ -1,0 +1,21 @@
+[package]
+name = "replicar-python"
+version = "2.0.0-dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The native part of the replicar Python package: convert and resimulate replays"
+publish = false
+
+[lib]
+name = "replicar_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# One wheel for every CPython from 3.12 (the stable ABI).
+pyo3 = { version = "0.29", features = ["abi3-py312"] }
+replicar = { path = "../replicar" }
+replicar-format = { path = "../replicar-format" }
+
+[lints]
+workspace = true
