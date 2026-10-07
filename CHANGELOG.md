@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.0.0 (unreleased, branch `v2`)
+
+A rewrite with the same reconstruction: every stage, the full default conversion and the evaluator's reports equal
+version 1's on the 120 development replays (RESULTS.md, the "v2:" sections).
+
+- A Cargo workspace: `replicar-format` (the file, readable without the parser or the simulator), `replicar` (the
+  library), `replicar-cli` (the `replicar` command), `replicar-python` and the `replicar` Python package.
+- One Parquet file per replay instead of a main file with `frame_json` and seven record tables: 2.1-2.5 times the
+  replay instead of 15-17.5. Rows only for frames in play segments (`--all-frames` for the rest), per-player
+  columns, column groups (`state`, `game`, `updates`, `future` by default; `resimulation`, `network`, `diagnostics`
+  on request), `float32` or `quantized` precision. JSON Lines output is gone.
+- Renamed concepts (docs/glossary.md, "v1 to v2"): packet lag is the update tick, freshness the `updates` group,
+  episodes are play segments, and the next-goal labels became `future_segment_end`, which never looks past the
+  frame's own segment.
+- Resimulation from a file's `resimulation` group and the replay, about nine times faster than converting;
+  RocketSim states restored from a file; folder conversion in parallel with an index; a Python reader with NumPy
+  arrays and a native extra to convert.
+- RocketSim from crates.io (`0.2.7`), measured neutral against `9910c58`.
+
 ## 1.0.1 (2026-10-04)
 
 - Renamed from `replay-to-rocketsim` to `replicar` (replica car, replicate, and network replication, which is what a replay records). The Rust crate is now `replicar` and the JSON Lines Python loader `python/replicar.py`; the output format is unchanged.

@@ -2,6 +2,8 @@
 
 Status: **approved by the user on 2026-10-03 and run once** (tag `test-assessment-1` = `99f0a9d`; results in RESULTS.md, "Test-split assessment"). The test split is no longer unseen; any further run is a second, labelled run.
 
+This protocol ran version 1's tools. Version 2's `replicar-eval` has `evaluate` and `error_budget` with the same options and reports (byte-identical to v1's on train and validation; RESULTS.md, "v2: the evaluator on v2"); a run of v2 on the test split would use them in place of `evaluate_corpus` and `error_budget`.
+
 ## 1. What the assessment is for
 
 An unbiased estimate, on replays that were never used to design or tune anything, of

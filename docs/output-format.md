@@ -1,4 +1,7 @@
-# Output format
+# Output format (v1)
+
+This is version 1's format (`convert_replay`, package `replicar-v1`). Version 2 writes one Parquet file per replay: see
+[v2-file-format.md](v2-file-format.md).
 
 `convert_replay` writes JSON Lines (`.jsonl`) or Parquet (`.parquet`). Both carry the same information; Parquet adds typed columns for fast reads and writes seven record tables beside the main file. A null is always an unknown or inapplicable value, never zero.
 
