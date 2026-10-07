@@ -1,9 +1,10 @@
 [package]
 name = "replicar-python"
-version = "2.0.0-dev"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "The native part of the replicar Python package: convert and resimulate replays"
 publish = false
 
@@ -16,8 +17,8 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.29", features = ["abi3-py312"] }
 # The system allocator serializes `convert_many`'s threads on Windows (RESULTS.md, "v2: corpus throughput").
 mimalloc = { version = "0.1", default-features = false }
-replicar = { path = "../replicar" }
-replicar-format = { path = "../replicar-format" }
+replicar = { path = "../replicar", version = "2.0.0" }
+replicar-format = { path = "../replicar-format", version = "2.0.0" }
 
 [lints]
 workspace = true

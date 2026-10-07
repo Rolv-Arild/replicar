@@ -1,17 +1,18 @@
 [package]
 name = "replicar-eval"
-version = "2.0.0-dev"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Evaluation and parity tools for replicar: v2 against v1, and the evaluation protocol"
 publish = false
 
 [dependencies]
 boxcars.workspace = true
 glam.workspace = true
-replicar = { path = "../replicar" }
-replicar-format = { path = "../replicar-format" }
+replicar = { path = "../replicar", version = "2.0.0" }
+replicar-format = { path = "../replicar-format", version = "2.0.0" }
 # v1, kept at the repository root until v2 replaces it, is the oracle every v2 stage is compared with
 # (docs/v2-plan.md, section 5).
 replicar-v1 = { path = "../.." }

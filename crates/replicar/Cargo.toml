@@ -1,20 +1,20 @@
 [package]
 name = "replicar"
-version = "2.0.0-dev"
+version = "2.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Rocket League replays reconstructed as RocketSim states, with the scoreboard, controls, events and provenance"
 readme = "../../README.md"
 keywords = ["rocket-league", "rocketsim", "replay", "simulation"]
 categories = ["simulation", "parser-implementations"]
-publish = false
 
 [dependencies]
 boxcars.workspace = true
 # `Quat`, which RocketSim's re-export of glam lacks; the same pin as RocketSim's, so the types unify.
 glam.workspace = true
-replicar-format = { path = "../replicar-format" }
+replicar-format = { path = "../replicar-format", version = "2.0.0" }
 rocketsim.workspace = true
 serde.workspace = true
 serde_json.workspace = true
