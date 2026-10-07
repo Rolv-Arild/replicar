@@ -224,6 +224,14 @@ pub fn write_index(path: &Path, rows: &[IndexRow], options: &WriteOptions) -> Re
                 "groups": groups,
                 "precision": options.precision.name(),
                 "all_frames": options.all_frames,
+                "rows": match options.rows {
+                    replicar_format::RowRate::Ticks(_) => "ticks",
+                    replicar_format::RowRate::Frames => "frames",
+                },
+                "tick_step": match options.rows {
+                    replicar_format::RowRate::Ticks(step) => step,
+                    replicar_format::RowRate::Frames => 1,
+                },
             })
             .to_string(),
         )],

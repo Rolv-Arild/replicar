@@ -27,9 +27,21 @@ file schema against this page (v2 plan, story 9.2).
 **Tick.** 1/120 s, RocketSim's physics step and the server's.
 
 **Frame** (also *replay frame*). One network frame of the replay: the bundle of actor updates the recording
-client stored at one moment. About 30 per second in online replays; other rates occur (a 10 fps LAN client). A
-replicar file has one row per frame **in play** (see *play segment*); the `frame` column is the frame's index in
-the replay, counted from 0, so gaps show where pauses were left out.
+client stored at one moment. About 30 per second in online replays; other rates occur (a 10 fps LAN client). The `frame` column is the frame's index in the replay, counted from 0, so gaps show where pauses were left out.
+
+**Tick row** (`frame_row` false). A row of a simulated tick between two frames. RocketSim steps every tick between
+frames; a file has a row per tick by default (*rows*). A tick row belongs to the frame that ends its interval: its
+state is simulated toward that frame's updates, which are applied at their update ticks inside the interval (so a
+tick row's state can use an update its frame carries: offline reconstruction, a few ticks ahead of the frame's
+time). Its game values (period, clock, scores) and ping are the previous frame's, what was known at the tick; its
+update ages count from the update ticks; its seconds since update are null; its records are on frame rows.
+Between frames the state is simulation, not observation; at an update tick a body can jump by the simulation's
+error.
+
+**Rows** (`rows`, `tick_step` in the header). Which rows a file has: `ticks` (default; every simulated tick in play,
+or with `--tick-step N` those whose `sim_tick` is a multiple of N) or `frames` (one row per replay frame, about 30 per
+second). A row's `controls` are those RocketSim applied in the step after the row's tick: the action taken at that
+state.
 
 **Replay time** (`replay_time`, seconds). The frame's timestamp as the replay stores it.
 
@@ -49,7 +61,9 @@ velocity. An update is an exact server state, but from a moment slightly before 
 the body's last update shows. It is 0-4 ticks before the frame's own tick at 30 frames per second. Inferred
 offline from chains of updates (*update-tick inference*), not observed.
 
-**Updated** (`ball_updated`, `car_updated`). The body got an update in this frame. Observed.
+**Updated** (`ball_updated`, `car_updated`). The body got an update since the previous written row: on a frame row,
+in this frame (observed); on a tick row, at its tick, the inferred update tick (or since the last written row with
+`--tick-step`).
 
 **Ticks since update** (`ball_ticks_since_update`, `car_ticks_since_update`). Replay tick minus update tick:
 how old the body's last server state is at this frame. Usually 0-4 at an updated frame, growing until the next.
@@ -147,8 +161,8 @@ The match result (final score, winner) is in the header, never per frame.
 **Reconstruction.** The whole process: decode the replay, infer what it does not say, and simulate the match
 in RocketSim between updates, so that every frame has a full state.
 
-**Controls** (`car_controls`: throttle, steer, pitch, yaw, roll, jump, boost, handbrake). The input applied from
-this frame's state onward, in RocketSim's ranges. Throttle, steer, handbrake and boost are network values (their
+**Controls** (`car_controls`: throttle, steer, pitch, yaw, roll, jump, boost, handbrake). The input RocketSim applied
+in the step after the row's tick (the action taken at the row's state), in RocketSim's ranges. Throttle, steer, handbrake and boost are network values (their
 timing inferred); jump and dodge come from the replay's action counters; pitch, yaw and roll are inferred, because
 the replay does not carry them.
 
@@ -224,7 +238,7 @@ the named car's path (`verified`; another car's path that reaches it is `suggest
 
 ## Files
 
-**replicar file.** One ordinary Parquet file (`.parquet`) per replay, one row per frame in play, holding the
+**replicar file.** One ordinary Parquet file (`.parquet`) per replay, one row per tick (or frame) in play, holding the
 column groups asked for. Any Parquet reader opens it; replicar's reader adds conveniences. Its
 **header** (JSON in the Parquet key-value metadata) has the format version, the replay's SHA-256, the replicar and
 RocketSim versions, the configuration, the groups and precision, the players, the pad layout and diagnostics.

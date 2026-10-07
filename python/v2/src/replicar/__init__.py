@@ -5,7 +5,7 @@ A replicar file is an ordinary Parquet file; this package only adds conveniences
 >>> import replicar
 >>> f = replicar.read("match.parquet")
 >>> f.header["players"]                   # who is at each player index
->>> a = f.arrays()                        # NumPy: a["car_position"] has shape (frames, players, 3)
+>>> a = f.arrays()                        # NumPy: a["car_position"] has shape (rows, players, 3)
 >>> f.records("events")                   # a pyarrow table with one row per event and its frame
 
 Floats are float32 with NaN for unknown values; integers use -1 for unknown; quantized columns are decoded with
@@ -83,8 +83,8 @@ class ReplicarFile:
 
     def arrays(self) -> dict[str, np.ndarray]:
         """Every plain column as a NumPy array, with the components of a vector stacked last (`ball_position`:
-        (frames, 3)), per-player columns stacked by player index (`car_position`: (frames, players, 3)) and
-        per-pad columns by pad index (`pad_cooldown`: (frames, pads)). Record lists are left to `records`."""
+        (rows, 3)), per-player columns stacked by player index (`car_position`: (rows, players, 3)) and
+        per-pad columns by pad index (`pad_cooldown`: (rows, pads)). Record lists are left to `records`."""
         if self._arrays is not None:
             return self._arrays
         columns: dict[str, np.ndarray] = {}
@@ -136,8 +136,9 @@ class ReplicarFile:
 
     def long(self, prefix: str = "car") -> pa.Table:
         """The per-player columns of `prefix` (`car`, `player`, `network_car`, `network_player`) in long form: one
-        row per frame and player, with `frame`, `player` and the columns without their index (`car_0_boost` ->
-        `car_boost`), for pandas and SQL. Players absent from a frame have null values there."""
+        row per file row and player, with the row's `frame` (and `sim_tick` and `frame_row` when the file has them),
+        `player` and the columns without their index (`car_0_boost` -> `car_boost`), for pandas and SQL. Players
+        absent from a row have null values there."""
         by_name: dict[str, dict[int, str]] = {}
         for name in self.table.column_names:
             match = _PLAYER.match(name)
@@ -145,10 +146,12 @@ class ReplicarFile:
                 by_name.setdefault(f"{prefix}_{match[3]}", {})[int(match[2])] = name
         players = sorted({i for indexed in by_name.values() for i in indexed})
         rows = self.table.num_rows
-        frame = self.table.column("frame").combine_chunks()
+        keys = {k: self.table.column(k).combine_chunks() for k in ("frame", "sim_tick", "frame_row")
+                if k in self.table.column_names}
+        order = pa.array(np.arange(rows, dtype=np.int64))
         pieces = []
         for player in players:
-            columns = {"frame": frame, "player": pa.array(np.full(rows, player, np.uint8))}
+            columns = {**keys, "player": pa.array(np.full(rows, player, np.uint8)), "_row": order}
             for base, indexed in by_name.items():
                 if player in indexed:
                     columns[base] = self.table.column(indexed[player]).combine_chunks()
@@ -158,16 +161,18 @@ class ReplicarFile:
             pieces.append(pa.table(columns))
         if not pieces:
             return pa.table({"frame": pa.array([], pa.uint32()), "player": pa.array([], pa.uint8())})
-        return pa.concat_tables(pieces).sort_by([("frame", "ascending"), ("player", "ascending")])
+        return pa.concat_tables(pieces).sort_by([("_row", "ascending"), ("player", "ascending")]).drop_columns("_row")
 
     def records(self, name: str) -> pa.Table:
         """A record-list column (`events`, `ball_contacts`, `boost_pickups`, `prediction_errors`, ...) as one row
-        per record, with the frame of its row."""
+        per record, with the `frame` (and `sim_tick`) of its row."""
         column = self.table.column(name).combine_chunks()
         lengths = pc.list_value_length(column).fill_null(0).to_numpy(zero_copy_only=False)
         frames = np.repeat(self.table.column("frame").to_numpy(), lengths)
         flat = pc.list_flatten(column)
         fields = {"frame": pa.array(frames, pa.uint32())}
+        if "sim_tick" in self.table.column_names:
+            fields["sim_tick"] = pa.array(np.repeat(self.table.column("sim_tick").to_numpy(), lengths), pa.uint64())
         for i, child in enumerate(flat.type):
             fields[child.name] = flat.field(i)
         return pa.table(fields)
@@ -216,7 +221,8 @@ def read(path: str | Path, columns: list[str] | None = None, replay: str | Path 
             full = Path(directory) / "full.parquet"
             groups = [g for g in header.get("groups", []) if g != "resimulation"] + ["state"]
             native.resimulate(str(path), str(replay), str(full), precision=header.get("precision", "float32"),
-                              groups=groups, all_frames=header.get("all_frames", False))
+                              groups=groups, all_frames=header.get("all_frames", False),
+                              rows=header.get("rows", "frames"), tick_step=header.get("tick_step", 1))
             opened = read(full, columns)
             opened.table = opened.table.combine_chunks()
             return ReplicarFile(path=path, header={**opened.header, "groups": header.get("groups", [])},
@@ -246,30 +252,32 @@ def iter_frames(path: str | Path, replay: str | Path | None = None, batch_frames
 
 
 def convert(replay: str | Path, output: str | Path, *, precision: str = "float32", groups: list[str] | None = None,
-            with_groups: list[str] | None = None, all_frames: bool = False, meshes: str | Path | None = None) -> None:
-    """Convert a replay to a replicar file (needs the native extra). `meshes`: RocketSim's collision meshes,
-    else $REPLICAR_MESHES, else ./collision_meshes."""
+            with_groups: list[str] | None = None, all_frames: bool = False, rows: str = "ticks", tick_step: int = 1,
+            meshes: str | Path | None = None) -> None:
+    """Convert a replay to a replicar file (needs the native extra): a row per simulated tick in play (`rows="ticks"`,
+    every `tick_step`-th) or per replay frame (`rows="frames"`). `meshes`: RocketSim's collision meshes, else
+    $REPLICAR_MESHES, else ./collision_meshes."""
     _native("converting").convert(str(replay), str(output), precision=precision, groups=groups,
-                                  with_groups=with_groups, all_frames=all_frames,
+                                  with_groups=with_groups, all_frames=all_frames, rows=rows, tick_step=tick_step,
                                   meshes_dir=None if meshes is None else str(meshes))
 
 
 def convert_many(replays: list[str | Path], output_dir: str | Path, *, jobs: int | None = None,
                  skip_existing: bool = False, precision: str = "float32", groups: list[str] | None = None,
-                 with_groups: list[str] | None = None, all_frames: bool = False,
-                 meshes: str | Path | None = None) -> list[dict[str, Any]]:
+                 with_groups: list[str] | None = None, all_frames: bool = False, rows: str = "ticks",
+                 tick_step: int = 1, meshes: str | Path | None = None) -> list[dict[str, Any]]:
     """Convert replays to `output_dir/<name>.parquet`, `jobs` at a time, and write `output_dir/index.parquet`.
     Returns one dict per replay; a failed one has its `error`."""
     return _native("converting").convert_many(
         [str(r) for r in replays], str(output_dir), jobs=jobs, skip_existing=skip_existing, precision=precision,
-        groups=groups, with_groups=with_groups, all_frames=all_frames,
+        groups=groups, with_groups=with_groups, all_frames=all_frames, rows=rows, tick_step=tick_step,
         meshes_dir=None if meshes is None else str(meshes))
 
 
 def resimulate(file: str | Path, replay: str | Path, output: str | Path, *, precision: str = "float32",
                groups: list[str] | None = None, with_groups: list[str] | None = None, all_frames: bool = False,
-               meshes: str | Path | None = None) -> None:
+               rows: str = "ticks", tick_step: int = 1, meshes: str | Path | None = None) -> None:
     """Rebuild a file from its replay and its `resimulation` group, without fitting (needs the native extra)."""
     _native("resimulating").resimulate(str(file), str(replay), str(output), precision=precision, groups=groups,
-                                       with_groups=with_groups, all_frames=all_frames,
+                                       with_groups=with_groups, all_frames=all_frames, rows=rows, tick_step=tick_step,
                                        meshes_dir=None if meshes is None else str(meshes))

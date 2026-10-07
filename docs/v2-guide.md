@@ -1,8 +1,9 @@
 # replicar v2: guide
 
 replicar reconstructs Rocket League replays as [RocketSim](https://github.com/ZealanL/RocketSim) states: one row per
-replay frame in play, with the ball and every car's full physics state, controls, boost, pads, the scoreboard, events,
-ball contacts and boost pickups, and how each value is known. It writes one ordinary Parquet file per replay. The
+120 Hz simulation tick in play (or per replay frame), with the ball and every car's full physics state, the controls
+applied at that tick, boost, pads, the scoreboard, events, ball contacts and boost pickups, and how each value is
+known. It writes one ordinary Parquet file per replay. The
 words are defined in [glossary.md](glossary.md); every column is listed in [v2-file-format.md](v2-file-format.md).
 
 ## How it works, in one paragraph
@@ -37,6 +38,8 @@ Options of `convert` and `resimulate`:
 | `--precision float32\|quantized` | how the state's bodies are stored; quantized files are about a quarter smaller |
 | `--with GROUPS` | groups added to the default ones: `resimulation`, `network`, `diagnostics` |
 | `--groups GROUPS` | the whole set of groups instead (for example `game,updates,future,resimulation`) |
+| `--rows ticks\|frames` | a row per simulated 120 Hz tick in play (default) or per replay frame |
+| `--tick-step N` | with tick rows: only the ticks whose `sim_tick` is a multiple of N (8: 15 rows per second) |
 | `--all-frames` | also the frames outside play segments (countdowns, goal pauses and replays) |
 | `--jobs N` | replays converted at once (folder input; default: every core) |
 | `--skip-existing` | leave replays whose output exists (folder input; resumes a run) |
@@ -62,8 +65,8 @@ import replicar
 f = replicar.read("match.parquet")
 f.header["players"]                  # index, name, team, hitbox
 a = f.arrays()                       # NumPy, float32 with NaN for unknown, -1 for unknown integers
-a["car_position"]                    # (frames, players, 3)
-a["car_rotation"]                    # (frames, players, 4): quaternion x, y, z, w
+a["car_position"]                    # (rows, players, 3): a row per tick, or per frame
+a["car_rotation"]                    # (rows, players, 4): quaternion x, y, z, w
 a["clock_phase"], a["future_segment_end"]
 f.records("ball_contacts")           # a pyarrow table, one row per contact, with its frame
 
@@ -73,7 +76,7 @@ f = replicar.read("light.parquet", replay="match.replay")  # a file without stat
 ```
 
 Players and statistics in long form: `f.players_table()` (one row per player with the final statistics) and
-`f.long("car")` (one row per frame and player, `car_0_boost` as `car_boost`), both pyarrow tables
+`f.long("car")` (one row per file row and player, `car_0_boost` as `car_boost`), both pyarrow tables
 (`.to_pandas()` for pandas). From the command line, `replicar inspect --players match.parquet` prints the players
 as CSV. In DuckDB the players come from the header:
 

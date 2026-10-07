@@ -1,6 +1,6 @@
 """Check `replicar.rocketsim` (a row as a state of mtheall's RocketSim bindings) on replicar files.
 
-    python scripts/check_rocketsim_bridge.py <meshes> <file.parquet>... [--rows N]
+    python scripts/check_rocketsim_bridge.py <meshes> <file.parquet>... [--rows N] [--all-sources]
     (needs numpy, pyarrow and the `rocketsim` package; PYTHONPATH=python/v2/src)
 
 1. Round trip: every value the bridge sets reads back from the arena as the file has it.
@@ -8,7 +8,8 @@
    ball and cars are compared with the next row. Only bodies the next row does not update are compared (else the row
    is the replay's, not a simulation), and cars only when their controls were constant over the interval (no
    per-tick schedule or dodge press; their sources in the row and the next row are neither `schedule` nor `dodge`).
-   The baseline is no step at all (the row itself against the next row).
+   The baseline is no step at all (the row itself against the next row). In a file of tick rows a row's controls are
+   those of its tick, so `--all-sources` compares every car (one tick ahead).
 """
 
 import sys
@@ -48,6 +49,9 @@ def round_trip(f, row: int) -> float:
 def main() -> None:
     args = sys.argv[1:]
     rows_per_file = 400
+    all_sources = "--all-sources" in args
+    if all_sources:
+        args.remove("--all-sources")
     if "--rows" in args:
         i = args.index("--rows")
         rows_per_file = int(args[i + 1])
@@ -84,7 +88,7 @@ def main() -> None:
                 if a["car_updated"][row + 1, p] == 1 or not bridge.has_car(f, row + 1, p):
                     continue
                 sources = {a[f"car_{k}_controls_source"][r, p] for k in ("air", "ground") for r in (row, row + 1)}
-                if sources & PER_TICK or a["car_is_demoed"][row, p] == 1:
+                if (sources & PER_TICK and not all_sources) or a["car_is_demoed"][row, p] == 1:
                     continue
                 got = vec(car.get_state().pos)
                 errors["car"].append(float(np.linalg.norm(got - a["car_position"][row + 1, p])))

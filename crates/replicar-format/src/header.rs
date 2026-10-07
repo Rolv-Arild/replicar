@@ -44,6 +44,14 @@ pub struct SegmentInfo {
     pub end: String,
 }
 
+fn frames() -> String {
+    "frames".to_owned()
+}
+
+fn one() -> u32 {
+    1
+}
+
 /// The header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Header {
@@ -56,6 +64,11 @@ pub struct Header {
     pub groups: Vec<String>,
     pub precision: String,
     pub all_frames: bool,
+    /// `ticks` (a row per simulated tick in play, every `tick_step`-th) or `frames` (a row per replay frame).
+    #[serde(default = "frames")]
+    pub rows: String,
+    #[serde(default = "one")]
+    pub tick_step: u32,
     pub players: Vec<PlayerInfo>,
     pub pads: Vec<PadInfo>,
     pub segments: Vec<SegmentInfo>,

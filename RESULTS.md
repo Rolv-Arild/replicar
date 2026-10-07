@@ -2481,3 +2481,26 @@ Check (`scripts/check_rocketsim_bridge.py`, 300 sampled rows from each of 12 tra
 The car difference includes the network control switches inside an interval (a `network` source can change its values at a tick within it), which the one-step check applies at the row; how much is the two simulators was not separated. Longer horizons were not measured.
 
 **RLGym `GameState` (2026-10-07, later).** `replicar.rlgym.game_state(f, row)` (user: a bridge for RLGym's GameState and one for the arena, neither stepping the bindings): the row as an RLGym 2 `GameState`, cars keyed by player index or `agent_ids`, for `RocketSimEngine.set_state` or a state mutator. RLGym derives `is_supersonic` from `supersonic_time > 0`, so a supersonic car gets at least one tick of it. RLGym's `BOOST_LOCATIONS` has the pad at (-940, 3310) where RocketSim and the files have 3308, so both bridges match pads within 10 UU; the engine's arena order equals `BOOST_LOCATIONS` within that (checked), so its timers land on the right pads. Check: 600 rows of 6 train files through `RocketSimEngine.set_state` and its state back: positions and velocities within 0.0005, rotations, boost, `on_ground`, flip and jump times and pad timers as set. rlgym 2.0.1 pins NumPy 1.26.4 (installed in the ignored test venv `target/py312`, which had NumPy 2.5.3).
+
+## v2: a row per tick (2026-10-07)
+
+User story 5, made the default (user: "Per-tick should be the default", with options for every frame or every N-th tick). Until now every replicar file, v1 and v2, had one row per replay frame (about 30 per second, mostly 4 ticks apart): the 120 Hz states and the per-tick controls (the fitted press ticks, control timing, air and ground schedules) existed only inside the converter. Now:
+
+- The simulator records each stepped tick: the state at the tick (after the updates applied at it) and the controls RocketSim applies in the next step, with their sources (`simulate::TickRecord`). A row's `controls` are therefore the action taken at its state. This changes frame rows too: they used to have the arena's controls when the frame was output, which for cars on per-tick schedules are not those applied next (sample replay: 3-11% of a car's frame rows differ in a control or its source; the states are unchanged).
+- The converter makes a row of every tick between frames (`frame_row` false; it belongs to the frame that ends its interval): its state and controls; the previous frame's game values and ping (known at the tick); update ticks from the frame's updates applied at or before it; seconds since update null; the future group shifted to the tick; pad cooldowns the previous frame's less the elapsed time.
+- `--rows ticks` (default; `--tick-step N` keeps sim ticks that are multiples of N) or `--rows frames`; the header has `rows` and `tick_step`. A left-out row passes its records and update flags to the next written row of its segment. The `network` and `diagnostics` groups are on frame rows only; the `resimulation` group places entries by frame as before. Python: `convert`, `convert_many`, `resimulate` take `rows`, `tick_step`; `long()` and `records()` carry `sim_tick`.
+
+Checks (sample train 2v2 and 6 train replays): the frame rows of a tick file equal the frame file's (states, controls; the air-source dictionaries differ only in order); consecutive tick rows are 1 tick apart within a segment (5 duplicate frame ticks); update flags and all record lists add up to the same totals in tick, tick-step-8 and frame files; a tick-step-8 file equals the every-tick file at those ticks; update ages rise by 1 per tick and are 0 (or 1, when the update was at the previous frame's own tick) where an update lands; game values on tick rows equal the previous frame row's; resimulating a tick file reproduces all 358 columns; frame-mode files differ from the previous build only in controls and their sources. With mtheall's bindings stepped one tick from a tick row (every car, schedules and dodges included), the next tick row is within ball 0.042 / car 0.62 UU (p99), car 0.033 UU (p50), against 12-13 UU (p50) without stepping: the per-tick controls are the ones applied.
+
+Cost (`scripts/time_corpus.py`, 120 train/validation replays, 32 jobs, same machine; baseline built from `d6fec01` with `git archive`):
+
+| | time | replays per hour | peak memory | output |
+| --- | ---: | ---: | ---: | ---: |
+| baseline (frame rows) | 38.6 s | 11,182 | 4.38 GB | 386 MB |
+| `--rows frames` | 36.5 s | 11,836 | 5.81 GB | 385 MB |
+| ticks (default) | 56.2 s | 7,692 | 8.54 GB | 1,000 MB (8.3 MB per replay) |
+| `--tick-step 8` | 35.7 s | 12,109 | 5.24 GB | 199 MB |
+
+Recording the ticks costs no measurable time; writing four times the rows does (+46% time, 2.6x the output; 140,000 replays: about 18 h and 1.2 TB on this machine). Memory is higher in every mode because the tick rows are built before the writer selects (not yet optimized). The throughput table of 'v2: corpus throughput' is for frame rows.
+
+During the timing the disk filled up (the drive had 0 bytes free); I deleted my own generated outputs under `target/` (`scaling/out-*`, `scaling/split`, `stats-check`, `cs-check`, `time-*`; regenerable) and timed with one job count at a time.

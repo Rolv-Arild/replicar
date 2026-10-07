@@ -1,9 +1,10 @@
 # replicar
 
 *Replica cars from Rocket League replays.* replicar reconstructs Rocket League replays as
-[RocketSim](https://github.com/ZealanL/RocketSim) states: one row per replay frame in play, with the ball and every
-car's full physics state, controls, boost and pads, the scoreboard, events, ball contacts and boost pickups, and
-how each value is known. It writes one ordinary Parquet file per replay, about 2-2.5 times the replay's size.
+[RocketSim](https://github.com/ZealanL/RocketSim) states: one row per 120 Hz simulation tick in play, with the ball and
+every car's full physics state, the controls applied at that tick, boost and pads, the scoreboard, events, ball
+contacts and boost pickups, and how each value is known. It writes one ordinary Parquet file per replay
+(`--tick-step N` keeps every N-th tick, `--rows frames` one row per replay frame).
 
 Replay packets are exact server states, placed on their inferred 120 Hz tick; RocketSim simulates every tick in
 between, and the inputs a replay does not record (jump, dodge and control timing, flip cancels, air pitch, yaw and
@@ -30,7 +31,8 @@ cargo build --release -p replicar-cli
 `--precision quantized` makes the file about a quarter smaller (0.01 UU, 0.01 UU/s, 1e-4 rad/s). `--with
 resimulation,network,diagnostics` adds the optional groups; `--groups game,updates,future,resimulation` writes a
 file without states, about a third of the size, from which `replicar resimulate` rebuilds the states exactly.
-`--all-frames` also writes the frames outside play (countdowns, goal pauses and replays).
+`--rows frames` writes one row per replay frame (about 30 per second) instead of one per tick, `--tick-step N` every
+N-th tick. `--all-frames` also writes the frames outside play (countdowns, goal pauses and replays).
 
 ## Reading the files
 

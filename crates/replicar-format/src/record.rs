@@ -201,10 +201,14 @@ pub struct Future {
     pub seconds_until_segment_end: f32,
 }
 
-/// One frame.
+/// One row: a replay frame's own tick, or a simulated tick between two frames (docs/glossary.md, "Tick row").
+/// A tick row belongs to the frame whose interval it is in (the frame that ends it): its state is simulated toward
+/// that frame's updates, and its game values are the previous frame's (what was known at the tick).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub frame: FrameIndex,
+    /// The row is its frame's own tick (the state the replay frame shows), not a tick between frames.
+    pub frame_row: bool,
     /// The play segment, `None` outside play.
     pub segment: Option<u32>,
     pub replay_time: f32,

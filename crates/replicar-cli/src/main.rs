@@ -1,7 +1,8 @@
 //! `replicar`: converts Rocket League replays to replicar files (docs/v2-plan.md, section 4.5).
 //!
 //! ```text
-//! replicar convert match.replay -o match.parquet [--precision float32|quantized] [--with GROUPS | --groups GROUPS] [--all-frames]
+//! replicar convert match.replay -o match.parquet [--rows ticks|frames] [--tick-step N] [--precision float32|quantized]
+//!     [--with GROUPS | --groups GROUPS] [--all-frames]
 //! replicar convert replays/ -o out/ [--jobs N] [--skip-existing] ...   # one file per replay + out/index.parquet
 //! replicar resimulate match.parquet --replay match.replay -o full.parquet
 //! replicar inspect match.replay | match.parquet
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use replicar_format::{Group, Precision, WriteOptions};
+use replicar_format::{Group, Precision, RowRate, WriteOptions};
 
 #[derive(Parser)]
 #[command(
@@ -85,6 +86,14 @@ enum Command {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum RowsArg {
+    /// A row per simulated tick in play (every `--tick-step`-th).
+    Ticks,
+    /// A row per replay frame.
+    Frames,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum PrecisionArg {
     Float32,
     Quantized,
@@ -102,6 +111,12 @@ struct FileArgs {
     /// The whole set of groups, instead of the default ones.
     #[arg(long, value_delimiter = ',', conflicts_with = "with")]
     groups: Vec<String>,
+    /// A row per simulated 120 Hz tick in play, or per replay frame.
+    #[arg(long, value_enum, default_value = "ticks")]
+    rows: RowsArg,
+    /// With `--rows ticks`: only the ticks whose sim tick is a multiple of N.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    tick_step: u32,
     /// Also write the frames outside play segments (countdowns, goal pauses and replays).
     #[arg(long)]
     all_frames: bool,
@@ -138,6 +153,10 @@ impl FileArgs {
             precision: match self.precision {
                 PrecisionArg::Float32 => Precision::Float32,
                 PrecisionArg::Quantized => Precision::Quantized,
+            },
+            rows: match self.rows {
+                RowsArg::Ticks => RowRate::Ticks(self.tick_step),
+                RowsArg::Frames => RowRate::Frames,
             },
             all_frames: self.all_frames,
             ..WriteOptions::default()

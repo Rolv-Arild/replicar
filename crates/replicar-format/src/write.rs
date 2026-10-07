@@ -17,7 +17,9 @@ use parquet::schema::types::ColumnPath;
 
 use crate::columns::{Columns, child_bool, child_f32, child_str, child_u8, child_u16, child_u64};
 use crate::header::{HEADER_KEY, Header};
-use crate::record::{Body, Car, CarInternals, Controls, Event, Frame, StatEvent};
+use crate::record::{
+    BallContact, Body, BoostPickup, Car, CarInternals, Controls, Event, Frame, StatEvent,
+};
 use crate::resimulation::Resimulation;
 
 /// A column group (docs/glossary.md, "Column group"); the frame columns are always written.
@@ -99,11 +101,21 @@ impl Precision {
 /// The scales of the quantized precision: position (UU), velocity (UU/s), angular velocity (rad/s), rotation.
 pub const QUANTA: [f64; 4] = [0.01, 0.01, 1e-4, 1.0 / 32767.0];
 
+/// Which rows a file has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowRate {
+    /// A row per simulated tick in play whose sim tick is a multiple of the step (1: every tick).
+    Ticks(u32),
+    /// A row per replay frame.
+    Frames,
+}
+
 /// What a file holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOptions {
     pub groups: BTreeSet<Group>,
     pub precision: Precision,
+    pub rows: RowRate,
     /// Also the frames outside play segments, with a null `segment`.
     pub all_frames: bool,
     /// zstd level.
@@ -115,6 +127,7 @@ impl Default for WriteOptions {
         Self {
             groups: Group::DEFAULT.into_iter().collect(),
             precision: Precision::Float32,
+            rows: RowRate::Ticks(1),
             all_frames: false,
             compression_level: 9,
         }
@@ -148,6 +161,83 @@ pub struct Content<'a> {
     pub diagnostics: Option<&'a RecordBatch>,
 }
 
+/// What the left-out rows pass on to the written ones: their records and whether a body got an update.
+struct Carried<'a> {
+    events: Vec<Vec<&'a Event>>,
+    stat_events: Vec<Vec<&'a StatEvent>>,
+    ball_contacts: Vec<Vec<&'a BallContact>>,
+    boost_pickups: Vec<Vec<&'a BoostPickup>>,
+    ball_updated: Vec<bool>,
+    car_updated: Vec<Vec<Option<bool>>>,
+}
+
+impl<'a> Carried<'a> {
+    /// A left-out row in play passes everything on to the next written row of its segment, else to the last
+    /// written row before it (a segment's end left out by the tick step). A left-out row outside play (a goal
+    /// pause) passes on only its stat events (an assist credited during the pause), to the last written row before
+    /// it, else the first. Each record keeps its own frame or tick.
+    fn new(frames: &'a [Frame], written: &[bool], count: usize) -> Self {
+        let mut carried = Self {
+            events: vec![Vec::new(); count],
+            stat_events: vec![Vec::new(); count],
+            ball_contacts: vec![Vec::new(); count],
+            boost_pickups: vec![Vec::new(); count],
+            ball_updated: vec![false; count],
+            car_updated: vec![Vec::new(); count],
+        };
+        if count == 0 {
+            return carried;
+        }
+        // The written row index of each row, and the next written row (index, row) from each row on.
+        let mut index = vec![None; frames.len()];
+        let mut k = 0;
+        for (i, &w) in written.iter().enumerate() {
+            if w {
+                index[i] = Some(k);
+                k += 1;
+            }
+        }
+        let mut next = vec![None; frames.len() + 1];
+        for i in (0..frames.len()).rev() {
+            next[i] = index[i].map_or(next[i + 1], |k| Some((k, i)));
+        }
+        let mut previous: Option<usize> = None;
+        for (i, f) in frames.iter().enumerate() {
+            if let Some(k) = index[i] {
+                previous = Some(k);
+            }
+            let in_play_target = match next[i] {
+                Some((k, j)) if frames[j].segment == f.segment => Some(k),
+                _ => previous,
+            };
+            let (all, stats) = match (index[i], f.segment.is_some()) {
+                (Some(k), _) => (Some(k), Some(k)),
+                (None, true) => (in_play_target, in_play_target),
+                (None, false) => (None, Some(previous.unwrap_or(0))),
+            };
+            if let Some(k) = stats {
+                carried.stat_events[k].extend(&f.game.stat_events);
+            }
+            let Some(k) = all else { continue };
+            carried.events[k].extend(&f.game.events);
+            carried.ball_contacts[k].extend(&f.game.ball_contacts);
+            carried.boost_pickups[k].extend(&f.game.boost_pickups);
+            carried.ball_updated[k] |= f.updates.ball_updated;
+            let cars = &mut carried.car_updated[k];
+            if cars.len() < f.updates.car_updated.len() {
+                cars.resize(f.updates.car_updated.len(), None);
+            }
+            for (to, from) in cars.iter_mut().zip(&f.updates.car_updated) {
+                *to = match (*to, *from) {
+                    (Some(a), Some(b)) => Some(a || b),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+        carried
+    }
+}
+
 /// Writes `content` to `path` with `header` (its group list, precision and frame setting are taken from
 /// `options`). The file appears only when complete.
 pub fn write(
@@ -159,26 +249,18 @@ pub fn write(
     let frames = content.frames;
     let written: Vec<bool> = frames
         .iter()
-        .map(|f| options.all_frames || f.segment.is_some())
+        .map(|f| match (options.rows, f.segment.is_some()) {
+            (RowRate::Ticks(step), true) => f.sim_tick % u64::from(step.max(1)) == 0,
+            (RowRate::Frames, true) => f.frame_row,
+            (_, false) => f.frame_row && options.all_frames,
+        })
         .collect();
     let rows: Vec<&Frame> = frames
         .iter()
         .zip(&written)
         .filter_map(|(f, &w)| w.then_some(f))
         .collect();
-    // A written row's stat events, with those of the left-out frames after it (an assist during the goal pause):
-    // each event keeps its own `updated_frame`; the
-    let mut stat_events: Vec<Vec<&StatEvent>> = vec![Vec::new(); rows.len()];
-    // ones before the first written row go on it.
-    let mut current: Option<usize> = None;
-    for (f, &w) in frames.iter().zip(&written) {
-        if w {
-            current = Some(current.map_or(0, |r| r + 1));
-        }
-        if let Some(list) = stat_events.get_mut(current.unwrap_or(0)) {
-            list.extend(&f.game.stat_events);
-        }
-    }
+    let carried = Carried::new(frames, &written, rows.len());
     let players = header.players.len();
     let pads = header.pads.len();
     let mut columns = Columns::default();
@@ -186,8 +268,8 @@ pub fn write(
     for group in &options.groups {
         match group {
             Group::State => state_columns(&mut columns, &rows, players, pads, options.precision),
-            Group::Game => game_columns(&mut columns, &rows, &stat_events),
-            Group::Updates => update_columns(&mut columns, &rows, players),
+            Group::Game => game_columns(&mut columns, &rows, &carried),
+            Group::Updates => update_columns(&mut columns, &rows, &carried, players),
             Group::Future => future_columns(&mut columns, &rows),
             Group::Network | Group::Diagnostics => {
                 let batch = if *group == Group::Network {
@@ -196,9 +278,19 @@ pub fn write(
                     content.diagnostics
                 };
                 let batch = batch.ok_or(WriteError::Missing(group.name()))?;
-                let rows = arrow_select::filter::filter_record_batch(
-                    batch,
-                    &arrow_array::BooleanArray::from(written.clone()),
+                // One row per frame: on the frame rows, null on the tick rows.
+                let take = arrow_array::UInt32Array::from(
+                    rows.iter()
+                        .map(|r| r.frame_row.then_some(r.frame.0))
+                        .collect::<Vec<_>>(),
+                );
+                let rows = RecordBatch::try_new(
+                    batch.schema(),
+                    batch
+                        .columns()
+                        .iter()
+                        .map(|c| arrow_select::take::take(c, &take, None))
+                        .collect::<Result<Vec<_>, _>>()?,
                 )?;
                 columns
                     .fields
@@ -217,6 +309,10 @@ pub fn write(
     let mut header = header.clone();
     header.groups = options.groups.iter().map(|g| g.name().to_owned()).collect();
     header.all_frames = options.all_frames;
+    (header.rows, header.tick_step) = match options.rows {
+        RowRate::Ticks(step) => ("ticks".to_owned(), step.max(1)),
+        RowRate::Frames => ("frames".to_owned(), 1),
+    };
     header.precision = options.precision.name().to_owned();
     let schema = Arc::new(Schema::new(columns.fields));
     let mut properties = WriterProperties::builder()
@@ -344,6 +440,7 @@ type BodyPart = (
 
 fn frame_columns(columns: &mut Columns, rows: &[&Frame]) {
     columns.u32("frame", ALWAYS, None, rows.iter().map(|r| Some(r.frame.0)));
+    columns.bool("frame_row", ALWAYS, rows.iter().map(|r| Some(r.frame_row)));
     columns.u32("segment", ALWAYS, None, rows.iter().map(|r| r.segment));
     columns.f32(
         "replay_time",
@@ -606,7 +703,7 @@ fn internal_columns(
     );
 }
 
-fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&StatEvent>]) {
+fn game_columns(columns: &mut Columns, rows: &[&Frame], carried: &Carried) {
     columns.names(
         "period",
         GAME,
@@ -632,8 +729,8 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&Stat
     columns.i32("blue_score", GAME, rows.iter().map(|r| r.game.scores[0]));
     columns.i32("orange_score", GAME, rows.iter().map(|r| r.game.scores[1]));
 
-    let events: Vec<&Event> = rows.iter().flat_map(|r| &r.game.events).collect();
-    let lengths: Vec<usize> = rows.iter().map(|r| r.game.events.len()).collect();
+    let events: Vec<&Event> = carried.events.iter().flatten().copied().collect();
+    let lengths: Vec<usize> = carried.events.iter().map(Vec::len).collect();
     columns.records(
         "events",
         GAME,
@@ -735,8 +832,8 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&Stat
         ],
     );
 
-    let stats: Vec<_> = stat_events.iter().flatten().collect();
-    let lengths: Vec<usize> = stat_events.iter().map(Vec::len).collect();
+    let stats: Vec<_> = carried.stat_events.iter().flatten().collect();
+    let lengths: Vec<usize> = carried.stat_events.iter().map(Vec::len).collect();
     columns.records(
         "stat_events",
         GAME,
@@ -755,8 +852,8 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&Stat
         ],
     );
 
-    let contacts: Vec<_> = rows.iter().flat_map(|r| &r.game.ball_contacts).collect();
-    let lengths: Vec<usize> = rows.iter().map(|r| r.game.ball_contacts.len()).collect();
+    let contacts: Vec<_> = carried.ball_contacts.iter().flatten().collect();
+    let lengths: Vec<usize> = carried.ball_contacts.iter().map(Vec::len).collect();
     columns.records(
         "ball_contacts",
         GAME,
@@ -783,8 +880,8 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&Stat
         ],
     );
 
-    let pickups: Vec<_> = rows.iter().flat_map(|r| &r.game.boost_pickups).collect();
-    let lengths: Vec<usize> = rows.iter().map(|r| r.game.boost_pickups.len()).collect();
+    let pickups: Vec<_> = carried.boost_pickups.iter().flatten().collect();
+    let lengths: Vec<usize> = carried.boost_pickups.iter().map(Vec::len).collect();
     columns.records(
         "boost_pickups",
         GAME,
@@ -809,11 +906,11 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&Stat
     );
 }
 
-fn update_columns(columns: &mut Columns, rows: &[&Frame], players: usize) {
+fn update_columns(columns: &mut Columns, rows: &[&Frame], carried: &Carried, players: usize) {
     columns.bool(
         "ball_updated",
         UPDATES,
-        rows.iter().map(|r| Some(r.updates.ball_updated)),
+        carried.ball_updated.iter().map(|&u| Some(u)),
     );
     columns.u32(
         "ball_update_tick",
@@ -837,7 +934,7 @@ fn update_columns(columns: &mut Columns, rows: &[&Frame], players: usize) {
         columns.bool(
             format!("car_{p}_updated"),
             UPDATES,
-            rows.iter().map(|r| at(&r.updates.car_updated, p)),
+            carried.car_updated.iter().map(|u| at(u, p)),
         );
         columns.u32(
             format!("car_{p}_update_tick"),
@@ -892,7 +989,7 @@ fn future_columns(columns: &mut Columns, rows: &[&Frame]) {
 mod tests {
     use super::*;
     use crate::header::{PadInfo, PlayerInfo};
-    use crate::record::{Ball, Future, Game, State, Updates};
+    use crate::record::{Ball, BoostPickup, Future, Game, State, Updates};
     use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd, StatKind};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -905,6 +1002,8 @@ mod tests {
             groups: Vec::new(),
             precision: "float32".to_owned(),
             all_frames: false,
+            rows: "frames".to_owned(),
+            tick_step: 1,
             players: vec![PlayerInfo {
                 index: 0,
                 key: "a".to_owned(),
@@ -931,6 +1030,7 @@ mod tests {
     fn frame(index: u32, segment: Option<u32>, absent: bool) -> Frame {
         Frame {
             frame: FrameIndex(index),
+            frame_row: true,
             segment,
             replay_time: index as f32 / 30.0,
             replay_tick: index * 4,
@@ -1054,6 +1154,98 @@ mod tests {
         assert!(batch.column_by_name("car_0_position_x").is_none());
         let segment = batch.column_by_name("segment").unwrap();
         assert!(segment.is_null(0) && !segment.is_null(1));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn tick_rows_follow_the_step_and_pass_on_what_they_leave_out() {
+        let directory =
+            std::env::temp_dir().join(format!("replicar-format-t-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("t.parquet");
+        // Frame 1's row at tick 4, the ticks 5-7 between, and frame 2's row at tick 8 (with its goal).
+        let between = |tick: u64| {
+            let mut row = frame(2, Some(0), false);
+            row.frame_row = false;
+            row.sim_tick = tick;
+            row.replay_tick = tick as u32;
+            row.game.events.clear();
+            row
+        };
+        let mut frames = vec![frame(1, Some(0), false), between(5), between(6), between(7)];
+        frames.push(frame(2, Some(0), false));
+        frames[1].game.boost_pickups.push(BoostPickup {
+            pad: Some(0),
+            is_big: Some(true),
+            player: Some(0),
+            verified: true,
+            suggested_player: None,
+            replay_tick: 5,
+        });
+        frames[2].updates.car_updated = vec![Some(true)];
+        frames[3].updates.ball_updated = true;
+        let lengths = |batch: &RecordBatch, name: &str| -> Vec<i32> {
+            let list = batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::ListArray>()
+                .unwrap()
+                .clone();
+            (0..arrow_array::Array::len(&list))
+                .map(|i| list.value_length(i))
+                .collect()
+        };
+        let bools = |batch: &RecordBatch, name: &str| -> Vec<Option<bool>> {
+            let column = batch.column_by_name(name).unwrap();
+            let column = column
+                .as_any()
+                .downcast_ref::<arrow_array::BooleanArray>()
+                .unwrap();
+            column.iter().collect()
+        };
+        let ticks = |batch: &RecordBatch| -> Vec<u64> {
+            let column = batch.column_by_name("sim_tick").unwrap();
+            let column = column
+                .as_any()
+                .downcast_ref::<arrow_array::UInt64Array>()
+                .unwrap();
+            column.values().to_vec()
+        };
+
+        // Every other tick: 4, 6, 8. Tick 5's pickup is on tick 6, tick 7's ball update on tick 8.
+        let options = WriteOptions {
+            rows: RowRate::Ticks(2),
+            ..WriteOptions::default()
+        };
+        write(&path, &header(), &content(&frames), &options).unwrap();
+        let (batch, written) = read(&path);
+        assert_eq!((written.rows.as_str(), written.tick_step), ("ticks", 2));
+        assert_eq!(ticks(&batch), [4, 6, 8]);
+        assert_eq!(
+            bools(&batch, "frame_row"),
+            [Some(true), Some(false), Some(true)]
+        );
+        assert_eq!(lengths(&batch, "boost_pickups"), [0, 1, 0]);
+        assert_eq!(lengths(&batch, "events"), [0, 0, 1]);
+        assert_eq!(
+            bools(&batch, "ball_updated"),
+            [Some(false), Some(false), Some(true)]
+        );
+        assert_eq!(bools(&batch, "car_0_updated")[1], Some(true));
+
+        // A row per frame: the ticks between pass everything on to frame 2's row.
+        let options = WriteOptions {
+            rows: RowRate::Frames,
+            ..WriteOptions::default()
+        };
+        write(&path, &header(), &content(&frames), &options).unwrap();
+        let (batch, written) = read(&path);
+        assert_eq!(written.rows, "frames");
+        assert_eq!(ticks(&batch), [4, 8]);
+        assert_eq!(lengths(&batch, "boost_pickups"), [0, 1]);
+        assert_eq!(bools(&batch, "ball_updated"), [Some(false), Some(true)]);
+        assert_eq!(bools(&batch, "car_0_updated")[1], Some(true));
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

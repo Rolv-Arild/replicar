@@ -153,6 +153,17 @@ pub struct Prediction {
     pub is_on_ground: Option<bool>,
 }
 
+/// One stepped tick: the state at `sim_tick` (after the updates applied at it) with each car's `controls` set to the
+/// controls the step after it applied, and what set them.
+#[derive(Debug, Clone)]
+pub struct TickRecord {
+    pub sim_tick: u64,
+    pub ball: rocketsim::BallState,
+    /// Per player slot. A car held on its spawn pose is shown as not demolished.
+    pub cars: Vec<rocketsim::CarState>,
+    pub control_sources: Vec<ControlSources>,
+}
+
 /// The simulation at one replay frame.
 #[derive(Debug, Clone)]
 pub struct SimulatedFrame {
@@ -191,6 +202,10 @@ pub struct SimulatedFrame {
     pub predictions: Vec<Prediction>,
     /// Per player slot: what set the controls the frame's state has.
     pub control_sources: Vec<ControlSources>,
+    /// The ticks stepped in the frame's interval, in order. The first is the previous frame's own tick (the controls
+    /// applied after a frame are known only once the next interval starts); this frame's own tick is the first of
+    /// the next frame's. Empty when the frame was not simulated.
+    pub ticks: Vec<TickRecord>,
 }
 
 /// What the simulation counted.
@@ -289,6 +304,8 @@ struct Simulator<'a, 'i> {
     /// The ground schedules being driven, and the dodges to press.
     ground_schedules: Vec<(PlayerIndex, GroundSchedule)>,
     pending_dodges: Vec<PendingDodge>,
+    /// The ticks stepped in the current frame's interval.
+    stepped: Vec<TickRecord>,
     /// Per player slot: what last set the car's pitch, yaw and roll, and its throttle, steer, handbrake and boost.
     control_sources: Vec<ControlSources>,
     pads: Pads,
@@ -334,6 +351,7 @@ pub fn simulate(
         air_schedules: Vec::new(),
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
+        stepped: Vec::new(),
         control_sources: Vec::new(),
         pads,
         diagnostics: SimDiagnostics::default(),
@@ -666,6 +684,7 @@ impl<'a> Simulator<'a, '_> {
             }
             self.drive_ground_schedules(sim_tick);
             self.press_dodges(sim_tick);
+            self.record_tick();
             events.extend(
                 self.arena
                     .step_tick()
@@ -675,6 +694,33 @@ impl<'a> Simulator<'a, '_> {
             );
         }
         updates::limit_velocities(&mut self.arena, self.players.len());
+    }
+
+    /// Records the current tick's state with the controls about to be applied.
+    fn record_tick(&mut self) {
+        let slots = self.players.len();
+        let cars = (0..slots)
+            .map(|slot| {
+                let mut car = *self.arena.get_car_state(slot);
+                car.controls = *self.arena.get_car_controls(slot);
+                if u8::try_from(slot)
+                    .is_ok_and(|p| self.holds.spawning.contains_key(&PlayerIndex(p)))
+                {
+                    car.is_demoed = false;
+                    car.demo_respawn_timer = 0.0;
+                }
+                car
+            })
+            .collect();
+        let control_sources = (0..slots)
+            .map(|slot| *sources(&mut self.control_sources, slot))
+            .collect();
+        self.stepped.push(TickRecord {
+            sim_tick: self.arena.tick_count(),
+            ball: *self.arena.get_ball_state(),
+            cars,
+            control_sources,
+        });
     }
 
     /// The ground schedules' controls at `sim_tick`; from its press tick a pending dodge drives the car.
@@ -775,7 +821,7 @@ impl<'a> Simulator<'a, '_> {
     }
 
     fn output(
-        &self,
+        &mut self,
         frame: &NetworkFrame,
         ctx: FrameContext,
         replay_tick: u64,
@@ -874,6 +920,7 @@ impl<'a> Simulator<'a, '_> {
             pickups,
             predictions: ctx.predictions,
             control_sources: self.control_sources.clone(),
+            ticks: std::mem::take(&mut self.stepped),
         }
     }
 }

@@ -12,7 +12,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use replicar_format::{Group, Precision, WriteOptions};
+use replicar_format::{Group, Precision, RowRate, WriteOptions};
 
 fn runtime(error: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
@@ -24,6 +24,8 @@ fn options(
     groups: Option<Vec<String>>,
     with_groups: Option<Vec<String>>,
     all_frames: bool,
+    rows: &str,
+    tick_step: u32,
 ) -> PyResult<WriteOptions> {
     let parse = |names: Vec<String>| -> PyResult<Vec<Group>> {
         names
@@ -43,6 +45,16 @@ fn options(
         groups: set,
         precision: Precision::from_name(precision)
             .ok_or_else(|| PyValueError::new_err(format!("unknown precision {precision}")))?,
+        rows: match rows {
+            "ticks" if tick_step >= 1 => RowRate::Ticks(tick_step),
+            "ticks" => return Err(PyValueError::new_err("tick_step must be at least 1")),
+            "frames" => RowRate::Frames,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown rows {other}: ticks or frames"
+                )));
+            }
+        },
         all_frames,
         ..WriteOptions::default()
     })
@@ -58,7 +70,7 @@ fn meshes(meshes: Option<PathBuf>) -> PyResult<replicar::Meshes> {
 
 /// Converts a replay to a replicar file.
 #[pyfunction]
-#[pyo3(signature = (replay, output, *, precision = "float32", groups = None, with_groups = None, all_frames = false, meshes_dir = None))]
+#[pyo3(signature = (replay, output, *, precision = "float32", groups = None, with_groups = None, all_frames = false, rows = "ticks", tick_step = 1, meshes_dir = None))]
 fn convert(
     py: Python<'_>,
     replay: PathBuf,
@@ -67,9 +79,11 @@ fn convert(
     groups: Option<Vec<String>>,
     with_groups: Option<Vec<String>>,
     all_frames: bool,
+    rows: &str,
+    tick_step: u32,
     meshes_dir: Option<PathBuf>,
 ) -> PyResult<()> {
-    let options = options(precision, groups, with_groups, all_frames)?;
+    let options = options(precision, groups, with_groups, all_frames, rows, tick_step)?;
     let meshes = meshes(meshes_dir)?;
     py.detach(|| {
         let converter = replicar::Converter::new(&meshes, replicar::Config::default());
@@ -81,7 +95,7 @@ fn convert(
 /// Converts replays to `output_dir/<name>.parquet`, `jobs` at a time, and writes `output_dir/index.parquet`.
 /// Returns one dict per replay (the index row); a replay that fails has its `error`.
 #[pyfunction]
-#[pyo3(signature = (replays, output_dir, *, jobs = None, skip_existing = false, precision = "float32", groups = None, with_groups = None, all_frames = false, meshes_dir = None))]
+#[pyo3(signature = (replays, output_dir, *, jobs = None, skip_existing = false, precision = "float32", groups = None, with_groups = None, all_frames = false, rows = "ticks", tick_step = 1, meshes_dir = None))]
 fn convert_many(
     py: Python<'_>,
     replays: Vec<PathBuf>,
@@ -92,9 +106,11 @@ fn convert_many(
     groups: Option<Vec<String>>,
     with_groups: Option<Vec<String>>,
     all_frames: bool,
+    rows: &str,
+    tick_step: u32,
     meshes_dir: Option<PathBuf>,
 ) -> PyResult<Vec<std::collections::BTreeMap<String, Py<PyAny>>>> {
-    let options = options(precision, groups, with_groups, all_frames)?;
+    let options = options(precision, groups, with_groups, all_frames, rows, tick_step)?;
     let meshes = meshes(meshes_dir)?;
     let jobs_list: Vec<replicar::corpus::Job> = replays
         .iter()
@@ -163,7 +179,7 @@ fn convert_many(
 
 /// Rebuilds a file from its replay and its `resimulation` group, without fitting.
 #[pyfunction]
-#[pyo3(signature = (file, replay, output, *, precision = "float32", groups = None, with_groups = None, all_frames = false, meshes_dir = None))]
+#[pyo3(signature = (file, replay, output, *, precision = "float32", groups = None, with_groups = None, all_frames = false, rows = "ticks", tick_step = 1, meshes_dir = None))]
 fn resimulate(
     py: Python<'_>,
     file: PathBuf,
@@ -173,9 +189,11 @@ fn resimulate(
     groups: Option<Vec<String>>,
     with_groups: Option<Vec<String>>,
     all_frames: bool,
+    rows: &str,
+    tick_step: u32,
     meshes_dir: Option<PathBuf>,
 ) -> PyResult<()> {
-    let options = options(precision, groups, with_groups, all_frames)?;
+    let options = options(precision, groups, with_groups, all_frames, rows, tick_step)?;
     let meshes = meshes(meshes_dir)?;
     py.detach(|| -> Result<(), replicar::Error> {
         let bytes = std::fs::read(&replay).map_err(|e| replicar::Error::Io(e.to_string()))?;

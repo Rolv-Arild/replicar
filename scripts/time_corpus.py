@@ -1,7 +1,7 @@
 """Time `replicar convert <folder>` at several job counts, with the process's peak memory, and project the time
 for a corpus (story: release planning).
 
-usage: python scripts/time_corpus.py <replicar binary> <replay folder> <scratch dir> <jobs>...   (needs psutil)
+usage: python scripts/time_corpus.py <replicar binary> <replay folder> <scratch dir> <jobs>... [-- <convert options>]   (needs psutil)
 """
 
 import os
@@ -14,7 +14,10 @@ import psutil
 
 
 def main():
-    binary, folder, scratch, *jobs = sys.argv[1:]
+    args = sys.argv[1:]
+    extra = args[args.index("--") + 1 :] if "--" in args else []
+    args = args[: args.index("--")] if "--" in args else args
+    binary, folder, scratch, *jobs = args
     replays = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.endswith(".replay")]
     size = sum(os.path.getsize(p) for p in replays)
     print(f"{len(replays)} replays, {size / 1e6:.1f} MB")
@@ -22,7 +25,7 @@ def main():
         out = os.path.join(scratch, f"out-{j}")
         shutil.rmtree(out, ignore_errors=True)
         start = time.perf_counter()
-        process = subprocess.Popen([binary, "convert", folder, "-o", out, "--jobs", j],
+        process = subprocess.Popen([binary, "convert", folder, "-o", out, "--jobs", j, *extra],
                                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         handle = psutil.Process(process.pid)
         peak = 0

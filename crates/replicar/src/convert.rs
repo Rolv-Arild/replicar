@@ -24,7 +24,7 @@ use crate::infer::recorded::{RecordedInference, Recorder};
 use crate::infer::{FittedInference, Inference, InferenceOptions};
 use crate::resimulate::{from_group, to_group};
 use crate::simulate::{
-    HoldSource, SimPlayer, SimulatedFrame, Simulation, SimulationOptions, simulate,
+    HoldSource, SimPlayer, SimulatedFrame, Simulation, SimulationOptions, TickRecord, simulate,
 };
 use crate::update_ticks::{UpdateTicks, Withheld};
 use crate::{Error, Meshes};
@@ -308,7 +308,7 @@ fn state_sha256(frames: &[Frame]) -> String {
             hash.update(v.to_bits().to_le_bytes());
         }
     };
-    for frame in frames {
+    for frame in frames.iter().filter(|f| f.frame_row) {
         body(&frame.state.ball.body);
         for car in frame.state.cars.iter().flatten() {
             body(&car.body);
@@ -372,38 +372,234 @@ impl<'a> Rows<'a> {
             .updates
             .frame(&self.network.frames, network_frame, simulated);
         let segment = self.segment_frames[f];
+        let frame_updates = Updates {
+            ball_updated: updates.ball_updated,
+            ball_update_tick: update_tick(simulated.replay_tick, updates.ball_ticks_since_update),
+            ball_ticks_since_update: updates.ball_ticks_since_update,
+            ball_seconds_since_update: updates.ball_seconds_since_update,
+            car_update_tick: updates
+                .car_ticks_since_update
+                .iter()
+                .map(|&t| update_tick(simulated.replay_tick, t))
+                .collect(),
+            car_updated: updates.car_updated.clone(),
+            car_ticks_since_update: updates.car_ticks_since_update.clone(),
+            car_seconds_since_update: updates.car_seconds_since_update.clone(),
+            ping_raw: Vec::new(),
+        };
+        let frame_state = state(simulated);
+        let future = segment.map(|s| Future {
+            segment_end: s.future_segment_end,
+            seconds_until_segment_end: s.future_seconds_until_segment_end,
+        });
+        let mut frame_updates = frame_updates;
+        self.push_ticks(
+            simulated,
+            network_frame.time,
+            segment.map(|s| s.segment),
+            &frame_state,
+            &mut frame_updates,
+            future,
+        );
         self.frames.push(Frame {
             frame: simulated.index,
+            frame_row: true,
             segment: segment.map(|s| s.segment),
             replay_time: network_frame.time,
             replay_tick: u32::try_from(simulated.replay_tick).unwrap_or(u32::MAX),
             sim_tick: simulated.state.tick_count,
-            state: state(simulated),
+            state: frame_state,
             game: game(network_frame, simulated, &scoreboard, annotations),
-            updates: Updates {
-                ball_updated: updates.ball_updated,
-                ball_update_tick: update_tick(
-                    simulated.replay_tick,
-                    updates.ball_ticks_since_update,
-                ),
-                ball_ticks_since_update: updates.ball_ticks_since_update,
-                ball_seconds_since_update: updates.ball_seconds_since_update,
-                car_update_tick: updates
-                    .car_ticks_since_update
-                    .iter()
-                    .map(|&t| update_tick(simulated.replay_tick, t))
-                    .collect(),
-                car_updated: updates.car_updated,
-                car_ticks_since_update: updates.car_ticks_since_update,
-                car_seconds_since_update: updates.car_seconds_since_update,
-                ping_raw: Vec::new(),
-            },
-            future: segment.map(|s| Future {
-                segment_end: s.future_segment_end,
-                seconds_until_segment_end: s.future_seconds_until_segment_end,
-            }),
+            updates: frame_updates,
+            future,
         });
         self.last_state = Some(simulated.state.clone());
+    }
+
+    /// The rows of the ticks stepped before `simulated`'s own tick, and the previous row's controls: those its
+    /// next step applied, known only now. A tick's updates are those of this frame applied at or before it (their
+    /// update ticks), its game values the previous row's (what was known then), and it has no records.
+    fn push_ticks(
+        &mut self,
+        simulated: &SimulatedFrame,
+        frame_time: f32,
+        segment: Option<u32>,
+        frame_state: &State,
+        frame_updates: &mut Updates,
+        future: Option<Future>,
+    ) {
+        let Some((first, between)) = simulated.ticks.split_first() else {
+            return;
+        };
+        if let Some(previous) = self.frames.last_mut()
+            && previous.sim_tick == first.sim_tick
+        {
+            set_controls(&mut previous.state, first);
+        }
+        let frame_tick = simulated.state.tick_count;
+        let previous = self.frames.last();
+        let previous_game = previous.map(|r| r.game.clone());
+        let previous_updates = previous.map(|r| r.updates.clone());
+        let previous_cooldowns = previous.map(|r| r.state.pad_cooldowns.clone());
+        let mut ball_placed = false;
+        let mut cars_placed = vec![false; frame_updates.car_updated.len()];
+        for record in between {
+            let to_frame = frame_tick.saturating_sub(record.sim_tick);
+            let replay_tick = simulated.replay_tick.saturating_sub(to_frame);
+            let tick = u32::try_from(replay_tick).unwrap_or(u32::MAX);
+            // Seconds since the previous frame's tick, for the pads' cooldowns.
+            let elapsed = record.sim_tick.saturating_sub(first.sim_tick) as f32 / 120.0;
+            let mut updates = Updates {
+                ball_updated: false,
+                ball_update_tick: None,
+                ball_ticks_since_update: None,
+                ball_seconds_since_update: None,
+                car_updated: vec![None; frame_updates.car_updated.len()],
+                car_update_tick: vec![None; frame_updates.car_updated.len()],
+                car_ticks_since_update: vec![None; frame_updates.car_updated.len()],
+                car_seconds_since_update: vec![None; frame_updates.car_updated.len()],
+                ping_raw: Vec::new(),
+            };
+            // The ball: this frame's update once its tick is reached, else the previous row's.
+            let applied = frame_updates.ball_updated
+                && frame_updates.ball_update_tick.is_some_and(|u| u <= tick);
+            updates.ball_update_tick = if applied {
+                frame_updates.ball_update_tick
+            } else {
+                previous_updates.as_ref().and_then(|u| u.ball_update_tick)
+            };
+            if applied && !ball_placed {
+                updates.ball_updated = true;
+                ball_placed = true;
+            }
+            updates.ball_ticks_since_update =
+                updates.ball_update_tick.map(|u| tick.saturating_sub(u));
+            for p in 0..frame_updates.car_updated.len() {
+                let own = frame_updates.car_update_tick.get(p).copied().flatten();
+                let applied =
+                    frame_updates.car_updated[p] == Some(true) && own.is_some_and(|u| u <= tick);
+                updates.car_update_tick[p] = if applied {
+                    own
+                } else {
+                    previous_updates
+                        .as_ref()
+                        .and_then(|u| u.car_update_tick.get(p).copied().flatten())
+                };
+                updates.car_updated[p] =
+                    frame_updates.car_updated[p].map(|_| applied && !cars_placed[p]);
+                cars_placed[p] |= applied;
+                updates.car_ticks_since_update[p] =
+                    updates.car_update_tick[p].map(|u| tick.saturating_sub(u));
+            }
+            let mut game = previous_game
+                .clone()
+                .unwrap_or_else(|| empty_game(frame_state));
+            game.events.clear();
+            game.stat_events.clear();
+            game.ball_contacts.clear();
+            game.boost_pickups.clear();
+            let mut state = tick_state(record, frame_state);
+            if let Some(cooldowns) = &previous_cooldowns {
+                state.pad_cooldowns = cooldowns.iter().map(|c| (c - elapsed).max(0.0)).collect();
+            }
+            self.frames.push(Frame {
+                frame: simulated.index,
+                frame_row: false,
+                segment,
+                replay_time: frame_time - to_frame as f32 / 120.0,
+                replay_tick: tick,
+                sim_tick: record.sim_tick,
+                state,
+                game,
+                updates,
+                future: future.map(|f| Future {
+                    seconds_until_segment_end: f.seconds_until_segment_end
+                        + to_frame as f32 / 120.0,
+                    ..f
+                }),
+            });
+        }
+        // An update placed on a tick row is not the frame row's too.
+        frame_updates.ball_updated &= !ball_placed;
+        for (updated, placed) in frame_updates.car_updated.iter_mut().zip(cars_placed) {
+            if placed {
+                *updated = Some(false);
+            }
+        }
+    }
+}
+
+/// The game values of a row without a previous one: none known yet but the period and phase.
+fn empty_game(_state: &State) -> Game {
+    Game {
+        period: replicar_format::Period::Regulation,
+        clock_phase: replicar_format::ClockPhase::Other,
+        seconds_remaining: None,
+        overtime_seconds: None,
+        scores: [None, None],
+        events: Vec::new(),
+        stat_events: Vec::new(),
+        ball_contacts: Vec::new(),
+        boost_pickups: Vec::new(),
+    }
+}
+
+/// A row's controls and their sources from the tick record of its tick: the controls its next step applied.
+fn set_controls(state: &mut State, record: &TickRecord) {
+    for (p, car) in record.cars.iter().enumerate() {
+        if let Some(Some(row)) = state.cars.get_mut(p) {
+            row.controls = controls(&car.controls);
+        }
+        if let Some(sources) = record.control_sources.get(p) {
+            if let Some(air) = state.air_controls_source.get_mut(p) {
+                *air = Some(sources.0);
+            }
+            if let Some(ground) = state.ground_controls_source.get_mut(p) {
+                *ground = Some(sources.1);
+            }
+        }
+    }
+}
+
+/// The state of a tick between frames: the record's ball and cars; a car's status the frame's, except that a
+/// demolished car is demolished; the pads as `frame_state`'s until the caller sets them.
+fn tick_state(record: &TickRecord, frame_state: &State) -> State {
+    let mut status = Vec::with_capacity(record.cars.len());
+    let mut inferred = Vec::with_capacity(record.cars.len());
+    for (p, c) in record.cars.iter().enumerate() {
+        let frame_status = frame_state
+            .car_status
+            .get(p)
+            .copied()
+            .unwrap_or(CarStatus::Active);
+        let s = if c.is_demoed {
+            CarStatus::Demolished
+        } else if frame_status == CarStatus::Spawning {
+            CarStatus::Spawning
+        } else {
+            CarStatus::Active
+        };
+        inferred.push(
+            s == frame_status
+                && frame_state
+                    .car_status_inferred
+                    .get(p)
+                    .copied()
+                    .unwrap_or(false),
+        );
+        status.push(s);
+    }
+    State {
+        ball: Ball {
+            body: body(&record.ball.phys),
+            ticks_since_kickoff: record.ball.tick_count_since_kickoff,
+        },
+        car_status: status,
+        car_status_inferred: inferred,
+        cars: record.cars.iter().map(|c| Some(car(c))).collect(),
+        air_controls_source: record.control_sources.iter().map(|s| Some(s.0)).collect(),
+        ground_controls_source: record.control_sources.iter().map(|s| Some(s.1)).collect(),
+        pad_cooldowns: frame_state.pad_cooldowns.clone(),
     }
 }
 
@@ -618,7 +814,7 @@ fn fill_stats(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Fr
     };
     let events = stat_events(&network.frames);
     let goals = goal_attribution(&network.frames, &events);
-    for row in frames.iter_mut() {
+    for row in frames.iter_mut().filter(|r| r.frame_row) {
         let f = row.frame.get();
         row.game.stat_events = events[f]
             .iter()
@@ -698,7 +894,13 @@ fn final_stats(
 
 fn fill_pings(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Frame]) {
     for row in frames.iter_mut() {
-        let network_frame = &network.frames[row.frame.get()];
+        // A tick row knows the previous frame's ping.
+        let f = if row.frame_row {
+            row.frame.get()
+        } else {
+            row.frame.get().saturating_sub(1)
+        };
+        let network_frame = &network.frames[f];
         row.updates.ping_raw = simulation
             .players
             .iter()
@@ -737,6 +939,8 @@ fn header(
         groups: Vec::new(),
         precision: "float32".to_owned(),
         all_frames: false,
+        rows: "frames".to_owned(),
+        tick_step: 1,
         players: simulation
             .players
             .iter()

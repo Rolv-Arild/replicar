@@ -7,9 +7,13 @@ sections after it). `scripts/check_file_format_doc.py` checks that every column 
 
 ## Rows
 
-One row per replay frame **in a play segment** (from the kickoff to the frame that reports the goal, or to the last
-frame in play). `--all-frames` adds the frames outside play, with a null `segment`. Rows are in frame order;
-`frame` is the frame's index in the replay, so gaps show where pauses were left out.
+By default one row per simulated tick **in a play segment** (from the kickoff to the frame that reports the goal, or
+to the last frame in play): the replay frames' own ticks (`frame_row` true) and the ticks RocketSim stepped between
+them (glossary, "Tick row"). `--tick-step N` keeps the ticks whose `sim_tick` is a multiple of N; `--rows frames`
+keeps only the frame rows. `--all-frames` adds the frames outside play, with a null `segment` (they have no ticks).
+Rows are in tick order; `frame` is the replay frame a row belongs to (a tick row: the frame that ends its interval),
+so gaps show where pauses were left out. The header's `rows` and `tick_step` say which. A record (event, stat event,
+ball contact, boost pickup) and an update flag of a row left out pass to the next written row of its segment.
 
 ## Columns
 
@@ -24,9 +28,10 @@ are dictionary-encoded strings.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `frame` | uint32 | the replay frame |
+| `frame` | uint32 | the replay frame (of a tick row: the frame whose interval it is in) |
+| `frame_row` | bool | the row is its frame's own tick, not a tick between frames |
 | `segment` | uint32 | the play segment, 0.. (null outside play) |
-| `replay_time` | float32, s | the frame's time as the replay stores it |
+| `replay_time` | float32, s | the frame's time as the replay stores it (a tick row: its frame's, less the ticks to it) |
 | `replay_tick` | uint32, tick | replay time on the 120 Hz scale from the first frame |
 | `sim_tick` | uint64, tick | RocketSim's tick count; advances only while play is simulated |
 
@@ -45,7 +50,7 @@ are dictionary-encoded strings.
 | `car_<i>_ground_controls_source` | name | what set the row's throttle, steer, handbrake and boost: `network`, `schedule`, `dodge` |
 | `car_<i>_position_{x,y,z}`, `car_<i>_velocity_{x,y,z}`, `car_<i>_angular_velocity_{x,y,z}`, `car_<i>_rotation_{x,y,z,w}` | float32 | as for the ball |
 | `car_<i>_boost` | float32, 0-100 | |
-| `car_<i>_controls_{throttle,steer,pitch,yaw,roll}` | float32 | the controls applied from this frame on |
+| `car_<i>_controls_{throttle,steer,pitch,yaw,roll}` | float32 | the controls RocketSim applied in the step after the row's tick |
 | `car_<i>_controls_{jump,boost,handbrake}` | bool | |
 | `car_<i>_previous_controls_{throttle,steer,pitch,yaw,roll}`, `car_<i>_previous_controls_{jump,boost,handbrake}` | | RocketSim's controls of the tick before |
 | `car_<i>_{is_on_ground,has_jumped,has_double_jumped,has_flipped,is_flipping,is_jumping,is_boosting,is_supersonic,is_auto_flipping,is_demoed}` | bool | RocketSim's car flags |
@@ -78,10 +83,10 @@ into floats (the Python reader does it), and every other column is unchanged.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `ball_updated`, `car_<i>_updated` | bool | the body got an update in this frame |
+| `ball_updated`, `car_<i>_updated` | bool | the body got an update since the previous row (a tick row: the update was applied at its tick or since the last written row) |
 | `ball_update_tick`, `car_<i>_update_tick` | uint32, tick | the replay tick the body's last update shows (inferred) |
 | `ball_ticks_since_update`, `car_<i>_ticks_since_update` | uint32, ticks | replay tick minus update tick |
-| `ball_seconds_since_update`, `car_<i>_seconds_since_update` | float32, s | time since the frame that carried the last update |
+| `ball_seconds_since_update`, `car_<i>_seconds_since_update` | float32, s | time since the frame that carried the last update (frame rows only) |
 | `player_<i>_ping_raw` | uint8 | the ping byte as the replay sends it |
 
 ### `future` (default; future-derived)
@@ -134,7 +139,7 @@ JSON in the Parquet key-value metadata under `replicar`:
 | `format_version` | 1; a reader refuses a later version |
 | `replay_sha256` | the replay file's SHA-256 |
 | `replicar_version`, `rocketsim_version` | the builds that wrote the file (resimulation needs the same RocketSim) |
-| `groups`, `precision`, `all_frames` | what the file holds |
+| `groups`, `precision`, `rows`, `tick_step`, `all_frames` | what the file holds (`rows`: `ticks` or `frames`) |
 | `players` | per player index: `index`, `key`, `name`, `team` (0 blue, 1 orange), `body_product_id`, `hitbox`, `final_stats` (each counter's last value in the replay, by `stat_events` kind and `score`: every kind of `counted_stats`, 0 when the player's counter was never sent; the other kinds are absent, unknown) |
 | `counted_stats` | the `stat_events` kinds the replay's object table names: counted by its build. A kind not named is unknown (builds before September 2026 name `demolition` only once someone has one) |
 | `pads` | per pad index: `position`, `is_big` |

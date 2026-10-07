@@ -29,4 +29,6 @@ pub use identity::{PlayerIndex, Team};
 pub use read::{ReadError, read};
 pub use read_state::{StateRow, read_states};
 pub use time::{FrameIndex, ReplayTick, SimTick, TICKS_PER_SECOND};
-pub use write::{Content, Group, Precision, QUANTA, WriteError, WriteOptions, write, write_table};
+pub use write::{
+    Content, Group, Precision, QUANTA, RowRate, WriteError, WriteOptions, write, write_table,
+};
