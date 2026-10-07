@@ -38,6 +38,27 @@ pub enum SegmentEnd {
     Other,
 }
 
+/// A match statistic the game counts per player (docs/glossary.md, "Stat event"). The ones from `EpicSave` on
+/// are counted only by the builds since September 2026.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StatKind {
+    Goal,
+    Assist,
+    Save,
+    Shot,
+    Demolition,
+    EpicSave,
+    Clear,
+    Center,
+    AerialHit,
+    FirstTouch,
+    CrossbarHit,
+    BicycleHit,
+    JuggleHit,
+    FlipReset,
+    Demolished,
+}
+
 /// A player's car in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CarStatus {
@@ -92,6 +113,23 @@ names!(SegmentEnd {
     TimeExpired => "time_expired",
     ReplayEnded => "replay_ended",
     Other => "other",
+});
+names!(StatKind {
+    Goal => "goal",
+    Assist => "assist",
+    Save => "save",
+    Shot => "shot",
+    Demolition => "demolition",
+    EpicSave => "epic_save",
+    Clear => "clear",
+    Center => "center",
+    AerialHit => "aerial_hit",
+    FirstTouch => "first_touch",
+    CrossbarHit => "crossbar_hit",
+    BicycleHit => "bicycle_hit",
+    JuggleHit => "juggle_hit",
+    FlipReset => "flip_reset",
+    Demolished => "demolished",
 });
 names!(CarStatus {
     Absent => "absent",

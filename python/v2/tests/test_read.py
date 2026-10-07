@@ -107,3 +107,23 @@ def test_a_file_without_states_needs_the_native_extra(tmp_path, monkeypatch):
     write(path, {"frame": plain([0], pa.uint32())}, header={"groups": ["game", "resimulation"]})
     with pytest.raises(ImportError, match="native extra"):
         replicar.read(path, replay="x.replay")
+
+
+def test_players_table_and_long_views(tmp_path):
+    path = tmp_path / "p.parquet"
+    write(path, {
+        "frame": plain([3, 4], pa.uint32()),
+        "car_0_boost": plain([10.0, 20.0], pa.float32()),
+        "car_1_boost": plain([30.0, None], pa.float32()),
+        "pad_0_cooldown": plain([0.0, 1.0], pa.float32()),
+    }, header={"players": [
+        {"index": 0, "name": "a", "team": 0, "hitbox": "octane", "key": "k0", "final_stats": {"goal": 2}},
+        {"index": 1, "name": "b", "team": 1, "hitbox": "dominus", "key": "k1", "final_stats": {"save": 1}},
+    ]})
+    f = replicar.read(path)
+    players = f.players_table().to_pylist()
+    assert players[0]["name"] == "a" and players[0]["final_goal"] == 2 and players[0]["final_save"] is None
+    assert players[1]["final_save"] == 1
+    long = f.long("car").to_pylist()
+    assert [(r["frame"], r["player"], r["car_boost"]) for r in long] == [(3, 0, 10.0), (3, 1, 30.0), (4, 0, 20.0),
+                                                                         (4, 1, None)]

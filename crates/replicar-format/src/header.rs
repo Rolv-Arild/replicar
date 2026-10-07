@@ -21,6 +21,10 @@ pub struct PlayerInfo {
     pub body_product_id: Option<u32>,
     /// RocketSim's car body configuration for the player.
     pub hitbox: String,
+    /// The player's match statistics at the end of the replay, as the game counted them (`StatKind` names, and
+    /// `score`); only the counters the replay has.
+    #[serde(default)]
+    pub final_stats: std::collections::BTreeMap<String, i32>,
 }
 
 /// A boost pad of the arena, at its pad index.

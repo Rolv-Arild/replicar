@@ -121,6 +121,17 @@ pub struct PlayerStats {
     pub saves: Option<NetworkValue<i32>>,
     pub shots: Option<NetworkValue<i32>>,
     pub demolitions: Option<NetworkValue<i32>>,
+    /// The counters of the builds since September 2026; unset in older replays.
+    pub epic_saves: Option<NetworkValue<i32>>,
+    pub clears: Option<NetworkValue<i32>>,
+    pub centers: Option<NetworkValue<i32>>,
+    pub aerial_hits: Option<NetworkValue<i32>>,
+    pub first_touches: Option<NetworkValue<i32>>,
+    pub crossbar_hits: Option<NetworkValue<i32>>,
+    pub bicycle_hits: Option<NetworkValue<i32>>,
+    pub juggle_hits: Option<NetworkValue<i32>>,
+    pub flip_resets: Option<NetworkValue<i32>>,
+    pub times_demolished: Option<NetworkValue<i32>>,
 }
 
 /// A player in a frame.

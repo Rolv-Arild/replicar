@@ -67,7 +67,12 @@ enum Command {
         meshes: MeshArgs,
     },
     /// Summarize a replay or a replicar file.
-    Inspect { path: PathBuf },
+    Inspect {
+        path: PathBuf,
+        /// Print the file's players as CSV (index, name, team, hitbox, body, key and final statistics).
+        #[arg(long)]
+        players: bool,
+    },
     /// Check a replicar file: its header and every column; with the replay, also that resimulating it
     /// reproduces its states.
     Verify {
@@ -190,7 +195,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 .write(&output, &options)
                 .map_err(|e| e.to_string())
         }
-        Command::Inspect { path } => inspect(&path),
+        Command::Inspect { path, players } if players => players_csv(&path),
+        Command::Inspect { path, .. } => inspect(&path),
         Command::Verify {
             file,
             replay,
@@ -264,6 +270,47 @@ fn inspect(path: &Path) -> Result<(), String> {
     }
     let ends: Vec<&str> = header.segments.iter().map(|s| s.end.as_str()).collect();
     println!("segments      {} ({})", ends.len(), ends.join(", "));
+    Ok(())
+}
+
+/// A CSV field, quoted when it needs to be.
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn players_csv(path: &Path) -> Result<(), String> {
+    let (header, _) = replicar_format::read(path, Some(&["frame"])).map_err(|e| e.to_string())?;
+    let stats: std::collections::BTreeSet<&String> = header
+        .players
+        .iter()
+        .flat_map(|p| p.final_stats.keys())
+        .collect();
+    let mut line = vec!["player", "name", "team", "hitbox", "body_product_id", "key"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    line.extend(stats.iter().map(|s| format!("final_{s}")));
+    println!("{}", line.join(","));
+    for p in &header.players {
+        let mut line = vec![
+            p.index.to_string(),
+            csv_field(p.name.as_deref().unwrap_or("")),
+            p.team.to_string(),
+            p.hitbox.clone(),
+            p.body_product_id.map_or(String::new(), |b| b.to_string()),
+            csv_field(&p.key),
+        ];
+        line.extend(stats.iter().map(|s| {
+            p.final_stats
+                .get(*s)
+                .map_or(String::new(), ToString::to_string)
+        }));
+        println!("{}", line.join(","));
+    }
     Ok(())
 }
 

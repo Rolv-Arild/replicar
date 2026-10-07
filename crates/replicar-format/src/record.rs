@@ -2,7 +2,7 @@
 //! keeps the ones asked for. Per-player values are indexed by the player index; `None` is unknown or not
 //! applicable, never zero.
 
-use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd};
+use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd, StatKind};
 
 /// A rigid body: position (UU), velocity (UU/s), angular velocity (rad/s) and rotation (unit quaternion x, y,
 /// z, w with w >= 0).
@@ -95,6 +95,10 @@ pub struct State {
 pub enum Event {
     Goal {
         scoring_team: u8,
+        /// The players whose goal and assist counters went up for this goal (the assist can arrive a few frames
+        /// later); `None` when no counter did.
+        scorer: Option<u8>,
+        assister: Option<u8>,
     },
     Demolition {
         attacker: Option<u8>,
@@ -107,6 +111,20 @@ pub enum Event {
     FlipReset {
         player: Option<u8>,
     },
+}
+
+/// A player's match statistic going up (docs/glossary.md, "Stat event"): the game's own count, seen in the frame
+/// the replay updates it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatEvent {
+    /// The frame the replay updates the counter in. In a file it is the row's frame or, for a counter that goes up in a
+    /// frame the file leaves out (an assist during the goal pause), a later one: such events are kept on the last
+    /// written row before it.
+    pub updated_frame: u32,
+    pub kind: StatKind,
+    pub player: u8,
+    /// The player's new total.
+    pub total: i32,
 }
 
 /// The ball's motion between two updates that no free flight explains (docs/glossary.md, "Ball contact").
@@ -148,6 +166,7 @@ pub struct Game {
     /// Blue, orange; as the replay showed them at this frame.
     pub scores: [Option<i32>; 2],
     pub events: Vec<Event>,
+    pub stat_events: Vec<StatEvent>,
     pub ball_contacts: Vec<BallContact>,
     pub boost_pickups: Vec<BoostPickup>,
 }

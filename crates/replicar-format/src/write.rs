@@ -17,7 +17,7 @@ use parquet::schema::types::ColumnPath;
 
 use crate::columns::{Columns, child_bool, child_f32, child_str, child_u8, child_u16, child_u64};
 use crate::header::{HEADER_KEY, Header};
-use crate::record::{Body, Car, CarInternals, Controls, Event, Frame};
+use crate::record::{Body, Car, CarInternals, Controls, Event, Frame, StatEvent};
 use crate::resimulation::Resimulation;
 
 /// A column group (docs/glossary.md, "Column group"); the frame columns are always written.
@@ -166,6 +166,19 @@ pub fn write(
         .zip(&written)
         .filter_map(|(f, &w)| w.then_some(f))
         .collect();
+    // A written row's stat events, with those of the left-out frames after it (an assist during the goal pause):
+    // each event keeps its own `updated_frame`; the
+    let mut stat_events: Vec<Vec<&StatEvent>> = vec![Vec::new(); rows.len()];
+    // ones before the first written row go on it.
+    let mut current: Option<usize> = None;
+    for (f, &w) in frames.iter().zip(&written) {
+        if w {
+            current = Some(current.map_or(0, |r| r + 1));
+        }
+        if let Some(list) = stat_events.get_mut(current.unwrap_or(0)) {
+            list.extend(&f.game.stat_events);
+        }
+    }
     let players = header.players.len();
     let pads = header.pads.len();
     let mut columns = Columns::default();
@@ -173,7 +186,7 @@ pub fn write(
     for group in &options.groups {
         match group {
             Group::State => state_columns(&mut columns, &rows, players, pads, options.precision),
-            Group::Game => game_columns(&mut columns, &rows),
+            Group::Game => game_columns(&mut columns, &rows, &stat_events),
             Group::Updates => update_columns(&mut columns, &rows, players),
             Group::Future => future_columns(&mut columns, &rows),
             Group::Network | Group::Diagnostics => {
@@ -569,7 +582,7 @@ fn internal_columns(
     );
 }
 
-fn game_columns(columns: &mut Columns, rows: &[&Frame]) {
+fn game_columns(columns: &mut Columns, rows: &[&Frame], stat_events: &[Vec<&StatEvent>]) {
     columns.names(
         "period",
         GAME,
@@ -620,7 +633,27 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame]) {
                 events
                     .iter()
                     .map(|e| match e {
-                        Event::Goal { scoring_team } => Some(*scoring_team),
+                        Event::Goal { scoring_team, .. } => Some(*scoring_team),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            child_u8(
+                "scorer",
+                events
+                    .iter()
+                    .map(|e| match e {
+                        Event::Goal { scorer, .. } => *scorer,
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            child_u8(
+                "assister",
+                events
+                    .iter()
+                    .map(|e| match e {
+                        Event::Goal { assister, .. } => *assister,
                         _ => None,
                     })
                     .collect(),
@@ -675,6 +708,26 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame]) {
                     })
                     .collect(),
             ),
+        ],
+    );
+
+    let stats: Vec<_> = stat_events.iter().flatten().collect();
+    let lengths: Vec<usize> = stat_events.iter().map(Vec::len).collect();
+    columns.records(
+        "stat_events",
+        GAME,
+        &lengths,
+        vec![
+            child_u64(
+                "updated_frame",
+                stats
+                    .iter()
+                    .map(|e| Some(u64::from(e.updated_frame)))
+                    .collect(),
+            ),
+            child_str("kind", stats.iter().map(|e| Some(e.kind.name())).collect()),
+            child_u8("player", stats.iter().map(|e| Some(e.player)).collect()),
+            crate::columns::child_i32("total", stats.iter().map(|e| Some(e.total)).collect()),
         ],
     );
 
@@ -816,7 +869,7 @@ mod tests {
     use super::*;
     use crate::header::{PadInfo, PlayerInfo};
     use crate::record::{Ball, Future, Game, State, Updates};
-    use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd};
+    use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd, StatKind};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     fn header() -> Header {
@@ -835,6 +888,7 @@ mod tests {
                 team: 0,
                 body_product_id: None,
                 hitbox: "octane".to_owned(),
+                final_stats: Default::default(),
             }],
             pads: vec![PadInfo {
                 position: [0.0; 3],
@@ -874,10 +928,15 @@ mod tests {
                 overtime_seconds: None,
                 scores: [Some(0), None],
                 events: if index == 2 {
-                    vec![Event::Goal { scoring_team: 0 }]
+                    vec![Event::Goal {
+                        scoring_team: 0,
+                        scorer: Some(0),
+                        assister: None,
+                    }]
                 } else {
                     Vec::new()
                 },
+                stat_events: Vec::new(),
                 ball_contacts: Vec::new(),
                 boost_pickups: Vec::new(),
             },
@@ -968,6 +1027,62 @@ mod tests {
         assert!(batch.column_by_name("car_0_position_x").is_none());
         let segment = batch.column_by_name("segment").unwrap();
         assert!(segment.is_null(0) && !segment.is_null(1));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn stat_events_of_left_out_frames_go_on_the_row_before() {
+        let directory =
+            std::env::temp_dir().join(format!("replicar-format-s-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("s.parquet");
+        let stat = |frame: u32, kind: StatKind| StatEvent {
+            updated_frame: frame,
+            kind,
+            player: 0,
+            total: 1,
+        };
+        // A shot before play, a goal in it, and the assist in the goal pause after it.
+        let mut frames = vec![
+            frame(0, None, true),
+            frame(1, Some(0), false),
+            frame(2, Some(0), false),
+            frame(3, None, false),
+        ];
+        frames[0].game.stat_events = vec![stat(0, StatKind::Shot)];
+        frames[2].game.stat_events = vec![stat(2, StatKind::Goal)];
+        frames[3].game.stat_events = vec![stat(3, StatKind::Assist)];
+        write(
+            &path,
+            &header(),
+            &content(&frames),
+            &WriteOptions::default(),
+        )
+        .unwrap();
+        let (batch, _) = read(&path);
+        let lists = batch
+            .column_by_name("stat_events")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .unwrap()
+            .clone();
+        let updated = |row: usize| -> Vec<u64> {
+            let list = lists.value(row);
+            let records = list
+                .as_any()
+                .downcast_ref::<arrow_array::StructArray>()
+                .unwrap();
+            let frames = records
+                .column_by_name("updated_frame")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::UInt64Array>()
+                .unwrap();
+            frames.values().to_vec()
+        };
+        assert_eq!(updated(0), [0]);
+        assert_eq!(updated(1), [2, 3]);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

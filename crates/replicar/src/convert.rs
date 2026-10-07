@@ -274,6 +274,7 @@ fn run(
     )?;
     let mut frames = rows.frames;
     fill_pings(network, &simulation, &mut frames);
+    fill_stats(network, &simulation, &mut frames);
     let mut header = header(
         network,
         &simulation,
@@ -537,8 +538,11 @@ fn game(
         .events
         .iter()
         .map(|event| match event {
+            // The scorer and assister are filled in once the players are known (`fill_stats`).
             NetworkEvent::GoalScoredOn { team } => Event::Goal {
                 scoring_team: team.opponent().number(),
+                scorer: None,
+                assister: None,
             },
             NetworkEvent::Demolition {
                 report,
@@ -567,6 +571,7 @@ fn game(
             .each_ref()
             .map(|s| s.as_ref().map(|v| v.value)),
         events,
+        stat_events: Vec::new(),
         ball_contacts: annotations
             .ball_contacts
             .into_iter()
@@ -595,6 +600,91 @@ fn game(
 }
 
 /// Each player's ping byte as the frame's network feed has it, once the players are known.
+/// Each frame's stat events, and the scorer and assister of its goals, by player index.
+fn fill_stats(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Frame]) {
+    use crate::annotate::stats::{goal_attribution, stat_events};
+    let index = |key: &crate::decode::PlayerKey| {
+        simulation
+            .players
+            .iter()
+            .find(|p| &p.key == key)
+            .map(|p| p.index.0)
+    };
+    let events = stat_events(&network.frames);
+    let goals = goal_attribution(&network.frames, &events);
+    for row in frames.iter_mut() {
+        let f = row.frame.get();
+        row.game.stat_events = events[f]
+            .iter()
+            .filter_map(|e| {
+                Some(replicar_format::record::StatEvent {
+                    updated_frame: row.frame.0,
+                    kind: e.kind,
+                    player: index(&e.player)?,
+                    total: e.total,
+                })
+            })
+            .collect();
+    }
+    for row in frames.iter_mut() {
+        let f = row.frame.get();
+        for event in &mut row.game.events {
+            if let Event::Goal {
+                scoring_team,
+                scorer,
+                assister,
+            } = event
+            {
+                let scored_on = replicar_format::Team::from_number(*scoring_team)
+                    .map(replicar_format::Team::opponent);
+                if let Some((s, a)) = scored_on.and_then(|team| goals.get(&(f, team))) {
+                    *scorer = s.as_ref().and_then(index);
+                    *assister = a.as_ref().and_then(index);
+                }
+            }
+        }
+    }
+}
+
+/// A player's counters as the replay last sent them.
+fn final_stats(
+    network: &NetworkReplay,
+    key: &crate::decode::PlayerKey,
+) -> std::collections::BTreeMap<String, i32> {
+    // Each counter's latest update over all the player's frames: a player whose PRI the replay recreates (a
+    // reconnect) shows no counters in its last frames until they are sent again.
+    let mut latest: std::collections::BTreeMap<String, (replicar_format::FrameIndex, i32)> =
+        std::collections::BTreeMap::new();
+    let mut keep = |name: &str, value: &crate::decode::NetworkValue<i32>| {
+        let entry = latest
+            .entry(name.to_owned())
+            .or_insert((value.frame, value.value));
+        if value.frame >= entry.0 {
+            *entry = (value.frame, value.value);
+        }
+    };
+    for player in network
+        .frames
+        .iter()
+        .flat_map(|f| &f.players)
+        .filter(|p| &p.key == key)
+    {
+        let s = &player.stats;
+        if let Some(score) = &s.match_score {
+            keep("score", score);
+        }
+        for (kind, value) in crate::annotate::stats::counters(s) {
+            if let Some(value) = value {
+                keep(kind.name(), value);
+            }
+        }
+    }
+    latest
+        .into_iter()
+        .map(|(name, (_, value))| (name, value))
+        .collect()
+}
+
 fn fill_pings(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Frame]) {
     for row in frames.iter_mut() {
         let network_frame = &network.frames[row.frame.get()];
@@ -646,6 +736,7 @@ fn header(
                 team: p.team.number(),
                 body_product_id: p.body_product_id,
                 hitbox: p.hitbox.name().to_owned(),
+                final_stats: final_stats(network, &p.key),
             })
             .collect(),
         pads: last_state.map_or_else(Vec::new, |s| {

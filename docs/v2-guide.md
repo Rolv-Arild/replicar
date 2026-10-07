@@ -72,6 +72,22 @@ replicar.convert_many(paths, "out/", jobs=16)
 f = replicar.read("light.parquet", replay="match.replay")  # a file without states: resimulated on reading
 ```
 
+Players and statistics in long form: `f.players_table()` (one row per player with the final statistics) and
+`f.long("car")` (one row per frame and player, `car_0_boost` as `car_boost`), both pyarrow tables
+(`.to_pandas()` for pandas). From the command line, `replicar inspect --players match.parquet` prints the players
+as CSV. In DuckDB the players come from the header:
+
+```sql
+WITH players AS (
+  SELECT unnest(from_json(decode(value), '{"players": [{"index": "UTINYINT", "name": "VARCHAR", "team": "UTINYINT"}]}').players, recursive := true)
+  FROM parquet_kv_metadata('match.parquet') WHERE decode(key) = 'replicar'
+)
+SELECT p.name, s.s.kind AS stat, count(*) AS n
+FROM (SELECT unnest(stat_events) AS s FROM 'match.parquet') s
+JOIN players p ON p.index = s.s.player
+GROUP BY ALL ORDER BY ALL;
+```
+
 Any Parquet reader works without the package: `pyarrow.parquet.read_table`, `polars.read_parquet`, DuckDB's
 `read_parquet`; quantized columns then come as integers with their `scale` in the field metadata.
 

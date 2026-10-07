@@ -22,7 +22,7 @@ pub use arrow_array::RecordBatch;
 pub use columns::{
     Columns, child_bool, child_f32, child_i32, child_str, child_u8, child_u16, child_u64,
 };
-pub use game::{CarStatus, ClockPhase, Period, SegmentEnd};
+pub use game::{CarStatus, ClockPhase, Period, SegmentEnd, StatKind};
 pub use identity::{PlayerIndex, Team};
 pub use read::{ReadError, read};
 pub use read_state::{StateRow, read_states};

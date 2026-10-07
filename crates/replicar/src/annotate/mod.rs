@@ -5,6 +5,7 @@
 mod ball_evidence;
 pub mod scoreboard;
 pub mod segments;
+pub mod stats;
 pub mod updates;
 
 use std::collections::{HashMap, VecDeque};

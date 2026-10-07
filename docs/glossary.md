@@ -180,9 +180,18 @@ RocketSim versions.
 
 ## Events and contacts
 
-**Event** (`events`, a list per frame). Something the replay reports: `goal` (with the `scoring_team`),
+**Event** (`events`, a list per frame). Something the replay reports: `goal` (with the `scoring_team`, and the
+`scorer` and `assister` whose goal and assist counters went up for it),
 `demolition` (attacker and victim player; a repeated report of one demolition is marked `repeat`), `flip_reset`
 (the car's dodge was refreshed in the air, from its refresh counter). Observed.
+
+**Stat event** (`stat_events`, a list per frame). A player's match counter going up, in the frame the replay
+updates it: the game's own judgement of a `goal`, `assist`, `save`, `shot` or `demolition`, and, in replays from the
+builds of September 2026 on, `epic_save`, `clear`, `center`, `aerial_hit`, `first_touch`, `crossbar_hit`,
+`bicycle_hit`, `juggle_hit`, `flip_reset` and `demolished`. Observed, with the replay's delay. Like every record, it
+is in the file even when its frame is not: one from a left-out frame (an assist credited during the goal pause) is on
+the last written row before it, and its `updated_frame` is the frame of the update. A player's events add up to the
+header's `final_stats`, each counter's last value over the replay (a reconnecting player's last frames can lack it).
 
 **Ball contact** (`ball_contacts`). The ball's motion between two updates that no free flight explains: something
 hit it. Found from ball updates alone, with the estimated tick and the nearest car's player (none when no car was

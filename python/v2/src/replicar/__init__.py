@@ -117,6 +117,49 @@ class ReplicarFile:
         self._arrays = _stack_components(plain)
         return self._arrays
 
+    def players_table(self) -> pa.Table:
+        """The header's players as a table: index, name, team (0 blue, 1 orange), hitbox, body, key, and one
+        column per final statistic (null where the replay never counted it)."""
+        players = self.header["players"]
+        stats = sorted({k for p in players for k in p.get("final_stats", {})})
+        columns = {
+            "player": pa.array([p["index"] for p in players], pa.uint8()),
+            "name": pa.array([p.get("name") for p in players], pa.string()),
+            "team": pa.array([p["team"] for p in players], pa.uint8()),
+            "hitbox": pa.array([p["hitbox"] for p in players], pa.string()),
+            "body_product_id": pa.array([p.get("body_product_id") for p in players], pa.uint32()),
+            "key": pa.array([p["key"] for p in players], pa.string()),
+        }
+        for stat in stats:
+            columns[f"final_{stat}"] = pa.array([p.get("final_stats", {}).get(stat) for p in players], pa.int32())
+        return pa.table(columns)
+
+    def long(self, prefix: str = "car") -> pa.Table:
+        """The per-player columns of `prefix` (`car`, `player`, `network_car`, `network_player`) in long form: one
+        row per frame and player, with `frame`, `player` and the columns without their index (`car_0_boost` ->
+        `car_boost`), for pandas and SQL. Players absent from a frame have null values there."""
+        by_name: dict[str, dict[int, str]] = {}
+        for name in self.table.column_names:
+            match = _PLAYER.match(name)
+            if match and match[1] == prefix:
+                by_name.setdefault(f"{prefix}_{match[3]}", {})[int(match[2])] = name
+        players = sorted({i for indexed in by_name.values() for i in indexed})
+        rows = self.table.num_rows
+        frame = self.table.column("frame").combine_chunks()
+        pieces = []
+        for player in players:
+            columns = {"frame": frame, "player": pa.array(np.full(rows, player, np.uint8))}
+            for base, indexed in by_name.items():
+                if player in indexed:
+                    columns[base] = self.table.column(indexed[player]).combine_chunks()
+                else:
+                    first = self.table.column(next(iter(indexed.values()))).type
+                    columns[base] = pa.nulls(rows, first)
+            pieces.append(pa.table(columns))
+        if not pieces:
+            return pa.table({"frame": pa.array([], pa.uint32()), "player": pa.array([], pa.uint8())})
+        return pa.concat_tables(pieces).sort_by([("frame", "ascending"), ("player", "ascending")])
+
     def records(self, name: str) -> pa.Table:
         """A record-list column (`events`, `ball_contacts`, `boost_pickups`, `prediction_errors`, ...) as one row
         per record, with the frame of its row."""

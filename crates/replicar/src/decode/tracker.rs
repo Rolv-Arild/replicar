@@ -596,6 +596,24 @@ impl Tracker {
             PLAYER_SAVES => self.player_stat(actor, attribute, frame, |s| &mut s.saves),
             PLAYER_SHOTS => self.player_stat(actor, attribute, frame, |s| &mut s.shots),
             PLAYER_DEMOLITIONS => self.player_stat(actor, attribute, frame, |s| &mut s.demolitions),
+            PLAYER_EPIC_SAVES => self.player_stat(actor, attribute, frame, |s| &mut s.epic_saves),
+            PLAYER_CLEARS => self.player_stat(actor, attribute, frame, |s| &mut s.clears),
+            PLAYER_CENTERS => self.player_stat(actor, attribute, frame, |s| &mut s.centers),
+            PLAYER_AERIAL_HITS => self.player_stat(actor, attribute, frame, |s| &mut s.aerial_hits),
+            PLAYER_FIRST_TOUCHES => {
+                self.player_stat(actor, attribute, frame, |s| &mut s.first_touches)
+            }
+            PLAYER_CROSSBAR_HITS => {
+                self.player_stat(actor, attribute, frame, |s| &mut s.crossbar_hits)
+            }
+            PLAYER_BICYCLE_HITS => {
+                self.player_stat(actor, attribute, frame, |s| &mut s.bicycle_hits)
+            }
+            PLAYER_JUGGLE_HITS => self.player_stat(actor, attribute, frame, |s| &mut s.juggle_hits),
+            PLAYER_FLIP_RESETS => self.player_stat(actor, attribute, frame, |s| &mut s.flip_resets),
+            PLAYER_TIMES_DEMOLISHED => {
+                self.player_stat(actor, attribute, frame, |s| &mut s.times_demolished)
+            }
             _ => {}
         }
     }

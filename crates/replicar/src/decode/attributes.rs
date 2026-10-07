@@ -21,6 +21,17 @@ pub(super) const PLAYER_ASSISTS: &str = "TAGame.PRI_TA:MatchAssists";
 pub(super) const PLAYER_SAVES: &str = "TAGame.PRI_TA:MatchSaves";
 pub(super) const PLAYER_SHOTS: &str = "TAGame.PRI_TA:MatchShots";
 pub(super) const PLAYER_DEMOLITIONS: &str = "TAGame.PRI_TA:MatchDemolishes";
+// Counted since the builds of September 2026 (older replays leave them unset).
+pub(super) const PLAYER_EPIC_SAVES: &str = "TAGame.PRI_TA:MatchEpicSaves";
+pub(super) const PLAYER_CLEARS: &str = "TAGame.PRI_TA:MatchClears";
+pub(super) const PLAYER_CENTERS: &str = "TAGame.PRI_TA:MatchCenters";
+pub(super) const PLAYER_AERIAL_HITS: &str = "TAGame.PRI_TA:MatchAerialHits";
+pub(super) const PLAYER_FIRST_TOUCHES: &str = "TAGame.PRI_TA:MatchFirstTouches";
+pub(super) const PLAYER_CROSSBAR_HITS: &str = "TAGame.PRI_TA:MatchCrossbarHits";
+pub(super) const PLAYER_BICYCLE_HITS: &str = "TAGame.PRI_TA:MatchBicycleHits";
+pub(super) const PLAYER_JUGGLE_HITS: &str = "TAGame.PRI_TA:MatchJuggleHits";
+pub(super) const PLAYER_FLIP_RESETS: &str = "TAGame.PRI_TA:MatchFlipResets";
+pub(super) const PLAYER_TIMES_DEMOLISHED: &str = "TAGame.PRI_TA:MatchTimesDemolished";
 
 // Car controls and components.
 pub(super) const THROTTLE: &str = "TAGame.Vehicle_TA:ReplicatedThrottle";

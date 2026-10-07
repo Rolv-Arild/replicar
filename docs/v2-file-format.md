@@ -67,7 +67,8 @@ into floats (the Python reader does it), and every other column is unchanged.
 | `seconds_remaining` | float32, s | the regulation clock, fractional |
 | `overtime_seconds` | float32, s | overtime played |
 | `blue_score`, `orange_score` | int32 | as the replay shows them at the frame |
-| `events` | list of records | `kind` (`goal`, `demolition`, `flip_reset`), `scoring_team`, `attacker`, `victim`, `repeat`, `goal_explosion`, `player` |
+| `events` | list of records | `kind` (`goal`, `demolition`, `flip_reset`), `scoring_team`, `scorer`, `assister`, `attacker`, `victim`, `repeat`, `goal_explosion`, `player` |
+| `stat_events` | list of records | a player's match counter going up: `kind` (`goal`, `assist`, `save`, `shot`, `demolition`; since September 2026 also `epic_save`, `clear`, `center`, `aerial_hit`, `first_touch`, `crossbar_hit`, `bicycle_hit`, `juggle_hit`, `flip_reset`, `demolished`), `player`, `total`, `updated_frame` (the frame the counter went up in: this row's or, when that frame is left out, a later one) |
 | `ball_contacts` | list of records | `replay_tick`, `from_tick`, `to_tick`, `player`, `gap`, `velocity_residual` |
 | `boost_pickups` | list of records | `pad`, `is_big`, `player`, `verified`, `suggested_player`, `replay_tick` |
 
@@ -111,7 +112,7 @@ last change. Per player, the player's current car in the frame.
 | `network_car_<i>_{actor,created,player_link_active}` | the current car: its actor and creation frame, and whether it links to its player |
 | `network_car_<i>_{position,velocity,angular_velocity_raw}_{x,y,z}`, `network_car_<i>_rotation_{x,y,z,w}`, `network_car_<i>_sleeping` (and `_frame`), `network_car_<i>_{position,velocity,angular_velocity_raw,rotation,dodge_torque_raw}_frame` (one per vector) | its body |
 | `network_car_<i>_{boost,throttle,steer,handbrake,boost_raw,boost_active_raw,jump_active_raw,double_jump_active_raw,dodge_active_raw,flip_car_active_raw,body_product_id}`, `network_car_<i>_dodge_torque_raw_{x,y,z}` (and `_frame`) | its controls, boost and action counters |
-| `network_player_<i>_{match_score,goals,assists,saves,shots,demolitions,ping_raw}` (and `_frame`) | the player's stats and ping |
+| `network_player_<i>_{match_score,goals,assists,saves,shots,demolitions,epic_saves,clears,centers,aerial_hits,first_touches,crossbar_hits,bicycle_hits,juggle_hits,flip_resets,times_demolished,ping_raw}` (and `_frame`) | the player's stats and ping |
 | `network_pad_records` | records: `pad`, `instigator_car`, `picked_up_raw`, `repeat` |
 
 ### `diagnostics` (opt-in)
@@ -132,7 +133,7 @@ JSON in the Parquet key-value metadata under `replicar`:
 | `replay_sha256` | the replay file's SHA-256 |
 | `replicar_version`, `rocketsim_version` | the builds that wrote the file (resimulation needs the same RocketSim) |
 | `groups`, `precision`, `all_frames` | what the file holds |
-| `players` | per player index: `index`, `key`, `name`, `team` (0 blue, 1 orange), `body_product_id`, `hitbox` |
+| `players` | per player index: `index`, `key`, `name`, `team` (0 blue, 1 orange), `body_product_id`, `hitbox`, `final_stats` (each counter's last value in the replay, by `stat_events` kind and `score`; a counter the replay never sent is absent) |
 | `pads` | per pad index: `position`, `is_big` |
 | `segments` | per play segment: `first_frame`, `last_frame`, `end` (future-derived) |
 | `final_scores` | the match result as the replay's last frame shows it; never in a row |

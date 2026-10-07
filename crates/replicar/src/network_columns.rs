@@ -194,13 +194,23 @@ fn car_columns(columns: &mut Columns, name: &str, cars: &[Option<&NetworkCar>]) 
 }
 
 fn player_columns(columns: &mut Columns, name: &str, players: &[Option<&NetworkPlayer>]) {
-    let stats: [Getter<NetworkPlayer, i32>; 6] = [
+    let stats: [Getter<NetworkPlayer, i32>; 16] = [
         ("match_score", |p| p.stats.match_score.as_ref()),
         ("goals", |p| p.stats.goals.as_ref()),
         ("assists", |p| p.stats.assists.as_ref()),
         ("saves", |p| p.stats.saves.as_ref()),
         ("shots", |p| p.stats.shots.as_ref()),
         ("demolitions", |p| p.stats.demolitions.as_ref()),
+        ("epic_saves", |p| p.stats.epic_saves.as_ref()),
+        ("clears", |p| p.stats.clears.as_ref()),
+        ("centers", |p| p.stats.centers.as_ref()),
+        ("aerial_hits", |p| p.stats.aerial_hits.as_ref()),
+        ("first_touches", |p| p.stats.first_touches.as_ref()),
+        ("crossbar_hits", |p| p.stats.crossbar_hits.as_ref()),
+        ("bicycle_hits", |p| p.stats.bicycle_hits.as_ref()),
+        ("juggle_hits", |p| p.stats.juggle_hits.as_ref()),
+        ("flip_resets", |p| p.stats.flip_resets.as_ref()),
+        ("times_demolished", |p| p.stats.times_demolished.as_ref()),
     ];
     for (field, get) in stats {
         let values: Vec<_> = players.iter().map(|p| p.and_then(get)).collect();
