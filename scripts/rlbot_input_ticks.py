@@ -32,7 +32,8 @@ def truth_rlpr(path):
     out = {}
     c = r["controls"]
     for i in range(r["pos"].shape[1]):
-        values = np.column_stack([r["pos"][:, i], c[:, i, 0], c[:, i, 1], c[:, i, 6], c[:, i, 5], c[:, i, 7]])
+        values = np.column_stack([r["pos"][:, i], c[:, i, 0], c[:, i, 1], c[:, i, 6], c[:, i, 5], c[:, i, 7],
+                                  c[:, i, 2], c[:, i, 3], c[:, i, 4]])
         out[f"car{i}"] = (r["frame"].astype(np.int64), values.astype(np.float64))
     return out, {}
 
@@ -53,7 +54,7 @@ def truth(path):
                 li = pl["last_input"]
                 loc = pl["physics"]["location"]
                 rows[pl["name"]][n] = (loc["x"], loc["y"], loc["z"], li["throttle"], li["steer"],
-                                       li["boost"], li["jump"], li["handbrake"])
+                                       li["boost"], li["jump"], li["handbrake"], li["pitch"], li["yaw"], li["roll"])
                 bots[pl["name"]] = pl["is_bot"]
     out = {}
     for name, by_tick in rows.items():
@@ -144,6 +145,32 @@ def main() -> None:
             err = np.abs(a[f"car_controls_{name_k}"][rows, p] - tv[:, k])
             g[f"{name_k} |error|"].extend(err.tolist())
             g[f"{name_k} |error| air"].extend(err[~ground].tolist())
+        for k, name_k in ((8, "pitch"), (9, "yaw"), (10, "roll")):
+            err = np.abs(a[f"car_controls_{name_k}"][rows, p] - tv[:, k])
+            g[f"{name_k} |error| air"].extend(err[~ground].tolist())
+        # Change timing of throttle and steer: each true change by more than 0.25 against the nearest converted
+        # change of the same sign within 30 ticks, by what set the row's controls (fit or rule) and ground or air.
+        source = a["car_ground_controls_source"][rows, p]
+        run = np.flatnonzero(np.diff(tick[rows]) != 1)
+        starts = np.concatenate([[0], run + 1]); ends = np.concatenate([run + 1, [len(rows)]])
+        for k, name_k in ((3, "throttle"), (4, "steer")):
+            conv_all = a[f"car_controls_{name_k}"][rows, p]
+            for s0, e0 in zip(starts, ends):
+                if e0 - s0 < 5:
+                    continue
+                tv_k = tv[s0:e0, k]; cv = conv_all[s0:e0]
+                dt = np.diff(tv_k); dc = np.diff(cv)
+                true_changes = np.flatnonzero(np.abs(dt) > 0.25) + 1
+                conv_changes = np.flatnonzero(np.abs(dc) > 0.25) + 1
+                for t in true_changes:
+                    same = conv_changes[np.sign(dc[conv_changes - 1]) == np.sign(dt[t - 1])]
+                    where = ("fit" if source[s0 + t] == "schedule" else "rule") + (" ground" if ground[s0 + t] else " air")
+                    if len(same) == 0 or np.min(np.abs(same - t)) > 30:
+                        g[f"{name_k} change missed {where}"].append(1)
+                        continue
+                    j = same[np.argmin(np.abs(same - t))]
+                    g[f"{name_k} change error {where}"].append(int(j - t))
+                    g[f"{name_k} change missed {where}"].append(0)
         for k, name_k in ((5, "boost"), (6, "jump"), (7, "handbrake")):
             conv = a[f"car_controls_{name_k}"][rows, p] == 1
             g[f"{name_k} disagree"].extend((conv != tv[:, k].astype(bool)).tolist())
@@ -184,7 +211,7 @@ def main() -> None:
             v = np.array(g[key], dtype=float)
             if key.endswith("|error|") or key.endswith("|error| air"):
                 print(f"  {key:30} mean {v.mean():.4f}  within 0.01 {np.mean(v <= 0.01):.3f}  p90 {np.percentile(v, 90):.3f}  n {len(v)}")
-            elif "press error" in key or "release error" in key:
+            elif "press error" in key or "release error" in key or "change error" in key:
                 p10, p50, p90 = np.percentile(v, [10, 50, 90])
                 print(f"  {key:30} p10 / p50 / p90 {p10:+.0f} / {p50:+.0f} / {p90:+.0f}  |e| mean {np.abs(v).mean():.2f}  n {len(v)}")
             else:

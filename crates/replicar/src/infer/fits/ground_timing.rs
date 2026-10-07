@@ -2,7 +2,7 @@
 
 use glam::Vec3A;
 use replicar_format::FrameIndex;
-use rocketsim::{Arena, BallState, CarControls};
+use rocketsim::{Arena, CarControls};
 
 use super::{FitContext, GroundSchedule, network_controls, same_car, seed_car, vec3};
 use crate::decode::NetworkCar;
@@ -16,9 +16,11 @@ const SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
 /// wall, ramp or ceiling) with an update at `index`, one shift of every control switch (relative to the
 /// midpoint rule) is chosen by simulating the span to the second next update in a scratch arena and comparing
 /// angular velocity (per 0.3 rad/s) and velocity (per 50 UU/s) with it; the schedule covers the interval to
-/// the next update. Refused without chained update ticks for both later updates, with a withheld or inactive
-/// frame, an action counter change, an action in progress, no control change near the span, or the ball
-/// within 400 UU (the scratch arena's ball is parked; other cars are not modelled).
+/// the next update. The scratch arena has the simulation's ball at this update, so a touch near it is simulated
+/// (refusing within 400 UU of the ball, as before, left a third of the changes of a bot match to the rule;
+/// RESULTS.md, "Inputs between frames"); other cars are not modelled. Refused without chained update ticks for
+/// both later updates, with a withheld or inactive frame, an action counter change, an action in progress, or no
+/// control change near the span.
 pub(in crate::infer) fn fit_ground_timing(
     ctx: FitContext,
     query: &FitQuery,
@@ -30,6 +32,7 @@ pub(in crate::infer) fn fit_ground_timing(
         state,
         ticks_before,
         now: now_tick,
+        ball,
         ..
     } = *query;
     let frames = ctx.frames;
@@ -50,16 +53,6 @@ pub(in crate::infer) fn fit_ground_timing(
     if a_counters.iter().flatten().any(|c| c % 2 == 1) {
         return None;
     }
-    let clear = |g: usize, pos: Vec3A| {
-        frames[g].ball.as_ref().is_none_or(|ball| {
-            ball.position
-                .as_ref()
-                .is_none_or(|p| (vec3(p.value) - pos).length() > 400.0)
-        })
-    };
-    if !clear(index, state.phys.pos) {
-        return None;
-    }
     let t_a = ctx.timeline(index) - ticks_before as i64;
     // The next two updates with chained ticks.
     let mut found: Vec<(usize, i64, Vec3A, Vec3A)> = Vec::new();
@@ -73,7 +66,7 @@ pub(in crate::infer) fn fit_ground_timing(
         }
         let at = |f: FrameIndex| f.get() == g;
         let b = &other.body;
-        let (Some(p), Some(v), Some(w)) = (
+        let (Some(_), Some(v), Some(w)) = (
             b.position.as_ref().filter(|x| at(x.frame)),
             b.linear_velocity.as_ref().filter(|x| at(x.frame)),
             b.angular_velocity_raw.as_ref().filter(|x| at(x.frame)),
@@ -83,9 +76,6 @@ pub(in crate::infer) fn fit_ground_timing(
         let Some(&before) = ticks.cars.get(&(car.life, FrameIndex(g as u32))) else {
             continue;
         };
-        if !clear(g, vec3(p.value)) {
-            return None;
-        }
         found.push((
             g,
             ctx.timeline(g) - i64::from(before),
@@ -144,13 +134,8 @@ pub(in crate::infer) fn fit_ground_timing(
         let i = entries.partition_point(|e| e.0 + shift <= tau);
         if i == 0 { own_entry } else { entries[i - 1] }
     };
-    // The scratch arena holds only this car: the ball is parked out of reach.
-    let mut parked = BallState::default();
-    parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
-    if (state.phys.pos - parked.phys.pos).length() < 600.0 {
-        // A car on the ceiling would touch the parked ball.
-        parked.phys.pos = Vec3A::new(3000.0, 4000.0, 300.0);
-    }
+    // The scratch arena holds this car and the ball as the simulation has it; other cars are not modelled.
+    let scratch_ball = ball;
     // Shifts whose switches fall on the same ticks of the span give the same simulation: one cost each.
     let mut costs: Vec<(i64, f32)> = Vec::new();
     let mut simulated: Vec<(Vec<u32>, f32)> = Vec::new();
@@ -162,7 +147,7 @@ pub(in crate::infer) fn fit_ground_timing(
             costs.push((shift, *cost));
             continue;
         }
-        scratch.set_ball_state(parked);
+        scratch.set_ball_state(scratch_ball);
         seed_car(scratch, *state, now_tick);
         for tau in t_a + 1..=t_c {
             let e = controls_at(shift, tau);
