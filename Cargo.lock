@@ -866,9 +866,11 @@ name = "replicar-eval"
 version = "2.0.0-dev"
 dependencies = [
  "boxcars",
+ "glam",
  "replicar",
  "replicar-format",
  "replicar-v1",
+ "serde",
  "serde_json",
  "sha2",
 ]
