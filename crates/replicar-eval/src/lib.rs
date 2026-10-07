@@ -3,6 +3,7 @@
 //! The parity checks hold v2 to v1, stage by stage, on the train and validation replays: a v2 stage is
 //! done when its output equals v1's on every replay (docs/v2-plan.md, section 5).
 
+pub mod mask;
 pub mod v1_shape;
 
 use std::error::Error;

@@ -3,6 +3,9 @@
 //! checked against the cars' paths. Reads only the simulator's frames, in order.
 
 mod ball_evidence;
+pub mod scoreboard;
+pub mod segments;
+pub mod updates;
 
 use std::collections::{HashMap, VecDeque};
 

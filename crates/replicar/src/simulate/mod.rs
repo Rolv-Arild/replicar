@@ -28,7 +28,7 @@ use players::Players;
 const MAX_GAP_TICKS: u64 = 1200;
 
 /// How the simulation runs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SimulationOptions {
     /// RocketSim's random seed.
     pub seed: u64,
@@ -40,6 +40,7 @@ pub struct SimulationOptions {
     /// Let RocketSim demolish cars by its own rule. Off: the replay's demolitions are the only ones.
     pub simulated_demolitions: bool,
     /// Frames whose updates a masked evaluation hides; their demolitions and wreck holds are not applied.
+    #[serde(skip)]
     pub withheld: Option<Vec<bool>>,
 }
 
@@ -178,7 +179,7 @@ pub struct SimulatedFrame {
 }
 
 /// What the simulation counted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SimDiagnostics {
     pub skipped_replay_ticks: u64,
     pub player_loadout_changes: usize,

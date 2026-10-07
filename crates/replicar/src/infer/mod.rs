@@ -4,6 +4,7 @@
 
 mod air_schedule;
 mod fits;
+pub mod recorded;
 
 use std::collections::{HashMap, HashSet};
 
@@ -96,7 +97,7 @@ pub trait Inference {
 }
 
 /// What the inference counted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct InferenceDiagnostics {
     /// Airborne updates whose interval got an air schedule, and airborne ones refused one.
     pub air_schedules_planned: usize,
@@ -106,7 +107,7 @@ pub struct InferenceDiagnostics {
 }
 
 /// Which inferences `FittedInference` makes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct InferenceOptions {
     /// Solve an airborne car's air controls over the span to its next update (offline).
     pub air_lookahead: bool,

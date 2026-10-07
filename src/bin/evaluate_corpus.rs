@@ -2056,7 +2056,9 @@ mod tests {
 
     #[test]
     fn prior_angular_trace_excludes_masked_targets_and_other_actor_lifetimes() {
-        use replicar_v1::observations::{Car, Frame, Header, Inputs, ObservedReplay, Source, Value};
+        use replicar_v1::observations::{
+            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
+        };
 
         let frames = (0..6)
             .map(|index| {
@@ -2120,7 +2122,9 @@ mod tests {
 
     #[test]
     fn masked_observations_withhold_car_boost_while_preserving_activation() {
-        use replicar_v1::observations::{Car, Frame, Header, Inputs, ObservedReplay, Source, Value};
+        use replicar_v1::observations::{
+            Car, Frame, Header, Inputs, ObservedReplay, Source, Value,
+        };
 
         let schedule = MaskSchedule {
             seed: None,

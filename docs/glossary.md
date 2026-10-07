@@ -11,7 +11,9 @@ file schema against this page (v2 plan, story 9.2).
   suffix. Time always carries its unit: `_seconds`, `_tick` (a point on a tick scale) or `_ticks` (a number of
   ticks).
 - **Values the replay encodes in its own units** keep them and end in `_raw` (`boost_raw` 0-255, `ping_raw`).
-- **Per-player columns** start with what they describe (`car_`, `player_`) and are indexed by the player index.
+- **Per-player columns** start with what they describe and the player index (`car_0_position_x`,
+  `player_1_ping_raw`); this page writes them with the index left out (`car_position`). Per-pad columns likewise
+  (`pad_3_cooldown`).
 - **Provenance in the name only where it is not the group's.** A column in `state` is simulated or corrected
   state; one in `network` is what the replay sent. Inside a group, a value with another origin says so:
   `simulated_touches`, `car_status_inferred`.
@@ -126,10 +128,11 @@ reconstruction, and it is why the future group is kept apart: it says what happe
 
 **Future group** (`future`; v1 *labels*). Training targets read from the frames after the one they describe,
 about the frame's own play segment only (never a later one):
-- `future_segment_end`: how the segment ends. `blue_goal` or `orange_goal`; `time_expired` (regulation ran out
-  and the ball touched the ground); `replay_ended` (the replay stops during play, so the end is unknown); `other`
-  (play stopped some other way, for example a forfeit **[verify]** how a forfeit shows in a replay). Every
-  segment has a value: a segment without a goal says so instead of being null.
+- `future_segment_end`: how the segment ends. `blue_goal` or `orange_goal`; `time_expired` (regulation ran out:
+  the clock phase at the segment's last frame is `expired` or `decided`); `replay_ended` (the replay stops during
+  play, so the end is unknown); `other` (play stopped some other way). Every segment has a value: a segment
+  without a goal says so instead of being null. A forfeit looks like `replay_ended`: on train and validation the
+  13 segments that end without a goal or an expired clock all end at the replay's last frame, and none is `other`.
 - `future_seconds_until_segment_end`: replay time from this frame to the segment's last frame (0 there). For a
   goal segment this is the time until the goal.
 

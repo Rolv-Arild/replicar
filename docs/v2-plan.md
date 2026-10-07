@@ -199,10 +199,12 @@ when complete, so a failed run leaves no partial file.
 **Plain `.parquet`.** A replicar file is an ordinary Parquet file, and the extension should say so: every tool
 recognizes it, and the header says it is a replicar file (format version, groups). A double extension would
 only help someone who cannot open the file. To keep "any Parquet reader" true, the schema uses only types that
-mainstream readers handle: numbers, booleans, strings, lists and structs. It uses no nullable fixed-size lists,
-because Parquet drops the child values of a null list and PyArrow then reads them wrongly (RESULTS.md, "Parquet
-columns and record tables"); a missing player's values are NaN or -1 inside a present list, plus `car_status`
-`absent`. **[verify]** with pyarrow, polars and DuckDB in story 7.1.
+mainstream readers handle: numbers, booleans, strings, lists and structs. Per-player and per-pad values are one
+plain column each (`car_0_position_x`, `pad_3_cooldown`; story 7.1): 9-11% smaller as floats and about 30% smaller
+as integers than lists of players (RESULTS.md, "v2: the file format"), readable by name in SQL, and without
+Parquet's nullable fixed-size lists, whose child values PyArrow once read wrongly (RESULTS.md, "Parquet columns and
+record tables"). A missing player's values are null, plus `car_status` `absent`. Lists of structs hold only the
+records (events, ball contacts, boost pickups). Checked with pyarrow, polars and DuckDB in story 7.1.
 
 **A corpus**
 

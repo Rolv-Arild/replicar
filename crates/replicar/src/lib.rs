@@ -6,7 +6,9 @@
 //! here are defined in docs/glossary.md.
 
 pub mod air;
+pub mod align;
 pub mod annotate;
+mod convert;
 pub mod decode;
 mod error;
 pub mod hitbox;
@@ -17,10 +19,14 @@ pub mod simulate;
 mod testkit;
 pub mod update_ticks;
 
+pub use convert::{Config, Conversion, Converter};
 pub use error::Error;
 pub use meshes::Meshes;
 pub use replicar_format::{FrameIndex, PlayerIndex, ReplayTick, SimTick, TICKS_PER_SECOND, Team};
 pub use rocketsim;
+
+/// The RocketSim release replicar simulates with (the pinned `rocketsim` crate).
+pub const ROCKETSIM_VERSION: &str = "0.2.7";
 
 /// Parse a replay, requiring its network frames: a replay that parses only as far as its header is an
 /// error, never an empty conversion.

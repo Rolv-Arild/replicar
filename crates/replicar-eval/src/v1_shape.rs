@@ -331,6 +331,71 @@ pub fn annotations_v2(annotations: &replicar::annotate::Annotations) -> serde_js
     })
 }
 
+/// Trailing unknowns dropped: v1 sizes the per-player lists by the replay's players, v2 by the frame's.
+fn trimmed(values: serde_json::Value) -> serde_json::Value {
+    let mut values = values;
+    if let Some(list) = values.as_array_mut() {
+        while list.last().is_some_and(serde_json::Value::is_null) {
+            list.pop();
+        }
+    }
+    values
+}
+
+/// v1's scoreboard, freshness and episode of a frame. `goal_at_end` is the scoring team when the frame's
+/// next goal is its episode's end.
+pub fn game_v1(
+    frame: &replicar_v1::conversion::ConvertedFrame,
+    freshness: &replicar_v1::freshness::FrameFreshness,
+    labels: &replicar_v1::labels::FrameLabels,
+) -> serde_json::Value {
+    let goal_at_end = match (
+        labels.episode_seconds_remaining,
+        labels.seconds_until_next_goal,
+    ) {
+        (Some(end), Some(goal)) if end == goal => labels.next_scoring_team,
+        _ => None,
+    };
+    serde_json::json!({
+        "scoreboard": frame.scoreboard.as_ref().map(|s| (s.period, s.clock_state, s.seconds_remaining, s.overtime_seconds)),
+        "ball_updated": freshness.ball_fresh,
+        "car_updated": trimmed(serde_json::json!(freshness.car_fresh)),
+        "ball_seconds": freshness.ball_update_age_seconds,
+        "car_seconds": trimmed(serde_json::json!(freshness.car_update_age_seconds)),
+        "ball_ticks": freshness.ball_packet_age_ticks,
+        "car_ticks": trimmed(serde_json::json!(freshness.car_packet_age_ticks)),
+        "segment": labels.episode,
+        "until_end": labels.episode_seconds_remaining,
+        "goal_at_end": labels.episode.and(goal_at_end),
+    })
+}
+
+/// The same for v2.
+pub fn game_v2(
+    scoreboard: &replicar::annotate::scoreboard::Scoreboard,
+    updates: &replicar::annotate::updates::Updates,
+    segment: Option<&replicar::annotate::segments::SegmentFrame>,
+) -> serde_json::Value {
+    use replicar::annotate::segments::SegmentEnd;
+    let goal_at_end = segment.and_then(|s| match s.future_segment_end {
+        SegmentEnd::BlueGoal => Some(0u8),
+        SegmentEnd::OrangeGoal => Some(1),
+        _ => None,
+    });
+    serde_json::json!({
+        "scoreboard": Some((scoreboard.period.name(), scoreboard.clock_phase.name(), scoreboard.seconds_remaining, scoreboard.overtime_seconds)),
+        "ball_updated": updates.ball_updated,
+        "car_updated": trimmed(serde_json::json!(updates.car_updated)),
+        "ball_seconds": updates.ball_seconds_since_update,
+        "car_seconds": trimmed(serde_json::json!(updates.car_seconds_since_update)),
+        "ball_ticks": updates.ball_ticks_since_update,
+        "car_ticks": trimmed(serde_json::json!(updates.car_ticks_since_update)),
+        "segment": segment.map(|s| s.segment),
+        "until_end": segment.map(|s| s.future_seconds_until_segment_end),
+        "goal_at_end": goal_at_end,
+    })
+}
+
 /// The same for v2's simulated frame.
 pub fn simulated_frame_v2(frame: &replicar::simulate::SimulatedFrame) -> serde_json::Value {
     use replicar::simulate::{HoldSource, TickSource};

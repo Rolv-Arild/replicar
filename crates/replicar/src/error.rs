@@ -18,6 +18,9 @@ pub enum Error {
     #[error("replicar simulates soccar; this replay is {0}")]
     UnsupportedMode(String),
 
+    #[error("the file could not be written: {0}")]
+    Write(#[from] replicar_format::WriteError),
+
     #[error("{frame} has an invalid time {time}")]
     InvalidTime {
         frame: replicar_format::FrameIndex,

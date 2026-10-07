@@ -667,7 +667,9 @@ dependencies = [
  "glam",
  "replicar-format",
  "rocketsim",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
@@ -677,6 +679,7 @@ version = "2.0.0-dev"
 dependencies = [
  "boxcars",
  "replicar",
+ "replicar-format",
  "replicar-v1",
  "serde_json",
  "sha2",
@@ -685,6 +688,15 @@ dependencies = [
 [[package]]
 name = "replicar-format"
 version = "2.0.0-dev"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "parquet",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "replicar-v1"

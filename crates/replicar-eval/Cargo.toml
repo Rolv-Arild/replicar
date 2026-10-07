@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 boxcars.workspace = true
 replicar = { path = "../replicar" }
+replicar-format = { path = "../replicar-format" }
 # v1, kept at the repository root until v2 replaces it, is the oracle every v2 stage is compared with
 # (docs/v2-plan.md, section 5).
 replicar-v1 = { path = "../.." }

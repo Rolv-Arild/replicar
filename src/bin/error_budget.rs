@@ -69,7 +69,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         "usage: error_budget <split dir or replay> [--no-infer-packet-lag] [--final-assessment]",
     )?);
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
-    if replicar_v1::sealed_path_refused(&path, env::args_os().any(|arg| arg == "--final-assessment")) {
+    if replicar_v1::sealed_path_refused(
+        &path,
+        env::args_os().any(|arg| arg == "--final-assessment"),
+    ) {
         return Err("refusing to inspect a path with a 'test' component (pass --final-assessment for the frozen run)".into());
     }
     let mut options = ConvertOptions::default();

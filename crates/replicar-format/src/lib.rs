@@ -5,8 +5,17 @@
 //! replay parser nor RocketSim, so reading a file needs neither. The words used here are defined in
 //! docs/glossary.md.
 
+mod columns;
+mod game;
+pub mod header;
 mod identity;
+mod read;
+pub mod record;
 mod time;
+mod write;
 
+pub use game::{CarStatus, ClockPhase, Period, SegmentEnd};
 pub use identity::{PlayerIndex, Team};
+pub use read::{ReadError, read};
 pub use time::{FrameIndex, ReplayTick, SimTick, TICKS_PER_SECOND};
+pub use write::{Group, Precision, QUANTA, WriteError, WriteOptions, write};

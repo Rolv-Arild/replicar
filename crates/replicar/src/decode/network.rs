@@ -296,7 +296,7 @@ pub struct ReplayHeader {
 }
 
 /// What the decoder noticed about the replay.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct DecodeDiagnostics {
     pub repeated_actor_announcements: usize,
     pub actor_class_replacements: usize,
