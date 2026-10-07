@@ -108,7 +108,7 @@ exactly from the replay and the `resimulation` group.
 | `src/`, `python/replicar.py` | version 1, kept as the reference v2 is checked against |
 
 ```sh
-cargo test --all-targets
+cargo test --workspace --all-targets
 cd python/v2 && PYTHONPATH=src python -m pytest tests
 ```
 
