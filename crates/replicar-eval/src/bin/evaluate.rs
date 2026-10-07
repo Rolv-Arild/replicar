@@ -536,7 +536,19 @@ fn masked_conversion_options(
     options: &ConvertOptions,
     lag_inference: bool,
     withheld: Vec<bool>,
+    offline: bool,
 ) -> ConvertOptions {
+    if offline {
+        // `--offline-masked`: the default conversion of the masked input, every fit on and free to use the
+        // updates after the hidden ones (an offline reconstruction, not a causal prediction); only the hidden
+        // updates themselves are unknown to it.
+        return ConvertOptions {
+            collision_meshes: options.collision_meshes.clone(),
+            use_loadout_hitboxes: options.use_loadout_hitboxes,
+            infer_packet_lag: options.infer_packet_lag,
+            ..ConvertOptions::default()
+        };
+    }
     let mut masked_options = options.clone();
     // A withheld target's own packet lag is unknowable, so masked prediction keeps
     // every state at its frame time; packet-lag inference is an offline improvement
@@ -1303,6 +1315,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // then scored are switched off for that conversion (`--offline-fits` keeps them: reconstruction quality,
     // in-sample for the rotation and angular velocity).
     let mut offline_fits = false;
+    // `--offline-masked`: the masked conversion is the full offline one (see `masked_conversion_options`).
+    let mut offline_masked = false;
     let mut rotation_trace_path = None;
     // The test split is sealed until the frozen assessment (TEST_PROTOCOL.md); only that run passes the flag.
     let mut final_assessment = false;
@@ -1311,6 +1325,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             final_assessment = true;
         } else if arg == "--offline-fits" {
             offline_fits = true;
+        } else if arg == "--offline-masked" {
+            offline_masked = true;
         } else if arg == "--aligned-targets-raw-predictor" {
             aligned_targets = true;
             aligned_predictor = false;
@@ -1378,6 +1394,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &options,
                 aligned_targets && aligned_predictor,
                 Vec::new(),
+                offline_masked,
             );
             MaskedRunOptions {
                 infer_packet_lag: applied.infer_packet_lag,
@@ -1516,6 +1533,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     (0..masked.frames.len())
                         .map(|index| schedule.horizon(index).is_some())
                         .collect(),
+                    offline_masked,
                 );
                 // The aligned targets come from the full offline conversion (the best estimate of the state at
                 // the target tick), not from the held-out one scored above.

@@ -364,6 +364,9 @@ pub type Segment = (AirControls, u32);
 /// A forward model of free flight: the end rotation and angular velocity after consecutive segments.
 pub type ForwardModel<'f> = dyn FnMut(&[Segment]) -> (Mat3A, Vec3A) + 'f;
 
+/// The finite-difference Jacobian of the residuals at a point (with the residuals there): one column per parameter.
+type Jacobian<'f> = dyn FnMut(&[f32], &[f32; 6]) -> Vec<[f32; 6]> + 'f;
+
 /// The rotation vector (radians, world frame) that takes `from` to `to`.
 #[must_use]
 pub fn rotation_vector(from: Mat3A, to: Mat3A) -> Vec3A {
@@ -373,9 +376,47 @@ pub fn rotation_vector(from: Mat3A, to: Mat3A) -> Vec3A {
     Vec3A::from(axis) * angle
 }
 
+// Residual units: half a degree of rotation, 0.05 rad/s of angular velocity.
+const ROT_SCALE: f32 = 0.5 * PI / 180.0;
+const OMEGA_SCALE: f32 = 0.05;
+// The weight of staying at the prior, per unit of control.
+const PRIOR_WEIGHT: f32 = 0.05;
+// The step of the finite differences.
+const DIFFERENCE: f32 = 0.02;
+
+fn to_vec(c: &[AirControls]) -> Vec<f32> {
+    c.iter().flat_map(|c| [c.pitch, c.yaw, c.roll]).collect()
+}
+
+fn from_vec(v: &[f32]) -> Vec<AirControls> {
+    v.chunks(3)
+        .map(|c| AirControls {
+            pitch: c[0],
+            yaw: c[1],
+            roll: c[2],
+        })
+        .collect()
+}
+
+fn segments_of(u: &[f32], ticks: &[u32]) -> Vec<Segment> {
+    from_vec(u).into_iter().zip(ticks.iter().copied()).collect()
+}
+
+/// The six end conditions' residuals, in their units.
+fn residual_of(rot: Mat3A, omega: Vec3A, rot_end: Mat3A, omega_end: Vec3A) -> [f32; 6] {
+    let dr = rotation_vector(rot, rot_end) / ROT_SCALE;
+    let dw = (omega_end - omega) / OMEGA_SCALE;
+    [dr.x, dr.y, dr.z, dw.x, dw.y, dw.z]
+}
+
 /// The boundary-value problem of free flight: per-segment air controls (segments of `ticks` ticks each) that
 /// carry a car from its start rotation and angular velocity to its end ones, under the analytic air model
 /// (`fly`). Returns the controls and the remaining end error (radians of rotation, rad/s of angular velocity).
+///
+/// The same fit as `solve_bvp_with` with `fly` as the forward model, faster: a control of segment j cannot change
+/// the flight before segment j, so its finite difference flies from the state at segment j's start, kept from
+/// the unperturbed flight. `fly` is a pure function stepped segment by segment, so the result is the same to
+/// the bit.
 #[must_use]
 pub fn solve_bvp(
     rot_start: Mat3A,
@@ -385,8 +426,32 @@ pub fn solve_bvp(
     ticks: &[u32],
     prior: &[AirControls],
 ) -> (Vec<AirControls>, f32, f32) {
-    let mut analytic = |segments: &[(AirControls, u32)]| fly(rot_start, omega_start, segments);
-    solve_bvp_with(&mut analytic, rot_end, omega_end, ticks, prior)
+    let mut residual = |u: &[f32]| -> [f32; 6] {
+        let (rot, omega) = fly(rot_start, omega_start, &segments_of(u, ticks));
+        residual_of(rot, omega, rot_end, omega_end)
+    };
+    let mut jacobian = |u: &[f32], r: &[f32; 6]| -> Vec<[f32; 6]> {
+        let segments = segments_of(u, ticks);
+        // The state at the start of each segment.
+        let mut starts = Vec::with_capacity(segments.len());
+        let mut state = (rot_start, omega_start);
+        for segment in &segments {
+            starts.push(state);
+            state = fly(state.0, state.1, std::slice::from_ref(segment));
+        }
+        (0..u.len())
+            .map(|k| {
+                let j = k / 3;
+                let mut up = u.to_vec();
+                up[k] += DIFFERENCE;
+                let perturbed = segments_of(&up, ticks);
+                let (rot, omega) = fly(starts[j].0, starts[j].1, &perturbed[j..]);
+                let rp = residual_of(rot, omega, rot_end, omega_end);
+                std::array::from_fn(|i| (rp[i] - r[i]) / DIFFERENCE)
+            })
+            .collect()
+    };
+    levenberg_marquardt(&mut residual, &mut jacobian, prior)
 }
 
 /// `solve_bvp` with the forward model as a function of the segments (RocketSim itself for a flipping car): a
@@ -400,33 +465,34 @@ pub fn solve_bvp_with(
     ticks: &[u32],
     prior: &[AirControls],
 ) -> (Vec<AirControls>, f32, f32) {
-    // Residual units: half a degree of rotation, 0.05 rad/s of angular velocity.
-    const ROT_SCALE: f32 = 0.5 * PI / 180.0;
-    const OMEGA_SCALE: f32 = 0.05;
-    // The weight of staying at the prior, per unit of control.
-    const PRIOR_WEIGHT: f32 = 0.05;
-    let dim = 3 * ticks.len();
-    let to_vec = |c: &[AirControls]| -> Vec<f32> {
-        c.iter().flat_map(|c| [c.pitch, c.yaw, c.roll]).collect()
+    let forward = std::cell::RefCell::new(forward);
+    let residual_at = |u: &[f32]| -> [f32; 6] {
+        let (rot, omega) = (forward.borrow_mut())(&segments_of(u, ticks));
+        residual_of(rot, omega, rot_end, omega_end)
     };
-    let from_vec = |v: &[f32]| -> Vec<AirControls> {
-        v.chunks(3)
-            .map(|c| AirControls {
-                pitch: c[0],
-                yaw: c[1],
-                roll: c[2],
+    let mut residual = |u: &[f32]| residual_at(u);
+    let mut jacobian = |u: &[f32], r: &[f32; 6]| -> Vec<[f32; 6]> {
+        (0..u.len())
+            .map(|k| {
+                let mut up = u.to_vec();
+                up[k] += DIFFERENCE;
+                let rp = residual_at(&up);
+                std::array::from_fn(|i| (rp[i] - r[i]) / DIFFERENCE)
             })
             .collect()
     };
-    let mut residual = |u: &[f32]| -> [f32; 6] {
-        let segments: Vec<(AirControls, u32)> =
-            from_vec(u).into_iter().zip(ticks.iter().copied()).collect();
-        let (rot, omega) = forward(&segments);
-        let dr = rotation_vector(rot, rot_end) / ROT_SCALE;
-        let dw = (omega_end - omega) / OMEGA_SCALE;
-        [dr.x, dr.y, dr.z, dw.x, dw.y, dw.z]
-    };
+    levenberg_marquardt(&mut residual, &mut jacobian, prior)
+}
+
+/// The Levenberg-Marquardt fit of `solve_bvp_with`, given the residual and its finite-difference Jacobian
+/// (one column of six per parameter).
+fn levenberg_marquardt(
+    residual: &mut dyn FnMut(&[f32]) -> [f32; 6],
+    jacobian_at: &mut Jacobian<'_>,
+    prior: &[AirControls],
+) -> (Vec<AirControls>, f32, f32) {
     let u0 = to_vec(prior);
+    let dim = u0.len();
     let cost_of = |u: &[f32], r: &[f32; 6]| -> f32 {
         let prior_cost: f32 = u.iter().zip(&u0).map(|(a, b)| (a - b) * (a - b)).sum();
         r.iter().map(|x| x * x).sum::<f32>() + PRIOR_WEIGHT * PRIOR_WEIGHT * prior_cost
@@ -439,17 +505,7 @@ pub fn solve_bvp_with(
     let mut jacobian: Option<Vec<[f32; 6]>> = None;
     for _ in 0..12 {
         if jacobian.is_none() {
-            // Finite differences, 6 x dim.
-            let mut jac = vec![[0.0f32; 6]; dim];
-            for (k, column) in jac.iter_mut().enumerate() {
-                let mut up = u.clone();
-                up[k] += 0.02;
-                let rp = residual(&up);
-                for i in 0..6 {
-                    column[i] = (rp[i] - r[i]) / 0.02;
-                }
-            }
-            jacobian = Some(jac);
+            jacobian = Some(jacobian_at(&u, &r));
         }
         let jac = jacobian.as_ref().expect("computed above");
         // (J^T J + w^2 I + lambda I) delta = -(J^T r + w^2 (u - u0)).
