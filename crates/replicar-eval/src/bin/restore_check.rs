@@ -96,7 +96,7 @@ fn main() -> ExitCode {
             let network = replicar::decode::decode(&replicar::parse(&bytes)?)?;
             let mut states: Vec<ArenaState> = Vec::new();
             let conversion = converter
-                .convert_network_with(&network, |frame| states.push(frame.state.clone()))?;
+                .convert_network_with(network, |frame| states.push(frame.state.clone()))?;
             let mut worst = [Worst::default(); 2];
             for (k, precision) in [
                 replicar_format::Precision::Float32,

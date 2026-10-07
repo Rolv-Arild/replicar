@@ -5,6 +5,7 @@
 
 pub mod mask;
 pub mod v1_shape;
+pub mod v2_conversion;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};

@@ -85,7 +85,7 @@ conversion.write("match.parquet".as_ref(), &replicar_format::WriteOptions::defau
 
 // Every simulated frame with its full RocketSim state, as it is made:
 let network = replicar::decode::decode(&replicar::parse(&bytes)?)?;
-converter.convert_network_with(&network, |frame| { /* frame.state: rocketsim::ArenaState */ })?;
+converter.convert_network_with(network, |frame| { /* frame.state: rocketsim::ArenaState */ })?;
 
 // RocketSim states back from a file (rotations within 1e-6), or exactly by resimulating:
 let states = replicar::restore::arena_states("match.parquet".as_ref())?;

@@ -2,6 +2,7 @@
 //! with the fitted inference, annotation, and the rows and header of a replicar file.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use glam::{Mat3A, Quat};
 use replicar_format::header::{FORMAT_VERSION, Header, PadInfo, PlayerInfo, SegmentInfo};
@@ -10,7 +11,7 @@ use replicar_format::record::{
     State, Updates,
 };
 use replicar_format::resimulation::Resimulation;
-use replicar_format::{CarStatus, PlayerIndex, RecordBatch, WriteOptions};
+use replicar_format::{CarStatus, Group, PlayerIndex, RecordBatch, WriteOptions};
 use rocketsim::{ArenaState, CarControls, CarState, PhysState};
 use sha2::{Digest, Sha256};
 
@@ -22,7 +23,9 @@ use crate::decode::{DemolitionReport, NetworkEvent, NetworkFrame, NetworkReplay}
 use crate::infer::recorded::{RecordedInference, Recorder};
 use crate::infer::{FittedInference, Inference, InferenceOptions};
 use crate::resimulate::{from_group, to_group};
-use crate::simulate::{HoldSource, SimulatedFrame, Simulation, SimulationOptions, simulate};
+use crate::simulate::{
+    HoldSource, SimPlayer, SimulatedFrame, Simulation, SimulationOptions, simulate,
+};
 use crate::update_ticks::{UpdateTicks, Withheld};
 use crate::{Error, Meshes};
 
@@ -49,25 +52,51 @@ impl Default for Config {
 }
 
 /// A converted replay: the header, every frame's row (the writer keeps the rows in play segments), and what
-/// the inference chose (the `resimulation` group).
+/// the inference chose (the `resimulation` group). The `network` and `diagnostics` columns are built only when
+/// a file asks for them (the network columns of a long 3v3 replay take about as much memory as its states).
 #[derive(Debug, Clone)]
 pub struct Conversion {
     pub header: Header,
     pub frames: Vec<Frame>,
     pub resimulation: Resimulation,
-    /// The `network` and `diagnostics` groups' columns, one row per frame.
-    pub network: RecordBatch,
-    pub diagnostics: RecordBatch,
+    network: Arc<NetworkReplay>,
+    players: Vec<SimPlayer>,
+    diagnostics: Vec<crate::diagnostics_columns::DiagnosticsRow>,
 }
 
 impl Conversion {
+    /// The `network` group's columns, one row per frame.
+    pub fn network_columns(&self) -> Result<RecordBatch, Error> {
+        Ok(crate::network_columns::network_columns(
+            &self.network,
+            &self.players,
+        )?)
+    }
+
+    /// The `diagnostics` group's columns, one row per frame.
+    pub fn diagnostics_columns(&self) -> Result<RecordBatch, Error> {
+        Ok(crate::diagnostics_columns::diagnostics_columns(
+            &self.diagnostics,
+        )?)
+    }
+
     /// Writes the conversion to `path` (the file appears only when complete).
     pub fn write(&self, path: &Path, options: &WriteOptions) -> Result<(), Error> {
+        let network = options
+            .groups
+            .contains(&Group::Network)
+            .then(|| self.network_columns())
+            .transpose()?;
+        let diagnostics = options
+            .groups
+            .contains(&Group::Diagnostics)
+            .then(|| self.diagnostics_columns())
+            .transpose()?;
         let content = replicar_format::Content {
             frames: &self.frames,
             resimulation: Some(&self.resimulation),
-            network: Some(&self.network),
-            diagnostics: Some(&self.diagnostics),
+            network: network.as_ref(),
+            diagnostics: diagnostics.as_ref(),
         };
         replicar_format::write(path, &self.header, &content, options)?;
         Ok(())
@@ -89,7 +118,7 @@ impl<'m> Converter<'m> {
     /// Converts the replay file's bytes.
     pub fn convert(&self, bytes: &[u8]) -> Result<Conversion, Error> {
         let network = crate::decode::decode(&crate::parse(bytes)?)?;
-        let mut conversion = self.convert_network(&network)?;
+        let mut conversion = self.convert_network(network)?;
         conversion.header.replay_sha256 = format!("{:x}", Sha256::digest(bytes));
         Ok(conversion)
     }
@@ -105,7 +134,7 @@ impl<'m> Converter<'m> {
     }
 
     /// Converts a decoded replay (the header's replay hash is left empty).
-    pub fn convert_network(&self, network: &NetworkReplay) -> Result<Conversion, Error> {
+    pub fn convert_network(&self, network: NetworkReplay) -> Result<Conversion, Error> {
         self.convert_network_with(network, |_| {})
     }
 
@@ -113,20 +142,21 @@ impl<'m> Converter<'m> {
     /// provenance) to `on_frame` as it is made.
     pub fn convert_network_with(
         &self,
-        network: &NetworkReplay,
+        network: NetworkReplay,
         on_frame: impl FnMut(&SimulatedFrame),
     ) -> Result<Conversion, Error> {
+        let network = Arc::new(network);
         let config = &self.config;
         let withheld = Withheld(config.simulation.withheld.as_deref());
         let mut alignment = None;
         let mut ticks = config.update_ticks.then(|| {
-            crate::update_ticks::infer(network, config.simulation.loadout_hitboxes, withheld)
+            crate::update_ticks::infer(&network, config.simulation.loadout_hitboxes, withheld)
         });
         if config.align_contacts
             && let Some(found) = &ticks
         {
             let aligned = crate::align::align_contacts(
-                network,
+                &network,
                 found,
                 self.meshes,
                 config.inference,
@@ -135,10 +165,10 @@ impl<'m> Converter<'m> {
             ticks = Some(aligned.0);
             alignment = Some(aligned.1);
         }
-        let mut fitted = FittedInference::new(network, ticks.as_ref(), config.inference, withheld);
+        let mut fitted = FittedInference::new(&network, ticks.as_ref(), config.inference, withheld);
         let mut recorder = Recorder::new(&mut fitted);
         let mut conversion = run(
-            network,
+            &network,
             ticks.as_ref(),
             &mut recorder,
             self.meshes,
@@ -193,7 +223,7 @@ impl<'m> Converter<'m> {
         let config: Config = serde_json::from_value(header.configuration.clone())
             .map_err(|e| Error::Resimulation(format!("the file's configuration: {e}")))?;
         let group = replicar_format::resimulation::read(&batch)?;
-        let network = crate::decode::decode(&crate::parse(bytes)?)?;
+        let network = Arc::new(crate::decode::decode(&crate::parse(bytes)?)?);
         let (ticks, recording) = from_group(&group, network.frames.len(), config.update_ticks)?;
         let mut recorded = RecordedInference::new(&recording);
         let withheld = Withheld(config.simulation.withheld.as_deref());
@@ -222,7 +252,7 @@ impl<'m> Converter<'m> {
 /// Simulates and annotates the replay with `inference`, and builds the rows and the header (its diagnostics
 /// hold only the simulation's).
 fn run(
-    network: &NetworkReplay,
+    network: &Arc<NetworkReplay>,
     ticks: Option<&UpdateTicks>,
     inference: &mut dyn Inference,
     meshes: &Meshes,
@@ -257,8 +287,9 @@ fn run(
         header,
         frames,
         resimulation: Resimulation::default(),
-        network: crate::network_columns::network_columns(network, &simulation.players)?,
-        diagnostics: crate::diagnostics_columns::diagnostics_columns(&rows.diagnostics)?,
+        network: Arc::clone(network),
+        players: simulation.players,
+        diagnostics: rows.diagnostics,
     })
 }
 
