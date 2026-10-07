@@ -50,6 +50,7 @@ pub(crate) fn replay(frames: Vec<NetworkFrame>) -> NetworkReplay {
             game_type: "TAGame.Replay_Soccar_TA".to_owned(),
             levels: Vec::new(),
             final_scores: [None, None],
+            counted_stats: Vec::new(),
         },
         frames,
         diagnostics: DecodeDiagnostics::default(),

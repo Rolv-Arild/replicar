@@ -896,6 +896,7 @@ mod tests {
             }],
             segments: Vec::new(),
             final_scores: [Some(1), Some(0)],
+            counted_stats: Vec::new(),
             state_sha256: String::new(),
             configuration: serde_json::Value::Null,
             diagnostics: serde_json::Value::Null,

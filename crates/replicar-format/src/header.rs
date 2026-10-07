@@ -22,7 +22,8 @@ pub struct PlayerInfo {
     /// RocketSim's car body configuration for the player.
     pub hitbox: String,
     /// The player's match statistics at the end of the replay, as the game counted them (`StatKind` names, and
-    /// `score`); only the counters the replay has.
+    /// `score`): every statistic of the header's `counted_stats` (0 when the player's counter was never sent), and
+    /// `score` when sent.
     #[serde(default)]
     pub final_stats: std::collections::BTreeMap<String, i32>,
 }
@@ -61,6 +62,11 @@ pub struct Header {
     /// The final scores as the replay's last frame shows them (blue, orange): the match result, which never
     /// reaches a frame.
     pub final_scores: [Option<i32>; 2],
+    /// The match statistics (`StatKind` names) the replay's object table names: the build counts them, and a player
+    /// without updates has 0. The others are unknown for every player (absent from `final_stats`, never in
+    /// `stat_events`): the build may not count them, or names them only once someone has one.
+    #[serde(default)]
+    pub counted_stats: Vec<String>,
     /// The SHA-256 of every frame's ball and car bodies (position, velocity, angular velocity, rotation as
     /// float32 bits, frame by frame, players in order): a resimulation must reproduce it. Empty when unknown.
     #[serde(default)]

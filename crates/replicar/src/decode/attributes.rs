@@ -32,6 +32,28 @@ pub(super) const PLAYER_BICYCLE_HITS: &str = "TAGame.PRI_TA:MatchBicycleHits";
 pub(super) const PLAYER_JUGGLE_HITS: &str = "TAGame.PRI_TA:MatchJuggleHits";
 pub(super) const PLAYER_FLIP_RESETS: &str = "TAGame.PRI_TA:MatchFlipResets";
 pub(super) const PLAYER_TIMES_DEMOLISHED: &str = "TAGame.PRI_TA:MatchTimesDemolished";
+/// Each match statistic's property: a replay whose object table names it is from a build that counts it (the
+/// converse does not hold).
+pub(super) const STAT_PROPERTIES: [(replicar_format::StatKind, &str); 15] = {
+    use replicar_format::StatKind as K;
+    [
+        (K::Goal, PLAYER_GOALS),
+        (K::Assist, PLAYER_ASSISTS),
+        (K::Save, PLAYER_SAVES),
+        (K::Shot, PLAYER_SHOTS),
+        (K::Demolition, PLAYER_DEMOLITIONS),
+        (K::EpicSave, PLAYER_EPIC_SAVES),
+        (K::Clear, PLAYER_CLEARS),
+        (K::Center, PLAYER_CENTERS),
+        (K::AerialHit, PLAYER_AERIAL_HITS),
+        (K::FirstTouch, PLAYER_FIRST_TOUCHES),
+        (K::CrossbarHit, PLAYER_CROSSBAR_HITS),
+        (K::BicycleHit, PLAYER_BICYCLE_HITS),
+        (K::JuggleHit, PLAYER_JUGGLE_HITS),
+        (K::FlipReset, PLAYER_FLIP_RESETS),
+        (K::Demolished, PLAYER_TIMES_DEMOLISHED),
+    ]
+};
 
 // Car controls and components.
 pub(super) const THROTTLE: &str = "TAGame.Vehicle_TA:ReplicatedThrottle";

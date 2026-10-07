@@ -119,7 +119,7 @@ class ReplicarFile:
 
     def players_table(self) -> pa.Table:
         """The header's players as a table: index, name, team (0 blue, 1 orange), hitbox, body, key, and one
-        column per final statistic (null where the replay never counted it)."""
+        column per final statistic (null for a statistic the header's `counted_stats` does not list: unknown)."""
         players = self.header["players"]
         stats = sorted({k for p in players for k in p.get("final_stats", {})})
         columns = {

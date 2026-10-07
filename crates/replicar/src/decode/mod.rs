@@ -99,6 +99,11 @@ pub fn decode(replay: &Replay) -> Result<NetworkReplay, Error> {
                 header_int(replay, attributes::HEADER_BLUE_SCORE),
                 header_int(replay, attributes::HEADER_ORANGE_SCORE),
             ],
+            counted_stats: attributes::STAT_PROPERTIES
+                .iter()
+                .filter(|(_, property)| replay.objects.iter().any(|o| o == property))
+                .map(|(kind, _)| *kind)
+                .collect(),
         },
         frames: decoded,
         diagnostics,

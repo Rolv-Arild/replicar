@@ -133,7 +133,8 @@ JSON in the Parquet key-value metadata under `replicar`:
 | `replay_sha256` | the replay file's SHA-256 |
 | `replicar_version`, `rocketsim_version` | the builds that wrote the file (resimulation needs the same RocketSim) |
 | `groups`, `precision`, `all_frames` | what the file holds |
-| `players` | per player index: `index`, `key`, `name`, `team` (0 blue, 1 orange), `body_product_id`, `hitbox`, `final_stats` (each counter's last value in the replay, by `stat_events` kind and `score`; a counter the replay never sent is absent) |
+| `players` | per player index: `index`, `key`, `name`, `team` (0 blue, 1 orange), `body_product_id`, `hitbox`, `final_stats` (each counter's last value in the replay, by `stat_events` kind and `score`: every kind of `counted_stats`, 0 when the player's counter was never sent; the other kinds are absent, unknown) |
+| `counted_stats` | the `stat_events` kinds the replay's object table names: counted by its build. A kind not named is unknown (builds before September 2026 name `demolition` only once someone has one) |
 | `pads` | per pad index: `position`, `is_big` |
 | `segments` | per play segment: `first_frame`, `last_frame`, `end` (future-derived) |
 | `final_scores` | the match result as the replay's last frame shows it; never in a row |

@@ -646,7 +646,7 @@ fn fill_stats(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Fr
     }
 }
 
-/// A player's counters as the replay last sent them.
+/// A player's counters as the replay last sent them, and 0 for the counted ones it never sent.
 fn final_stats(
     network: &NetworkReplay,
     key: &crate::decode::PlayerKey,
@@ -679,10 +679,15 @@ fn final_stats(
             }
         }
     }
-    latest
+    // A counted statistic the replay never sent for the player stayed at 0 (the game sends only changes).
+    let mut out: std::collections::BTreeMap<String, i32> = latest
         .into_iter()
         .map(|(name, (_, value))| (name, value))
-        .collect()
+        .collect();
+    for kind in &network.header.counted_stats {
+        out.entry(kind.name().to_owned()).or_insert(0);
+    }
+    out
 }
 
 fn fill_pings(network: &NetworkReplay, simulation: &Simulation, frames: &mut [Frame]) {
@@ -761,6 +766,12 @@ fn header(
                 .each_ref()
                 .map(|s| s.as_ref().map(|v| v.value))
         }),
+        counted_stats: network
+            .header
+            .counted_stats
+            .iter()
+            .map(|k| k.name().to_owned())
+            .collect(),
         state_sha256: String::new(),
         configuration: serde_json::Value::Null,
         diagnostics: serde_json::Value::Null,

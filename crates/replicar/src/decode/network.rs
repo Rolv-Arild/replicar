@@ -304,6 +304,11 @@ pub struct ReplayHeader {
     pub levels: Vec<String>,
     /// Blue, orange.
     pub final_scores: [Option<i32>; 2],
+    /// The match statistics the replay's object table names: the build counts them, and since the game sends a
+    /// counter only when it goes up, one a player never sent is 0. A statistic the table does not name is unknown:
+    /// the build may not count it, or may name it only once someone has one (builds before September 2026 name
+    /// `MatchDemolishes` only then).
+    pub counted_stats: Vec<replicar_format::StatKind>,
 }
 
 /// What the decoder noticed about the replay.

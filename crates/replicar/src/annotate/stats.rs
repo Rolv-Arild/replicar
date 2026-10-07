@@ -1,8 +1,8 @@
 //! Stat events (docs/glossary.md, "Stat event"): a player's match counter (goals, saves, shots, clears, ...)
 //! going up, in the frame the replay updates it. Observed: the game's own judgement, seen with the replay's
 //! delay. The replay re-sends every counter at its current value now and then (at kickoffs), so only a value
-//! above the last one seen is an event; a counter's first value counts from 0 when it is 1, and is a baseline
-//! (a replay that starts mid-match) when it is larger.
+//! above the last one seen is an event, one per count it went up by; a counter's first value counts from 0 when it
+//! is 1, and is a baseline (a replay that starts mid-match) when it is larger.
 //!
 //! Goals are attributed from the counters too: the scorer is the scoring team's player whose goal counter goes
 //! up nearest the goal report (within half a second), the assister the one whose assist counter does
@@ -62,18 +62,18 @@ pub fn stat_events(frames: &[NetworkFrame]) -> Vec<Vec<StatEvent>> {
                         continue;
                     };
                     let previous = last.insert((player.key.clone(), kind), value.value);
-                    let up = match previous {
-                        Some(previous) => value.value > previous,
-                        None => value.value == 1,
+                    // One event per count: a counter can go up by two in one update (two aerial hits).
+                    let first = match previous {
+                        Some(previous) => previous + 1,
+                        None if value.value == 1 => 1,
+                        None => continue,
                     };
-                    if up {
-                        events.push(StatEvent {
-                            kind,
-                            player: player.key.clone(),
-                            team: player.team,
-                            total: value.value,
-                        });
-                    }
+                    events.extend((first..=value.value).map(|total| StatEvent {
+                        kind,
+                        player: player.key.clone(),
+                        team: player.team,
+                        total,
+                    }));
                 }
             }
             events
@@ -113,4 +113,66 @@ pub fn goal_attribution(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::{ActorId, NetworkPlayer};
+    use crate::testkit::{frame, sent};
+
+    fn player(
+        key: &str,
+        team: Team,
+        goals: Option<(i32, u32)>,
+        assists: Option<(i32, u32)>,
+    ) -> NetworkPlayer {
+        NetworkPlayer {
+            actor: ActorId(0),
+            key: PlayerKey(key.to_owned()),
+            name: None,
+            team: Some(team),
+            body_product_ids: [None, None],
+            stats: PlayerStats {
+                goals: goals.map(|(v, f)| sent(v, f)),
+                assists: assists.map(|(v, f)| sent(v, f)),
+                ..PlayerStats::default()
+            },
+            ping_raw: None,
+        }
+    }
+
+    #[test]
+    fn counters_going_up_are_events_and_attribute_the_goal() {
+        // Blue's "a" scores in frame 1 and again in frame 3, where its counter jumps from 1 to 3 (two counts);
+        // "b" is credited the assist in frame 5, during the goal pause; "c" starts with a baseline of 4.
+        let mut frames: Vec<NetworkFrame> = (0..6)
+            .map(|i| frame(i, i as f32 / 30.0, 1.0 / 30.0))
+            .collect();
+        let blue = Team::Blue;
+        frames[0].players = vec![player("c", blue, Some((4, 0)), None)];
+        frames[1].players = vec![player("a", blue, Some((1, 1)), None)];
+        frames[1].events = vec![NetworkEvent::GoalScoredOn {
+            team: blue.opponent(),
+        }];
+        frames[2].players = vec![player("a", blue, Some((1, 1)), None)];
+        frames[3].players = vec![player("a", blue, Some((3, 3)), None)];
+        frames[5].players = vec![player("b", blue, None, Some((1, 5)))];
+        let events = stat_events(&frames);
+        let totals = |f: usize| {
+            events[f]
+                .iter()
+                .map(|e| (e.player.0.as_str(), e.total))
+                .collect::<Vec<_>>()
+        };
+        assert!(events[0].is_empty());
+        assert_eq!(totals(1), [("a", 1)]);
+        assert!(events[2].is_empty());
+        assert_eq!(totals(3), [("a", 2), ("a", 3)]);
+        assert_eq!(events[5][0].kind, StatKind::Assist);
+        let goals = goal_attribution(&frames, &events);
+        let (scorer, assister) = &goals[&(1, blue.opponent())];
+        assert_eq!(scorer.as_ref().map(|k| k.0.as_str()), Some("a"));
+        assert_eq!(assister.as_ref().map(|k| k.0.as_str()), Some("b"));
+    }
 }
