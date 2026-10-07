@@ -20,6 +20,10 @@ from typing import Any
 
 import numpy as np
 
+#: How far (UU) a pad may be from the file's to be the same pad (RLGym's table has one 2 UU off; pads are hundreds
+#: of UU apart).
+PAD_TOLERANCE = 10.0
+
 #: replicar's hitbox names and the bindings' `CarConfig` presets (the bindings have no `psyclops`).
 HITBOXES = {
     "octane": "OCTANE",
@@ -41,14 +45,21 @@ def _module():
     return RocketSim
 
 
-def _rot_mat(rs, rotation: np.ndarray):
-    """A unit quaternion (x, y, z, w) as the bindings' rotation matrix, whose rows are forward, right and up (the
-    matrix's columns)."""
+def rotation_matrix(rotation: np.ndarray) -> np.ndarray:
+    """A unit quaternion (x, y, z, w) as the rotation matrix whose columns are the forward, right and up axes."""
     x, y, z, w = (float(v) for v in rotation)
-    forward = (1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y))
-    right = (2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x))
-    up = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
-    return rs.RotMat(*forward, *right, *up)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def _rot_mat(rs, rotation: np.ndarray):
+    """The bindings' rotation matrix, given by its forward, right and up axes."""
+    return rs.RotMat(*rotation_matrix(rotation).T.flatten())
 
 
 def _vec(rs, values: np.ndarray):
@@ -150,7 +161,7 @@ def _pad_order(file, arena) -> list[int]:
         position = pad.get_pos()
         distance = np.hypot(header[:, 0] - position.x, header[:, 1] - position.y)
         nearest = int(np.argmin(distance))
-        if distance[nearest] > 1.0:
+        if distance[nearest] > PAD_TOLERANCE:
             raise ValueError(f"no pad of the file at the arena's pad ({position.x}, {position.y})")
         order.append(nearest)
     return order

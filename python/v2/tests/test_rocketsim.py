@@ -52,3 +52,26 @@ def test_a_row_restores_into_an_arena_and_steps_like_the_file(sample):
     if a["ball_updated"][row + 1] != 1:
         ball = arena.ball.get_state()
         np.testing.assert_allclose([ball.pos.x, ball.pos.y, ball.pos.z], a["ball_position"][row + 1], atol=0.5)
+
+
+def test_a_row_as_an_rlgym_game_state_restores_through_the_engine(sample):
+    pytest.importorskip("rlgym.rocket_league")
+    from rlgym.rocket_league.sim import RocketSimEngine
+
+    import replicar.rlgym
+
+    _, f = sample
+    a = f.arrays()
+    row = int(np.flatnonzero(a["segment"] >= 0)[300])
+    state = replicar.rlgym.game_state(f, row, agent_ids={p["index"]: p["name"] for p in f.players})
+    assert set(state.cars) == {p["name"] for p in f.players if bridge.has_car(f, row, p["index"])}
+    out = RocketSimEngine(rlbot_delay=False).set_state(state, {})
+    np.testing.assert_allclose(out.ball.position, a["ball_position"][row], atol=1e-3)
+    for p in f.players:
+        if p["name"] in out.cars:
+            car = out.cars[p["name"]]
+            np.testing.assert_allclose(car.physics.position, a["car_position"][row, p["index"]], atol=1e-3)
+            np.testing.assert_allclose(car.physics.rotation_mtx, state.cars[p["name"]].physics.rotation_mtx, atol=1e-5)
+    # The engine indexes pads in its arena's order; the timers come back where they were put.
+    np.testing.assert_allclose(out.boost_pad_timers, state.boost_pad_timers, atol=1e-5)
+    assert sorted(state.boost_pad_timers) == pytest.approx(sorted(np.maximum(a["pad_cooldown"][row], 0)), abs=1e-5)

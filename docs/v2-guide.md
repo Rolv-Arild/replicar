@@ -90,7 +90,7 @@ GROUP BY ALL ORDER BY ALL;
 
 ### Continuing in RocketSim
 
-`replicar.rocketsim` puts a row into mtheall's RocketSim bindings (`pip install rocketsim`, the module `RocketSim`
+`replicar.rocketsim` puts a row into mtheall's RocketSim bindings, with everything the row has (`pip install rocketsim`, the module `RocketSim`
 that RLGym steps), to continue the match from any frame:
 
 ```python
@@ -113,6 +113,22 @@ next row does not update and controls that are constant over the interval) the b
 grows with time. Left at the bindings' defaults, because a row does not have them: the ball's heatseeker state, a
 car's flip-reset flags, the car its bump cooldown is for, and the tick of its last extra ball-hit impulse. The
 bindings have no `psyclops` hitbox: `arena(..., hitboxes={"psyclops": "OCTANE"})` accepts a stand-in.
+
+For RLGym 2, `replicar.rlgym.game_state(f, row)` is the row as a `GameState`, for `RocketSimEngine.set_state` or a
+state mutator, so an environment can start from any replay frame:
+
+```python
+import replicar.rlgym
+
+state = replicar.rlgym.game_state(f, row=1200, agent_ids={p["index"]: p["name"] for p in f.players})
+engine.set_state(state, {})       # rlgym.rocket_league.sim.RocketSimEngine
+```
+
+A `GameState` holds less than the row: no controls (the environment's actions supply them), of the previous
+controls only the jump, no air time, world contact or bump cooldown. Neither bridge steps anything: they set states.
+The pad timers follow RLGym's `BOOST_LOCATIONS` (matched to the file's pads by position; RLGym's table has one pad
+2 UU from RocketSim's). Checked on 600 train rows: through `RocketSimEngine.set_state` and back, positions, velocities,
+rotations, boost, flags and pad timers come back as set (within 0.0005).
 
 Any Parquet reader works without the package: `pyarrow.parquet.read_table`, `polars.read_parquet`, DuckDB's
 `read_parquet`; quantized columns then come as integers with their `scale` in the field metadata.
