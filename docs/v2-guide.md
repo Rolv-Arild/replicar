@@ -88,6 +88,32 @@ JOIN players p ON p.index = s.s.player
 GROUP BY ALL ORDER BY ALL;
 ```
 
+### Continuing in RocketSim
+
+`replicar.rocketsim` puts a row into mtheall's RocketSim bindings (`pip install rocketsim`, the module `RocketSim`
+that RLGym steps), to continue the match from any frame:
+
+```python
+import RocketSim, replicar, replicar.rocketsim
+
+RocketSim.init("collision_meshes")
+f = replicar.read("match.parquet")
+arena, cars = replicar.rocketsim.arena(f, row=1200)   # a new soccar arena; cars by player index
+arena.step(8)
+replicar.rocketsim.set_state(arena, cars, f, row=1300)  # reuse it: ball, cars (state and controls), pads
+replicar.rocketsim.car_state(f, 1200, player=0)        # or one RocketSim.CarState, BallState, CarControls
+```
+
+The cars get the players' hitboxes and teams; a player without a car in the row gets none. The bindings are the C++
+RocketSim, replicar simulates with its Rust port: they model the same game but are not the same simulator. Checked with
+`scripts/check_rocketsim_bridge.py` on 12 train and 12 validation files: the state reads back from the arena as the
+file has it (within 0.0005), and one frame ahead (stepping the row's controls to the next row's tick, for bodies the
+next row does not update and controls that are constant over the interval) the ball is within 0.05 UU of the file
+(p99) and a car within 0.15-0.27 UU (p50) and 2.5 UU (p99), against 30-50 UU (p50) for not stepping. The difference
+grows with time. Left at the bindings' defaults, because a row does not have them: the ball's heatseeker state, a
+car's flip-reset flags, the car its bump cooldown is for, and the tick of its last extra ball-hit impulse. The
+bindings have no `psyclops` hitbox: `arena(..., hitboxes={"psyclops": "OCTANE"})` accepts a stand-in.
+
 Any Parquet reader works without the package: `pyarrow.parquet.read_table`, `polars.read_parquet`, DuckDB's
 `read_parquet`; quantized columns then come as integers with their `scale` in the field metadata.
 
