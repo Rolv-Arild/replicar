@@ -107,7 +107,7 @@ pub struct InferenceDiagnostics {
 }
 
 /// Which inferences `FittedInference` makes.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct InferenceOptions {
     /// Solve an airborne car's air controls over the span to its next update (offline).
     pub air_lookahead: bool,

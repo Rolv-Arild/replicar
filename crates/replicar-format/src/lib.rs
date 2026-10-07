@@ -10,12 +10,21 @@ mod game;
 pub mod header;
 mod identity;
 mod read;
+mod read_state;
 pub mod record;
+pub mod resimulation;
 mod time;
 mod write;
 
+/// The Arrow array types, for reading a file's columns.
+pub use arrow_array as arrow;
+pub use arrow_array::RecordBatch;
+pub use columns::{
+    Columns, child_bool, child_f32, child_i32, child_str, child_u8, child_u16, child_u64,
+};
 pub use game::{CarStatus, ClockPhase, Period, SegmentEnd};
 pub use identity::{PlayerIndex, Team};
 pub use read::{ReadError, read};
+pub use read_state::{StateRow, read_states};
 pub use time::{FrameIndex, ReplayTick, SimTick, TICKS_PER_SECOND};
-pub use write::{Group, Precision, QUANTA, WriteError, WriteOptions, write};
+pub use write::{Content, Group, Precision, QUANTA, WriteError, WriteOptions, write, write_table};

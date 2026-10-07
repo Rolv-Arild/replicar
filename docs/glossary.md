@@ -219,7 +219,16 @@ RocketSim versions, the configuration, the groups and precision, the players, th
 **Network group** (`network`). The replay's network feed, decoded: for each frame, every value replicar reads
 (ball and car bodies, controls, boost, action counters, demolition and pad records, scores, clock, ping), in the
 replay's units, forward-filled, each with the frame of its last change. It omits what replicar does not read
-(cosmetics, camera settings, most stats), so it is not a lossless copy of the replay.
+(cosmetics, camera settings, most stats), so it is not a lossless copy of the replay. Its columns start with
+`network_` (they would otherwise share names with the state's) and each value has a `<name>_frame` column with the
+frame of its last change: `network_ball_position_x`, `network_ball_position_frame`, `network_car_0_throttle`,
+`network_player_0_goals`, `network_seconds_remaining` (the integer clock), `network_pad_records`. Per player, the
+values of the player's current car in that frame.
+
+**Diagnostics group** (`diagnostics`). `prediction_errors` (per update that corrected the simulation: the simulated
+minus the updated position, the velocity, rotation and angular velocity errors, and the same for holding or
+linearly extrapolating the previous update, as baselines), `simulated_events` (RocketSim's own events: ball and car
+contacts, pickups, landings) and `simulated_touches`.
 
 **Resimulation group** (`resimulation`). Each update's tick, the times observed controls took effect, presses, air
 controls and the other choices of the fitted inference, per frame. With the replay, this is everything RocketSim
@@ -229,8 +238,9 @@ needs to reproduce the `state` group exactly.
 unit quaternions, within 1e-6 of RocketSim's matrix) or `quantized` (integers: 0.01 UU, 0.01 UU/s, 1e-4 rad/s,
 quaternion components to 1/32767; readers return float32). The header records it.
 
-**Index file** (`index.parquet`). Written by a folder conversion: one row per replay with its file, status or
-error, size, players and score.
+**Index file** (`index.parquet`). Written by a folder conversion: one row per replay with its replay and file
+paths, SHA-256, error (null when converted), rows, `duration_seconds` (the replay time the rows span), map, players
+per team, final score and segments; the groups and precision are in its key-value metadata (`replicar_index`).
 
 **`--all-frames`.** Also write the frames outside play segments (countdowns, goal pauses and replays), with a null
 `segment`. Off by default.

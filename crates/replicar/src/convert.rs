@@ -9,7 +9,8 @@ use replicar_format::record::{
     Ball, BallContact, Body, BoostPickup, Car, CarInternals, Controls, Event, Frame, Future, Game,
     State, Updates,
 };
-use replicar_format::{CarStatus, PlayerIndex, WriteOptions};
+use replicar_format::resimulation::Resimulation;
+use replicar_format::{CarStatus, PlayerIndex, RecordBatch, WriteOptions};
 use rocketsim::{ArenaState, CarControls, CarState, PhysState};
 use sha2::{Digest, Sha256};
 
@@ -18,13 +19,15 @@ use crate::annotate::segments::{segment_frames, segments};
 use crate::annotate::updates::UpdateTracker;
 use crate::annotate::{Annotations, Annotator, ball_intervals};
 use crate::decode::{DemolitionReport, NetworkEvent, NetworkFrame, NetworkReplay};
-use crate::infer::{FittedInference, InferenceOptions};
+use crate::infer::recorded::{RecordedInference, Recorder};
+use crate::infer::{FittedInference, Inference, InferenceOptions};
+use crate::resimulate::{from_group, to_group};
 use crate::simulate::{HoldSource, SimulatedFrame, Simulation, SimulationOptions, simulate};
 use crate::update_ticks::{UpdateTicks, Withheld};
 use crate::{Error, Meshes};
 
 /// How a replay is converted.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub simulation: SimulationOptions,
     pub inference: InferenceOptions,
@@ -45,11 +48,30 @@ impl Default for Config {
     }
 }
 
-/// A converted replay: the header and every frame's row (the writer keeps the rows in play segments).
+/// A converted replay: the header, every frame's row (the writer keeps the rows in play segments), and what
+/// the inference chose (the `resimulation` group).
 #[derive(Debug, Clone)]
 pub struct Conversion {
     pub header: Header,
     pub frames: Vec<Frame>,
+    pub resimulation: Resimulation,
+    /// The `network` and `diagnostics` groups' columns, one row per frame.
+    pub network: RecordBatch,
+    pub diagnostics: RecordBatch,
+}
+
+impl Conversion {
+    /// Writes the conversion to `path` (the file appears only when complete).
+    pub fn write(&self, path: &Path, options: &WriteOptions) -> Result<(), Error> {
+        let content = replicar_format::Content {
+            frames: &self.frames,
+            resimulation: Some(&self.resimulation),
+            network: Some(&self.network),
+            diagnostics: Some(&self.diagnostics),
+        };
+        replicar_format::write(path, &self.header, &content, options)?;
+        Ok(())
+    }
 }
 
 /// Converts replays with one configuration.
@@ -79,13 +101,21 @@ impl<'m> Converter<'m> {
         path: &Path,
         options: &WriteOptions,
     ) -> Result<(), Error> {
-        let conversion = self.convert(bytes)?;
-        replicar_format::write(path, &conversion.header, &conversion.frames, options)?;
-        Ok(())
+        self.convert(bytes)?.write(path, options)
     }
 
     /// Converts a decoded replay (the header's replay hash is left empty).
     pub fn convert_network(&self, network: &NetworkReplay) -> Result<Conversion, Error> {
+        self.convert_network_with(network, |_| {})
+    }
+
+    /// Converts a decoded replay and hands every simulated frame (its full RocketSim state, events and
+    /// provenance) to `on_frame` as it is made.
+    pub fn convert_network_with(
+        &self,
+        network: &NetworkReplay,
+        on_frame: impl FnMut(&SimulatedFrame),
+    ) -> Result<Conversion, Error> {
         let config = &self.config;
         let withheld = Withheld(config.simulation.withheld.as_deref());
         let mut alignment = None;
@@ -105,27 +135,20 @@ impl<'m> Converter<'m> {
             ticks = Some(aligned.0);
             alignment = Some(aligned.1);
         }
-        let mut inference =
-            FittedInference::new(network, ticks.as_ref(), config.inference, withheld);
-        let mut rows = Rows::new(network, ticks.as_ref(), withheld);
-        let simulation = simulate(
+        let mut fitted = FittedInference::new(network, ticks.as_ref(), config.inference, withheld);
+        let mut recorder = Recorder::new(&mut fitted);
+        let mut conversion = run(
             network,
             ticks.as_ref(),
-            &mut inference,
+            &mut recorder,
             self.meshes,
-            config.simulation.clone(),
-            |frame| rows.push(&frame),
+            config,
+            withheld,
+            on_frame,
         )?;
-        let mut frames = rows.frames;
-        fill_pings(network, &simulation, &mut frames);
-        let mut header = header(
-            network,
-            &simulation,
-            rows.last_state.as_ref(),
-            &rows.segments,
-        );
-        header.configuration = serde_json::to_value(config).unwrap_or_default();
-        header.diagnostics = serde_json::json!({
+        let recording = recorder.into_recording();
+        conversion.resimulation = to_group(ticks.as_ref(), &recording);
+        conversion.header.diagnostics = serde_json::json!({
             "decode": network.diagnostics,
             "update_ticks": ticks.as_ref().map(|t| serde_json::json!({
                 "lag_free": t.lag_free,
@@ -133,11 +156,133 @@ impl<'m> Converter<'m> {
                 "bridged_hits": t.bridged_hits,
             })),
             "contact_alignment": alignment,
-            "simulation": simulation.diagnostics,
-            "inference": inference.diagnostics,
+            "simulation": conversion.header.diagnostics["simulation"].take(),
+            "inference": fitted.diagnostics,
         });
-        Ok(Conversion { header, frames })
+        Ok(conversion)
     }
+
+    /// Simulates the replay again from a file's `resimulation` group, without fitting (docs/glossary.md,
+    /// "Resimulate"): the same rows as the conversion that wrote the file. Refuses a file of another replay,
+    /// configuration or RocketSim version, and a run whose states differ from the file's checksum. The
+    /// configuration is the file's, not this converter's.
+    pub fn resimulate(&self, bytes: &[u8], file: &Path) -> Result<Conversion, Error> {
+        let (header, batch) = replicar_format::read(
+            file,
+            Some(&[
+                "resim_update_ticks",
+                "resim_car_update_ticks",
+                "resim_choices",
+            ]),
+        )?;
+        let refuse = |why: String| Err(Error::Resimulation(why));
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        if header.replay_sha256 != sha256 {
+            return refuse(format!(
+                "the file is of replay {}, not {sha256}",
+                header.replay_sha256
+            ));
+        }
+        if header.rocketsim_version != crate::ROCKETSIM_VERSION {
+            return refuse(format!(
+                "the file was simulated with RocketSim {}, this build has {}",
+                header.rocketsim_version,
+                crate::ROCKETSIM_VERSION
+            ));
+        }
+        let config: Config = serde_json::from_value(header.configuration.clone())
+            .map_err(|e| Error::Resimulation(format!("the file's configuration: {e}")))?;
+        let group = replicar_format::resimulation::read(&batch)?;
+        let network = crate::decode::decode(&crate::parse(bytes)?)?;
+        let (ticks, recording) = from_group(&group, network.frames.len(), config.update_ticks)?;
+        let mut recorded = RecordedInference::new(&recording);
+        let withheld = Withheld(config.simulation.withheld.as_deref());
+        let mut conversion = run(
+            &network,
+            ticks.as_ref(),
+            &mut recorded,
+            self.meshes,
+            &config,
+            withheld,
+            |_| {},
+        )?;
+        if conversion.header.state_sha256 != header.state_sha256 {
+            return refuse(
+                "the resimulated states differ from the file's: another build or platform"
+                    .to_owned(),
+            );
+        }
+        conversion.header.replay_sha256 = sha256;
+        conversion.header.diagnostics = header.diagnostics;
+        conversion.resimulation = group;
+        Ok(conversion)
+    }
+}
+
+/// Simulates and annotates the replay with `inference`, and builds the rows and the header (its diagnostics
+/// hold only the simulation's).
+fn run(
+    network: &NetworkReplay,
+    ticks: Option<&UpdateTicks>,
+    inference: &mut dyn Inference,
+    meshes: &Meshes,
+    config: &Config,
+    withheld: Withheld,
+    mut on_frame: impl FnMut(&SimulatedFrame),
+) -> Result<Conversion, Error> {
+    let mut rows = Rows::new(network, ticks, withheld);
+    let simulation = simulate(
+        network,
+        ticks,
+        inference,
+        meshes,
+        config.simulation.clone(),
+        |frame| {
+            on_frame(&frame);
+            rows.push(&frame);
+        },
+    )?;
+    let mut frames = rows.frames;
+    fill_pings(network, &simulation, &mut frames);
+    let mut header = header(
+        network,
+        &simulation,
+        rows.last_state.as_ref(),
+        &rows.segments,
+    );
+    header.configuration = serde_json::to_value(config).unwrap_or_default();
+    header.state_sha256 = state_sha256(&frames);
+    header.diagnostics = serde_json::json!({ "simulation": simulation.diagnostics });
+    Ok(Conversion {
+        header,
+        frames,
+        resimulation: Resimulation::default(),
+        network: crate::network_columns::network_columns(network, &simulation.players)?,
+        diagnostics: crate::diagnostics_columns::diagnostics_columns(&rows.diagnostics)?,
+    })
+}
+
+/// The SHA-256 of every frame's ball and car bodies, bit for bit: what a resimulation must reproduce.
+fn state_sha256(frames: &[Frame]) -> String {
+    let mut hash = Sha256::new();
+    let mut body = |b: &Body| {
+        for v in b
+            .position
+            .iter()
+            .chain(&b.velocity)
+            .chain(&b.angular_velocity)
+            .chain(&b.rotation)
+        {
+            hash.update(v.to_bits().to_le_bytes());
+        }
+    };
+    for frame in frames {
+        body(&frame.state.ball.body);
+        for car in frame.state.cars.iter().flatten() {
+            body(&car.body);
+        }
+    }
+    format!("{:x}", hash.finalize())
 }
 
 /// The per-frame annotation state and the rows built so far.
@@ -150,6 +295,7 @@ struct Rows<'a> {
     segments: Vec<crate::annotate::segments::Segment>,
     segment_frames: Vec<Option<crate::annotate::segments::SegmentFrame>>,
     frames: Vec<Frame>,
+    diagnostics: Vec<crate::diagnostics_columns::DiagnosticsRow>,
     last_state: Option<ArenaState>,
 }
 
@@ -170,6 +316,7 @@ impl<'a> Rows<'a> {
             updates: UpdateTracker::default(),
             segments,
             frames: Vec::with_capacity(network.frames.len()),
+            diagnostics: Vec::with_capacity(network.frames.len()),
             last_state: None,
         }
     }
@@ -178,6 +325,16 @@ impl<'a> Rows<'a> {
         let f = simulated.index.get();
         let network_frame = &self.network.frames[f];
         let annotations = self.annotator.annotate(simulated);
+        self.diagnostics
+            .push(crate::diagnostics_columns::DiagnosticsRow {
+                errors: crate::diagnostics_columns::frame_errors(
+                    &self.network.frames,
+                    f,
+                    &simulated.predictions,
+                ),
+                events: simulated.events.clone(),
+                touches: annotations.simulated_touches.clone(),
+            });
         let scoreboard = self.decider.apply(self.scoreboard[f], &simulated.events);
         let updates = self
             .updates
@@ -482,6 +639,7 @@ fn header(
                 .each_ref()
                 .map(|s| s.as_ref().map(|v| v.value))
         }),
+        state_sha256: String::new(),
         configuration: serde_json::Value::Null,
         diagnostics: serde_json::Value::Null,
     }

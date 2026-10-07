@@ -44,10 +44,14 @@ pub enum Choice {
     ControlShift(i64),
 }
 
-/// The answers of one run.
+/// What identifies an answer: the car life, the question, and how many times it was asked before about
+/// that car life.
+pub type Key = (CarLife, Question, u32);
+
+/// The answers of one run, with the replay frame each was given in.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Recording {
-    pub choices: BTreeMap<(CarLife, Question, u32), Choice>,
+    pub choices: BTreeMap<Key, (u32, Choice)>,
     /// How many questions were asked, by question.
     pub asked: BTreeMap<Question, usize>,
 }
@@ -58,7 +62,7 @@ struct Counter(RefCell<HashMap<(CarLife, Question), u32>>);
 
 impl Counter {
     /// The key of the next question `question` about `life`.
-    fn next(&self, life: CarLife, question: Question) -> (CarLife, Question, u32) {
+    fn next(&self, life: CarLife, question: Question) -> Key {
         let mut counts = self.0.borrow_mut();
         let count = counts.entry((life, question)).or_default();
         let key = (life, question, *count);
@@ -71,6 +75,8 @@ impl Counter {
 pub struct Recorder<'i> {
     inner: &'i mut dyn Inference,
     counter: Counter,
+    /// The frame of the latest question that names one (`control_shift` does not).
+    frame: std::cell::Cell<u32>,
     recording: RefCell<Recording>,
 }
 
@@ -79,6 +85,7 @@ impl<'i> Recorder<'i> {
         Self {
             inner,
             counter: Counter::default(),
+            frame: std::cell::Cell::new(0),
             recording: RefCell::new(Recording::default()),
         }
     }
@@ -88,19 +95,24 @@ impl<'i> Recorder<'i> {
         self.recording.into_inner()
     }
 
-    /// Records the answer to the next question `question` about `life`; `None` is not kept.
+    /// Records the answer to the next question `question` about `life`, asked in frame `frame` (`None`: the
+    /// latest frame named); `None` is not kept.
     fn record<T>(
         &self,
         life: CarLife,
         question: Question,
+        frame: Option<usize>,
         answer: T,
         choice: impl FnOnce(&T) -> Option<Choice>,
     ) -> T {
+        if let Some(frame) = frame {
+            self.frame.set(u32::try_from(frame).unwrap_or(u32::MAX));
+        }
         let key = self.counter.next(life, question);
         let mut recording = self.recording.borrow_mut();
         *recording.asked.entry(question).or_default() += 1;
         if let Some(choice) = choice(&answer) {
-            recording.choices.insert(key, choice);
+            recording.choices.insert(key, (self.frame.get(), choice));
         }
         answer
     }
@@ -114,23 +126,31 @@ impl Inference for Recorder<'_> {
         controls: &CarControls,
     ) -> Option<AirControls> {
         let answer = self.inner.air_controls(index, car, controls);
-        self.record(car.life, Question::AirControls, answer, |a| {
+        self.record(car.life, Question::AirControls, Some(index), answer, |a| {
             a.map(Choice::AirControls)
         })
     }
 
     fn flip_pitch(&mut self, query: &FitQuery, airborne: bool, pressing: bool) -> Option<f32> {
         let answer = self.inner.flip_pitch(query, airborne, pressing);
-        self.record(query.car.life, Question::FlipPitch, answer, |a| {
-            a.map(Choice::FlipPitch)
-        })
+        self.record(
+            query.car.life,
+            Question::FlipPitch,
+            Some(query.index),
+            answer,
+            |a| a.map(Choice::FlipPitch),
+        )
     }
 
     fn dodge_start(&mut self, query: &FitQuery) -> Option<DodgePlan> {
         let answer = self.inner.dodge_start(query);
-        self.record(query.car.life, Question::DodgeStart, answer, |a| {
-            a.map(Choice::DodgeStart)
-        })
+        self.record(
+            query.car.life,
+            Question::DodgeStart,
+            Some(query.index),
+            answer,
+            |a| a.map(Choice::DodgeStart),
+        )
     }
 
     fn air_schedule(
@@ -139,36 +159,46 @@ impl Inference for Recorder<'_> {
         press: Option<PressInFlight>,
     ) -> Option<(AirSchedule, i32)> {
         let answer = self.inner.air_schedule(query, press);
-        self.record(query.car.life, Question::AirSchedule, answer, |a| {
-            a.clone()
-                .map(|(schedule, shift)| Choice::AirSchedule(schedule, shift))
-        })
+        self.record(
+            query.car.life,
+            Question::AirSchedule,
+            Some(query.index),
+            answer,
+            |a| {
+                a.clone()
+                    .map(|(schedule, shift)| Choice::AirSchedule(schedule, shift))
+            },
+        )
     }
 
     fn ground_schedule(&mut self, query: &FitQuery, dodge_pending: bool) -> Option<GroundChoice> {
         let answer = self.inner.ground_schedule(query, dodge_pending);
-        self.record(query.car.life, Question::GroundSchedule, answer, |a| {
-            a.clone().map(Choice::GroundSchedule)
-        })
+        self.record(
+            query.car.life,
+            Question::GroundSchedule,
+            Some(query.index),
+            answer,
+            |a| a.clone().map(Choice::GroundSchedule),
+        )
     }
 
     fn ticks_override(&self, life: CarLife, index: usize) -> Option<u64> {
         let answer = self.inner.ticks_override(life, index);
-        self.record(life, Question::TicksOverride, answer, |a| {
+        self.record(life, Question::TicksOverride, Some(index), answer, |a| {
             a.map(Choice::TicksOverride)
         })
     }
 
     fn dodge_handled(&self, life: CarLife, index: usize) -> bool {
         let answer = self.inner.dodge_handled(life, index);
-        self.record(life, Question::DodgeHandled, answer, |a| {
+        self.record(life, Question::DodgeHandled, Some(index), answer, |a| {
             a.then_some(Choice::DodgeHandled)
         })
     }
 
     fn control_shift(&self, life: CarLife) -> Option<i64> {
         let answer = self.inner.control_shift(life);
-        self.record(life, Question::ControlShift, answer, |a| {
+        self.record(life, Question::ControlShift, None, answer, |a| {
             a.map(Choice::ControlShift)
         })
     }
@@ -193,6 +223,7 @@ impl<'r> RecordedInference<'r> {
         self.recording
             .choices
             .get(&self.counter.next(life, question))
+            .map(|(_, choice)| choice)
     }
 }
 

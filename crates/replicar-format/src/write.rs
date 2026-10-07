@@ -18,6 +18,7 @@ use parquet::schema::types::ColumnPath;
 use crate::columns::{Columns, child_bool, child_f32, child_str, child_u8, child_u16, child_u64};
 use crate::header::{HEADER_KEY, Header};
 use crate::record::{Body, Car, CarInternals, Controls, Event, Frame};
+use crate::resimulation::Resimulation;
 
 /// A column group (docs/glossary.md, "Column group"); the frame columns are always written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,11 +27,27 @@ pub enum Group {
     Game,
     Updates,
     Future,
+    /// Opt-in: what the fitted inference chose, to resimulate without fitting.
+    Resimulation,
+    /// Opt-in: the replay's network feed as replicar decodes it.
+    Network,
+    /// Opt-in: what the reconstruction measured about itself.
+    Diagnostics,
 }
 
 impl Group {
     /// The groups written by default.
     pub const DEFAULT: [Self; 4] = [Self::State, Self::Game, Self::Updates, Self::Future];
+    /// Every group.
+    pub const ALL: [Self; 7] = [
+        Self::State,
+        Self::Game,
+        Self::Updates,
+        Self::Future,
+        Self::Resimulation,
+        Self::Network,
+        Self::Diagnostics,
+    ];
 
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -39,12 +56,15 @@ impl Group {
             Self::Game => "game",
             Self::Updates => "updates",
             Self::Future => "future",
+            Self::Resimulation => "resimulation",
+            Self::Network => "network",
+            Self::Diagnostics => "diagnostics",
         }
     }
 
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::DEFAULT.into_iter().find(|g| g.name() == name)
+        Self::ALL.into_iter().find(|g| g.name() == name)
     }
 }
 
@@ -112,19 +132,39 @@ pub enum WriteError {
     Arrow(#[from] arrow_schema::ArrowError),
     #[error("header: {0}")]
     Header(#[from] serde_json::Error),
+    #[error("the {0} group was asked for, but the conversion did not make it")]
+    Missing(&'static str),
 }
 
 /// Writes `frames` to `path` with `header` (its group list and frame setting are taken from `options`).
 /// The file appears only when complete.
+/// What a conversion has for a file: every frame's row, and the opt-in groups.
+#[derive(Debug, Clone, Copy)]
+pub struct Content<'a> {
+    pub frames: &'a [Frame],
+    pub resimulation: Option<&'a Resimulation>,
+    /// The `network` and `diagnostics` columns, one row per frame of `frames` (built with `Columns`).
+    pub network: Option<&'a RecordBatch>,
+    pub diagnostics: Option<&'a RecordBatch>,
+}
+
+/// Writes `content` to `path` with `header` (its group list, precision and frame setting are taken from
+/// `options`). The file appears only when complete.
 pub fn write(
     path: &Path,
     header: &Header,
-    frames: &[Frame],
+    content: &Content,
     options: &WriteOptions,
 ) -> Result<(), WriteError> {
+    let frames = content.frames;
+    let written: Vec<bool> = frames
+        .iter()
+        .map(|f| options.all_frames || f.segment.is_some())
+        .collect();
     let rows: Vec<&Frame> = frames
         .iter()
-        .filter(|f| options.all_frames || f.segment.is_some())
+        .zip(&written)
+        .filter_map(|(f, &w)| w.then_some(f))
         .collect();
     let players = header.players.len();
     let pads = header.pads.len();
@@ -136,6 +176,29 @@ pub fn write(
             Group::Game => game_columns(&mut columns, &rows),
             Group::Updates => update_columns(&mut columns, &rows, players),
             Group::Future => future_columns(&mut columns, &rows),
+            Group::Network | Group::Diagnostics => {
+                let batch = if *group == Group::Network {
+                    content.network
+                } else {
+                    content.diagnostics
+                };
+                let batch = batch.ok_or(WriteError::Missing(group.name()))?;
+                let rows = arrow_select::filter::filter_record_batch(
+                    batch,
+                    &arrow_array::BooleanArray::from(written.clone()),
+                )?;
+                columns
+                    .fields
+                    .extend(rows.schema().fields().iter().map(|f| (**f).clone()));
+                columns.arrays.extend(rows.columns().iter().cloned());
+            }
+            Group::Resimulation => {
+                let group = content
+                    .resimulation
+                    .ok_or(WriteError::Missing("resimulation"))?;
+                let frames: Vec<u32> = rows.iter().map(|r| r.frame.0).collect();
+                crate::resimulation::columns(&mut columns, &frames, group);
+            }
         }
     }
     let mut header = header.clone();
@@ -148,20 +211,8 @@ pub fn write(
             options.compression_level,
         )?))
         .set_max_row_group_row_count(Some(1 << 20));
-    // Floats split into byte streams compress about twice as well (RESULTS.md, "Output size and conversion
-    // cost"); dictionaries help only the name columns.
     for field in schema.fields() {
-        let column = ColumnPath::from(field.name().as_str());
-        // Quantized bodies change little from frame to frame: their deltas pack 12-23% better than plain
-        // integers (RESULTS.md, "v2 encodings").
-        let encoding = match field.data_type() {
-            DataType::Float32 => Some(Encoding::BYTE_STREAM_SPLIT),
-            DataType::Int16 | DataType::Int32 if field.metadata().contains_key("scale") => {
-                Some(Encoding::DELTA_BINARY_PACKED)
-            }
-            _ => None,
-        };
-        if let Some(encoding) = encoding {
+        for (column, encoding) in leaf_encodings(Vec::new(), field) {
             properties = properties
                 .set_column_dictionary_enabled(column.clone(), false)
                 .set_column_encoding(column, encoding);
@@ -185,6 +236,72 @@ pub fn write(
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// Writes a plain table (one row group, zstd, float columns byte-split) to `path`, with `metadata` as key-value
+/// pairs; the file appears only when complete. For files beside the replicar files, such as a corpus index.
+pub fn write_table(
+    path: &Path,
+    batch: &RecordBatch,
+    metadata: &[(&str, String)],
+) -> Result<(), WriteError> {
+    let mut properties =
+        WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::try_new(9)?));
+    for field in batch.schema().fields() {
+        for (column, encoding) in leaf_encodings(Vec::new(), field) {
+            properties = properties
+                .set_column_dictionary_enabled(column.clone(), false)
+                .set_column_encoding(column, encoding);
+        }
+    }
+    let temporary = temporary_path(path);
+    let result = (|| -> Result<(), WriteError> {
+        let mut writer = ArrowWriter::try_new(
+            File::create(&temporary)?,
+            batch.schema(),
+            Some(properties.build()),
+        )?;
+        writer.write(batch)?;
+        for (key, value) in metadata {
+            writer.append_key_value_metadata(KeyValue::new((*key).to_owned(), value.clone()));
+        }
+        writer.close()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The encoding of every leaf column under `field` that is not the writer's default: floats split into byte
+/// streams compress about twice as well (RESULTS.md, "Output size and conversion cost"); quantized bodies change
+/// little from frame to frame, so their deltas pack 12-23% better than plain integers (RESULTS.md, "v2
+/// encodings"), and so do the frames, ticks and ordinals of the record lists, which mostly increase.
+fn leaf_encodings(
+    mut path: Vec<String>,
+    field: &arrow_schema::Field,
+) -> Vec<(ColumnPath, Encoding)> {
+    path.push(field.name().clone());
+    match field.data_type() {
+        DataType::List(item) => {
+            path.push("list".to_owned());
+            leaf_encodings(path, item)
+        }
+        DataType::Struct(children) => children
+            .iter()
+            .flat_map(|child| leaf_encodings(path.clone(), child))
+            .collect(),
+        DataType::Float32 => vec![(ColumnPath::new(path), Encoding::BYTE_STREAM_SPLIT)],
+        DataType::Int16 | DataType::Int32 if field.metadata().contains_key("scale") => {
+            vec![(ColumnPath::new(path), Encoding::DELTA_BINARY_PACKED)]
+        }
+        DataType::UInt32 | DataType::UInt64 | DataType::Int64 if path.len() > 1 => {
+            vec![(ColumnPath::new(path), Encoding::DELTA_BINARY_PACKED)]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// `x.parquet` becomes `x.parquet.partial`, in the same directory so that the rename is atomic.
@@ -725,6 +842,7 @@ mod tests {
             }],
             segments: Vec::new(),
             final_scores: [Some(1), Some(0)],
+            state_sha256: String::new(),
             configuration: serde_json::Value::Null,
             diagnostics: serde_json::Value::Null,
         }
@@ -771,6 +889,15 @@ mod tests {
         }
     }
 
+    fn content(frames: &[Frame]) -> Content<'_> {
+        Content {
+            frames,
+            resimulation: None,
+            network: None,
+            diagnostics: None,
+        }
+    }
+
     fn read(path: &Path) -> (RecordBatch, Header) {
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
         let header = builder
@@ -795,7 +922,13 @@ mod tests {
             frame(1, Some(0), false),
             frame(2, Some(0), false),
         ];
-        write(&path, &header(), &frames, &WriteOptions::default()).unwrap();
+        write(
+            &path,
+            &header(),
+            &content(&frames),
+            &WriteOptions::default(),
+        )
+        .unwrap();
         assert!(!directory.join("x.parquet.partial").exists());
         let (batch, header) = read(&path);
         // The frame outside play is left out; the header lists the groups written.
@@ -828,7 +961,7 @@ mod tests {
             all_frames: true,
             ..WriteOptions::default()
         };
-        write(&path, &header, &frames, &options).unwrap();
+        write(&path, &header, &content(&frames), &options).unwrap();
         let (batch, header) = read(&path);
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(header.groups, ["game"]);
@@ -851,7 +984,7 @@ mod tests {
             precision: Precision::Quantized,
             ..WriteOptions::default()
         };
-        write(&path, &header(), &[row], &options).unwrap();
+        write(&path, &header(), &content(&[row]), &options).unwrap();
         let (batch, header) = read(&path);
         assert_eq!(header.precision, "quantized");
         let schema = batch.schema();

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/replicar-format", "crates/replicar", "crates/replicar-eval"]
+members = [".", "crates/replicar-format", "crates/replicar", "crates/replicar-cli", "crates/replicar-eval"]
 # Archived baselines under target/, reference projects under external/ and the measurement crates under scripts/
 # build on their own.
 exclude = ["target", "external", "scripts"]
@@ -14,12 +14,13 @@ license = "MIT"
 arrow-array = "=60.0.0"
 arrow-buffer = "=60.0.0"
 arrow-schema = "=60.0.0"
+arrow-select = "=60.0.0"
 boxcars = "=0.12.0"
 glam = "=0.33.11"
 parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd"] }
 rocketsim = "=0.2.7"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 thiserror = "2"
 

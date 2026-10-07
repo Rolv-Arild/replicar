@@ -28,7 +28,7 @@ use players::Players;
 const MAX_GAP_TICKS: u64 = 1200;
 
 /// How the simulation runs.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SimulationOptions {
     /// RocketSim's random seed.
     pub seed: u64,
@@ -143,6 +143,16 @@ pub struct PickupMatch {
     pub player: Option<PlayerIndex>,
 }
 
+/// The simulated state of a body just before an update corrected it: what the simulation predicted.
+#[derive(Debug, Clone, Copy)]
+pub struct Prediction {
+    /// The car whose update it was; `None` for the ball.
+    pub car: Option<ActorId>,
+    pub phys: rocketsim::PhysState,
+    /// Whether the simulated car was on the ground.
+    pub is_on_ground: Option<bool>,
+}
+
 /// The simulation at one replay frame.
 #[derive(Debug, Clone)]
 pub struct SimulatedFrame {
@@ -176,6 +186,9 @@ pub struct SimulatedFrame {
     pub lives: Vec<(PlayerIndex, FrameIndex)>,
     /// The new pickups the replay reports in this frame.
     pub pickups: Vec<PickupMatch>,
+    /// The simulated state of each body an update corrected in this frame, just before the correction (the
+    /// ball once initialized; a car of a continuing life that is not demolished; simulated frames only).
+    pub predictions: Vec<Prediction>,
 }
 
 /// What the simulation counted.
@@ -234,6 +247,7 @@ struct FrameContext {
     wrecks_inferred: Vec<ActorId>,
     /// Inputs chosen at this frame's updates, with their sim tick.
     fitted: Vec<(PlayerIndex, u64, FittedKind)>,
+    predictions: Vec<Prediction>,
 }
 
 /// The ticks of one frame's interval and the control switches due in it.
@@ -368,6 +382,7 @@ impl<'a> Simulator<'a, '_> {
             sleeping_velocity_zeroed: Vec::new(),
             wrecks_inferred: Vec::new(),
             fitted: Vec::new(),
+            predictions: Vec::new(),
         };
         let ball_ticks = self.ball_ticks(f, simulated, gap);
         let applied_ticks = self.applied_ticks(frame, &frame_cars, simulated, gap);
@@ -711,6 +726,13 @@ impl<'a> Simulator<'a, '_> {
 
     fn update_ball(&mut self, ctx: &mut FrameContext, body: &crate::decode::NetworkBody) {
         let mut ball = *self.arena.get_ball_state();
+        if ctx.simulated && self.ball_initialized {
+            ctx.predictions.push(Prediction {
+                car: None,
+                phys: ball.phys,
+                is_on_ground: None,
+            });
+        }
         let mut applied =
             updates::apply_update(&mut ball.phys, body, ctx.index, !self.ball_initialized);
         if let Some(changed) = updates::zero_sleeping_velocity(&mut ball.phys, body, ctx.index) {
@@ -822,6 +844,7 @@ impl<'a> Simulator<'a, '_> {
             fitted,
             lives,
             pickups,
+            predictions: ctx.predictions,
         }
     }
 }

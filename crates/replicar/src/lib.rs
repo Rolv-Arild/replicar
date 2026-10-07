@@ -10,10 +10,14 @@ pub mod align;
 pub mod annotate;
 mod convert;
 pub mod decode;
+mod diagnostics_columns;
 mod error;
 pub mod hitbox;
 pub mod infer;
 mod meshes;
+mod network_columns;
+mod resimulate;
+pub mod restore;
 pub mod simulate;
 #[cfg(test)]
 mod testkit;

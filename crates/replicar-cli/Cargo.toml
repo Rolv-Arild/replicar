@@ -1,0 +1,22 @@
+[package]
+name = "replicar-cli"
+version = "2.0.0-dev"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The replicar command: Rocket League replays to RocketSim states in one Parquet file per replay"
+publish = false
+
+[[bin]]
+name = "replicar"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+replicar = { path = "../replicar" }
+replicar-format = { path = "../replicar-format" }
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

@@ -62,6 +62,17 @@ impl Simulator<'_, '_> {
         }
         ctx.selected.insert(player);
         let slot = player.get();
+        if ctx.simulated && !new_life {
+            // A demolished car is not simulated: comparing it with an update means nothing.
+            let simulated = self.arena.get_car_state(slot);
+            if !simulated.is_demoed {
+                ctx.predictions.push(super::Prediction {
+                    car: Some(car.life.actor),
+                    phys: simulated.phys,
+                    is_on_ground: Some(simulated.is_on_ground),
+                });
+            }
+        }
         let mut state = if new_life {
             CarState::default()
         } else {

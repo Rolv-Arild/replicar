@@ -1,6 +1,6 @@
 //! Converts replays to replicar files with the default configuration, for checking the format (story 7.1).
 //!
-//! usage: `write_file <out dir> <replay or folder>... [--all-frames] [--quantized] [--final-assessment]`
+//! usage: `write_file <out dir> <replay or folder>... [--all-frames] [--quantized] [--resimulation] [--network] [--diagnostics] [--final-assessment]`
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +13,20 @@ fn main() -> ExitCode {
     let final_assessment = args.iter().any(|a| a == "--final-assessment");
     let all_frames = args.iter().any(|a| a == "--all-frames");
     let quantized = args.iter().any(|a| a == "--quantized");
-    args.retain(|a| a != "--final-assessment" && a != "--all-frames" && a != "--quantized");
+    let resimulation = args.iter().any(|a| a == "--resimulation");
+    let network = args.iter().any(|a| a == "--network");
+    let diagnostics = args.iter().any(|a| a == "--diagnostics");
+    args.retain(|a| {
+        !matches!(
+            a.as_str(),
+            "--final-assessment"
+                | "--all-frames"
+                | "--quantized"
+                | "--resimulation"
+                | "--network"
+                | "--diagnostics"
+        )
+    });
     let Some((out, inputs)) = args.split_first() else {
         eprintln!("usage: write_file <out dir> <replay or folder>... [--all-frames]");
         return ExitCode::FAILURE;
@@ -34,7 +47,7 @@ fn main() -> ExitCode {
         }
     };
     let converter = replicar::Converter::new(&meshes, replicar::Config::default());
-    let options = replicar_format::WriteOptions {
+    let mut options = replicar_format::WriteOptions {
         all_frames,
         precision: if quantized {
             replicar_format::Precision::Quantized
@@ -43,6 +56,15 @@ fn main() -> ExitCode {
         },
         ..Default::default()
     };
+    if resimulation {
+        options.groups.insert(replicar_format::Group::Resimulation);
+    }
+    if network {
+        options.groups.insert(replicar_format::Group::Network);
+    }
+    if diagnostics {
+        options.groups.insert(replicar_format::Group::Diagnostics);
+    }
     let mut failed = 0;
     for path in &replays {
         let target = PathBuf::from(out).join(

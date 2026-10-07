@@ -57,6 +57,10 @@ pub struct Header {
     /// The final scores as the replay's last frame shows them (blue, orange): the match result, which never
     /// reaches a frame.
     pub final_scores: [Option<i32>; 2],
+    /// The SHA-256 of every frame's ball and car bodies (position, velocity, angular velocity, rotation as
+    /// float32 bits, frame by frame, players in order): a resimulation must reproduce it. Empty when unknown.
+    #[serde(default)]
+    pub state_sha256: String,
     /// The conversion's configuration and what it counted, as the converter reports them.
     pub configuration: serde_json::Value,
     pub diagnostics: serde_json::Value,

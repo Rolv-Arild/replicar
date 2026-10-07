@@ -14,9 +14,9 @@ use arrow_array::{
 use arrow_buffer::OffsetBuffer;
 use arrow_schema::{DataType, Field, Fields};
 
-/// The columns of a file, in order.
+/// Builds the columns of a file, in order: each nullable, with its group and unit in the field metadata.
 #[derive(Default)]
-pub(crate) struct Columns {
+pub struct Columns {
     pub(crate) fields: Vec<Field>,
     pub(crate) arrays: Vec<ArrayRef>,
 }
@@ -37,7 +37,7 @@ impl Columns {
         self.arrays.push(array);
     }
 
-    pub(crate) fn f32(
+    pub fn f32(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -50,7 +50,7 @@ impl Columns {
 
     /// A float column stored as integers of `scale` (the value is the integer times `scale`, which the field
     /// metadata records): 16-bit when `narrow`, else 32-bit. A value out of range or not finite is null.
-    pub(crate) fn quantized(
+    pub fn quantized(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -80,7 +80,7 @@ impl Columns {
         self.arrays.push(array);
     }
 
-    pub(crate) fn bool(
+    pub fn bool(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -90,7 +90,7 @@ impl Columns {
         self.push(name.into(), group, None, Arc::new(array));
     }
 
-    pub(crate) fn u8(
+    pub fn u8(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -101,7 +101,7 @@ impl Columns {
         self.push(name.into(), group, unit, Arc::new(array));
     }
 
-    pub(crate) fn u32(
+    pub fn u32(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -112,7 +112,7 @@ impl Columns {
         self.push(name.into(), group, unit, Arc::new(array));
     }
 
-    pub(crate) fn u64(
+    pub fn u64(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -123,7 +123,7 @@ impl Columns {
         self.push(name.into(), group, unit, Arc::new(array));
     }
 
-    pub(crate) fn i32(
+    pub fn i32(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -133,8 +133,27 @@ impl Columns {
         self.push(name.into(), group, None, Arc::new(array));
     }
 
+    /// A string column.
+    pub fn strings(
+        &mut self,
+        name: impl Into<String>,
+        group: &str,
+        values: impl IntoIterator<Item = Option<String>>,
+    ) {
+        let array = arrow_array::StringArray::from_iter(values);
+        self.push(name.into(), group, None, Arc::new(array));
+    }
+
+    /// The columns as one batch.
+    pub fn finish(self) -> Result<arrow_array::RecordBatch, arrow_schema::ArrowError> {
+        arrow_array::RecordBatch::try_new(
+            Arc::new(arrow_schema::Schema::new(self.fields)),
+            self.arrays,
+        )
+    }
+
     /// A dictionary-encoded string column: the strings, not the keys, are the contract.
-    pub(crate) fn names(
+    pub fn names(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -155,7 +174,7 @@ impl Columns {
     }
 
     /// A column of lists of records: `lengths` records per row, the records' fields as `children`.
-    pub(crate) fn records(
+    pub fn records(
         &mut self,
         name: impl Into<String>,
         group: &str,
@@ -181,42 +200,49 @@ impl Columns {
 }
 
 /// One field of a record column, built from every record of every row in order.
-pub(crate) fn child_f32(name: &str, values: Vec<Option<f32>>) -> (Field, ArrayRef) {
+pub fn child_f32(name: &str, values: Vec<Option<f32>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::Float32, true),
         Arc::new(Float32Array::from(values)),
     )
 }
 
-pub(crate) fn child_bool(name: &str, values: Vec<Option<bool>>) -> (Field, ArrayRef) {
+pub fn child_bool(name: &str, values: Vec<Option<bool>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::Boolean, true),
         Arc::new(BooleanArray::from(values)),
     )
 }
 
-pub(crate) fn child_u8(name: &str, values: Vec<Option<u8>>) -> (Field, ArrayRef) {
+pub fn child_u8(name: &str, values: Vec<Option<u8>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::UInt8, true),
         Arc::new(UInt8Array::from(values)),
     )
 }
 
-pub(crate) fn child_u16(name: &str, values: Vec<Option<u16>>) -> (Field, ArrayRef) {
+pub fn child_u16(name: &str, values: Vec<Option<u16>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::UInt16, true),
         Arc::new(UInt16Array::from(values)),
     )
 }
 
-pub(crate) fn child_u64(name: &str, values: Vec<Option<u64>>) -> (Field, ArrayRef) {
+pub fn child_i32(name: &str, values: Vec<Option<i32>>) -> (Field, ArrayRef) {
+    (
+        Field::new(name, DataType::Int32, true),
+        Arc::new(Int32Array::from(values)),
+    )
+}
+
+pub fn child_u64(name: &str, values: Vec<Option<u64>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::UInt64, true),
         Arc::new(UInt64Array::from(values)),
     )
 }
 
-pub(crate) fn child_str(name: &str, values: Vec<Option<&'static str>>) -> (Field, ArrayRef) {
+pub fn child_str(name: &str, values: Vec<Option<&'static str>>) -> (Field, ArrayRef) {
     (
         Field::new(name, DataType::Utf8, true),
         Arc::new(arrow_array::StringArray::from(values)),

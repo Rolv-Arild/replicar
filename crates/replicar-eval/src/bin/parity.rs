@@ -409,7 +409,7 @@ fn recorded(bytes: &[u8]) -> Result<Option<String>, Box<dyn Error>> {
     // The recording's volume: answers by kind, and the entries of the schedules.
     let mut kinds: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut entries = 0usize;
-    for choice in recording.choices.values() {
+    for (_, choice) in recording.choices.values() {
         let kind = format!("{choice:?}");
         let kind = kind.split('(').next().unwrap_or_default().to_owned();
         *kinds.entry(kind).or_default() += 1;
