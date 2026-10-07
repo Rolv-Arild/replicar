@@ -18,6 +18,7 @@ version 1's on the 120 development replays (RESULTS.md, the "v2:" sections).
   RocketSim states restored from a file; folder conversion in parallel with an index; a Python reader with NumPy
   arrays and a native extra to convert.
 - RocketSim from crates.io (`0.2.7`), measured neutral against `9910c58`.
+- The one change of results: a flipping car's air controls are solved in segments of about eight ticks instead of four, 15% faster with the same held-out accuracy.
 
 ## 1.0.1 (2026-10-04)
 

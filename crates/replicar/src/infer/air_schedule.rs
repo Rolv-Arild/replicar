@@ -150,8 +150,11 @@ pub(super) fn plan(
         return None;
     }
     let total = total as u32;
-    // Segments of about four ticks (a frame at 30 frames per second).
-    let parts = total.div_ceil(4).max(1);
+    // Segments of about four ticks (a frame at 30 frames per second); about eight for a flipping car, whose solve
+    // flies RocketSim once per control: 15% faster conversions, the same held-out accuracy (RESULTS.md, "v2:
+    // search for speed and accuracy gains").
+    let flipping = scratch.is_some() && (state.is_flipping || press.is_some());
+    let parts = total.div_ceil(if flipping { 8 } else { 4 }).max(1);
     let segments: Vec<u32> = (0..parts)
         .map(|i| total * (i + 1) / parts - total * i / parts)
         .collect();

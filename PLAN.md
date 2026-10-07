@@ -324,6 +324,7 @@ Keep this file current after each phase: update the status, dependency revisions
 - 2026-10-07: v2 guide and file-format reference (9.2, in part); every column documented, `cargo doc` clean.
 - 2026-10-07: evaluator port (9.1) through a v1-types adapter: `adapter_check` 120/120; evaluate default and aligned on train and validation and error_budget on train byte-identical to v1's reference.
 - 2026-10-07: README, AGENTS.md, CHANGELOG (2.0.0 unreleased), docs/output-format.md (marked v1) and TEST_PROTOCOL.md (a note on the v2 tools) switched to v2 at the user's request; v1 stays in the tree as the parity reference.
+- 2026-10-07: speed and accuracy search before the release (user): profile, held-out `--offline-masked` evaluation, LAN-truth scorer on v2; adopted eight-tick segments for flipping-car air schedules (15% faster, neutral on train, validation and LAN truth; v2's first intentional difference from v1); rejected four candidates (RESULTS 'v2: search for speed and accuracy gains'). Open lead: the first update after a dodge from near the ground (16% of car position squared error), whose quick flips get no fitted press.
 
 ## Backlog (kept current; 2026-10-02)
 
