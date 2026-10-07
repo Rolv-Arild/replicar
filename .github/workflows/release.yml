@@ -25,8 +25,8 @@ jobs:
           - { name: macos-x86_64, runner: macos-13, target: x86_64, manylinux: "" }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
@@ -49,8 +49,8 @@ jobs:
     name: reader (wheel and sdist)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: |
@@ -73,7 +73,7 @@ jobs:
           - { name: macos-aarch64, runner: macos-14, binary: replicar }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"

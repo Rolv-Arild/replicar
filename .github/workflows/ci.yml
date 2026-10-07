@@ -1,4 +1,5 @@
-# Tests on Linux and Windows. The tests that need collision meshes or replays (not in the repository) skip.
+# Tests on Linux and Windows. The tests that need collision meshes or replays (not in the repository) skip; version
+# 1's unit tests need the meshes and run locally only.
 name: ci
 
 on:
@@ -17,9 +18,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The native module (pyo3, stable ABI from 3.12) needs a Python 3.12 to build against.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
@@ -31,8 +32,10 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Version 1's unit tests build RocketSim arenas, which need the game's collision meshes (not in the repository):
+      # they run locally. v2's tests skip what needs meshes or replays.
       - name: Rust tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets --exclude replicar-v1
       - name: Python reader tests
         run: |
           python -m pip install --upgrade pip

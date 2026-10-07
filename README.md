@@ -133,8 +133,8 @@ cargo test --workspace --all-targets     # building the Python module's crate ne
 cd python/v2 && PYTHONPATH=src python -m pytest tests
 ```
 
-CI (`.github/workflows/ci.yml`) runs the format check, clippy and every test on Linux and Windows; the tests that need
-collision meshes or replays skip there. `.github/workflows/release.yml` builds the native wheels (Linux x86_64 and
+CI (`.github/workflows/ci.yml`) runs the format check, clippy and v2's tests on Linux and Windows; the tests that need
+collision meshes or replays skip there, and version 1's unit tests (which need the meshes) run locally only. `.github/workflows/release.yml` builds the native wheels (Linux x86_64 and
 aarch64 manylinux_2_28, Windows x86_64, macOS arm64 and x86_64; one abi3 wheel each for CPython 3.12+), the reader's
 wheel and sdist, and the `replicar` command per platform, as artifacts; it publishes nothing.
 
