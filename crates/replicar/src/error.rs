@@ -30,6 +30,14 @@ pub enum Error {
     #[error("the file could not be written: {0}")]
     Write(#[from] replicar_format::WriteError),
 
+    #[error(
+        "the conversion has {built:?} rows, not the {asked:?} the file asks for (set the converter's rows)"
+    )]
+    RowsNotBuilt {
+        built: replicar_format::RowRate,
+        asked: replicar_format::RowRate,
+    },
+
     #[error("{frame} has an invalid time {time}")]
     InvalidTime {
         frame: replicar_format::FrameIndex,

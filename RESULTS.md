@@ -2504,3 +2504,20 @@ Cost (`scripts/time_corpus.py`, 120 train/validation replays, 32 jobs, same mach
 Recording the ticks costs no measurable time; writing four times the rows does (+46% time, 2.6x the output; 140,000 replays: about 18 h and 1.2 TB on this machine). Memory is higher in every mode because the tick rows are built before the writer selects (not yet optimized). The throughput table of 'v2: corpus throughput' is for frame rows.
 
 During the timing the disk filled up (the drive had 0 bytes free); I deleted my own generated outputs under `target/` (`scaling/out-*`, `scaling/split`, `stats-check`, `cs-check`, `time-*`; regenerable) and timed with one job count at a time.
+
+**Memory (2026-10-07, later).** The user asked whether the 8.5 GB peak was per conversion. It was one process converting 32 replays at once; one conversion of a long 3v3 replay (train `3v3`, 1.6 MB, 45,000 tick rows) took 598 MB with tick rows (283 MB with frame rows; 210 MB before tick rows existed). Measured by stage with mimalloc's process statistics (temporary instrumentation, not committed): decoding 53 MB, update-tick inference 31 MB, simulation and rows 98 MB (69 MB of it the tick rows, about 2 KB each, close to their data), and the writer 350 MB: it built every column and then encoded the whole file as one row group. Changes: (1) the writer builds and encodes a row group of 16,384 rows at a time (4,096: 259 MB peak but files 14% larger; 8,192: 274 MB, +5%; 16,384: 308 MB, +0.7%); the `resimulation` entries of each group are those of its frames. (2) `Converter::with_rows` keeps only the rows the file will have (none between frames for `--rows frames`, every n-th tick for `--tick-step n`; an update applied at a tick without a row goes on the next row); writing rows a conversion did not keep is refused (`Error::RowsNotBuilt`). The CLI, the Python module and folder conversion set it from the write options. `compare_files.py` now compares values, not their encoding (name dictionaries differ between row groups).
+
+| one 3v3 replay, peak | before | after |
+| --- | ---: | ---: |
+| tick rows | 598 MB | 328 MB |
+| `--rows frames` | 283 MB | 211 MB |
+| `--tick-step 8` | 263 MB | 198 MB |
+
+| 120 replays, 32 jobs | time | peak memory | output |
+| --- | ---: | ---: | ---: |
+| tick rows, before (`467a4bb`) | 42.4 s | 7.47 GB | 1,000 MB |
+| tick rows | 39.0 s | 6.10 GB | 1,025 MB |
+| `--rows frames` | 35.5 s | 4.07 GB | 386 MB |
+| `--tick-step 8` | 35.0 s | 4.03 GB | 199 MB |
+
+Files are equal value for value to `467a4bb`'s (every group, 6 replays with tick rows, 3 replays each with frame rows, tick step 8 and tick step 3), and resimulation reproduces them. The earlier "+46% time" for tick rows was measured while the disk was full: the same `467a4bb` build took 56.2 s then and 41.8-42.4 s on later runs, so tick rows cost about +10-20% over frame rows, not +46%.

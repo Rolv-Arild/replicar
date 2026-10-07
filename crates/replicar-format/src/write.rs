@@ -171,7 +171,28 @@ struct Carried<'a> {
     car_updated: Vec<Vec<Option<bool>>>,
 }
 
+/// The part of `Carried` of a range of written rows.
+struct CarriedSlice<'s, 'a> {
+    events: &'s [Vec<&'a Event>],
+    stat_events: &'s [Vec<&'a StatEvent>],
+    ball_contacts: &'s [Vec<&'a BallContact>],
+    boost_pickups: &'s [Vec<&'a BoostPickup>],
+    ball_updated: &'s [bool],
+    car_updated: &'s [Vec<Option<bool>>],
+}
+
 impl<'a> Carried<'a> {
+    fn slice(&self, range: std::ops::Range<usize>) -> CarriedSlice<'_, 'a> {
+        CarriedSlice {
+            events: &self.events[range.clone()],
+            stat_events: &self.stat_events[range.clone()],
+            ball_contacts: &self.ball_contacts[range.clone()],
+            boost_pickups: &self.boost_pickups[range.clone()],
+            ball_updated: &self.ball_updated[range.clone()],
+            car_updated: &self.car_updated[range],
+        }
+    }
+
     /// A left-out row in play passes everything on to the next written row of its segment, else to the last
     /// written row before it (a segment's end left out by the tick step). A left-out row outside play (a goal
     /// pause) passes on only its stat events (an assist credited during the pause), to the last written row before
@@ -250,7 +271,7 @@ pub fn write(
     let written: Vec<bool> = frames
         .iter()
         .map(|f| match (options.rows, f.segment.is_some()) {
-            (RowRate::Ticks(step), true) => f.sim_tick % u64::from(step.max(1)) == 0,
+            (RowRate::Ticks(step), true) => f.sim_tick.is_multiple_of(u64::from(step.max(1))),
             (RowRate::Frames, true) => f.frame_row,
             (_, false) => f.frame_row && options.all_frames,
         })
@@ -261,16 +282,90 @@ pub fn write(
         .filter_map(|(f, &w)| w.then_some(f))
         .collect();
     let carried = Carried::new(frames, &written, rows.len());
+    let mut header = header.clone();
+    header.groups = options.groups.iter().map(|g| g.name().to_owned()).collect();
+    header.all_frames = options.all_frames;
+    (header.rows, header.tick_step) = match options.rows {
+        RowRate::Ticks(step) => ("ticks".to_owned(), step.max(1)),
+        RowRate::Frames => ("frames".to_owned(), 1),
+    };
+    header.precision = options.precision.name().to_owned();
+    let temporary = temporary_path(path);
+    let result = (|| -> Result<(), WriteError> {
+        // A row group at a time, so that only one group's columns are in memory.
+        let mut writer: Option<ArrowWriter<File>> = None;
+        let mut start = 0;
+        loop {
+            let end = (start + ROW_GROUP_ROWS).min(rows.len());
+            let batch = row_group(content, options, &header, &rows, &carried, start..end)?;
+            let writer = match &mut writer {
+                Some(writer) => writer,
+                None => {
+                    let mut properties = WriterProperties::builder()
+                        .set_compression(Compression::ZSTD(ZstdLevel::try_new(
+                            options.compression_level,
+                        )?))
+                        .set_max_row_group_row_count(Some(ROW_GROUP_ROWS));
+                    for field in batch.schema().fields() {
+                        for (column, encoding) in leaf_encodings(Vec::new(), field) {
+                            properties = properties
+                                .set_column_dictionary_enabled(column.clone(), false)
+                                .set_column_encoding(column, encoding);
+                        }
+                    }
+                    writer.insert(ArrowWriter::try_new(
+                        File::create(&temporary)?,
+                        batch.schema(),
+                        Some(properties.build()),
+                    )?)
+                }
+            };
+            writer.write(&batch)?;
+            writer.flush()?;
+            start = end;
+            if start >= rows.len() {
+                break;
+            }
+        }
+        let mut writer = writer.expect("one row group is always written");
+        writer.append_key_value_metadata(KeyValue::new(
+            HEADER_KEY.to_owned(),
+            serde_json::to_string(&header)?,
+        ));
+        writer.close()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Rows per row group: the writer builds and encodes one at a time.
+const ROW_GROUP_ROWS: usize = 1 << 14;
+
+/// The columns of the written rows `range`.
+fn row_group(
+    content: &Content,
+    options: &WriteOptions,
+    header: &Header,
+    all_rows: &[&Frame],
+    all_carried: &Carried,
+    range: std::ops::Range<usize>,
+) -> Result<RecordBatch, WriteError> {
+    let rows = &all_rows[range.clone()];
+    let carried = all_carried.slice(range.clone());
     let players = header.players.len();
     let pads = header.pads.len();
     let mut columns = Columns::default();
-    frame_columns(&mut columns, &rows);
+    frame_columns(&mut columns, rows);
     for group in &options.groups {
         match group {
-            Group::State => state_columns(&mut columns, &rows, players, pads, options.precision),
-            Group::Game => game_columns(&mut columns, &rows, &carried),
-            Group::Updates => update_columns(&mut columns, &rows, &carried, players),
-            Group::Future => future_columns(&mut columns, &rows),
+            Group::State => state_columns(&mut columns, rows, players, pads, options.precision),
+            Group::Game => game_columns(&mut columns, rows, &carried),
+            Group::Updates => update_columns(&mut columns, rows, &carried, players),
+            Group::Future => future_columns(&mut columns, rows),
             Group::Network | Group::Diagnostics => {
                 let batch = if *group == Group::Network {
                     content.network
@@ -284,7 +379,7 @@ pub fn write(
                         .map(|r| r.frame_row.then_some(r.frame.0))
                         .collect::<Vec<_>>(),
                 );
-                let rows = RecordBatch::try_new(
+                let taken = RecordBatch::try_new(
                     batch.schema(),
                     batch
                         .columns()
@@ -294,57 +389,26 @@ pub fn write(
                 )?;
                 columns
                     .fields
-                    .extend(rows.schema().fields().iter().map(|f| (**f).clone()));
-                columns.arrays.extend(rows.columns().iter().cloned());
+                    .extend(taken.schema().fields().iter().map(|f| (**f).clone()));
+                columns.arrays.extend(taken.columns().iter().cloned());
             }
             Group::Resimulation => {
                 let group = content
                     .resimulation
                     .ok_or(WriteError::Missing("resimulation"))?;
                 let frames: Vec<u32> = rows.iter().map(|r| r.frame.0).collect();
-                crate::resimulation::columns(&mut columns, &frames, group);
+                // The entries of this group's frames: after the previous group's last frame, through this one's
+                // (the first group takes the earlier ones, the last the later).
+                let after = range.start.checked_sub(1).map(|i| all_rows[i].frame.0);
+                let through = (range.end < all_rows.len())
+                    .then(|| frames.last().copied())
+                    .flatten();
+                crate::resimulation::columns(&mut columns, &frames, group, after, through);
             }
         }
     }
-    let mut header = header.clone();
-    header.groups = options.groups.iter().map(|g| g.name().to_owned()).collect();
-    header.all_frames = options.all_frames;
-    (header.rows, header.tick_step) = match options.rows {
-        RowRate::Ticks(step) => ("ticks".to_owned(), step.max(1)),
-        RowRate::Frames => ("frames".to_owned(), 1),
-    };
-    header.precision = options.precision.name().to_owned();
     let schema = Arc::new(Schema::new(columns.fields));
-    let mut properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(
-            options.compression_level,
-        )?))
-        .set_max_row_group_row_count(Some(1 << 20));
-    for field in schema.fields() {
-        for (column, encoding) in leaf_encodings(Vec::new(), field) {
-            properties = properties
-                .set_column_dictionary_enabled(column.clone(), false)
-                .set_column_encoding(column, encoding);
-        }
-    }
-    let batch = RecordBatch::try_new(schema.clone(), columns.arrays)?;
-    let temporary = temporary_path(path);
-    let result = (|| -> Result<(), WriteError> {
-        let mut writer =
-            ArrowWriter::try_new(File::create(&temporary)?, schema, Some(properties.build()))?;
-        writer.write(&batch)?;
-        writer.append_key_value_metadata(KeyValue::new(
-            HEADER_KEY.to_owned(),
-            serde_json::to_string(&header)?,
-        ));
-        writer.close()?;
-        std::fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    Ok(RecordBatch::try_new(schema, columns.arrays)?)
 }
 
 /// Writes a plain table (one row group, zstd, float columns byte-split) to `path`, with `metadata` as key-value
@@ -703,7 +767,7 @@ fn internal_columns(
     );
 }
 
-fn game_columns(columns: &mut Columns, rows: &[&Frame], carried: &Carried) {
+fn game_columns(columns: &mut Columns, rows: &[&Frame], carried: &CarriedSlice) {
     columns.names(
         "period",
         GAME,
@@ -906,7 +970,7 @@ fn game_columns(columns: &mut Columns, rows: &[&Frame], carried: &Carried) {
     );
 }
 
-fn update_columns(columns: &mut Columns, rows: &[&Frame], carried: &Carried, players: usize) {
+fn update_columns(columns: &mut Columns, rows: &[&Frame], carried: &CarriedSlice, players: usize) {
     columns.bool(
         "ball_updated",
         UPDATES,

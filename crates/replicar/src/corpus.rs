@@ -142,7 +142,7 @@ pub fn convert_jobs(
     std::thread::scope(|scope| {
         for _ in 0..threads.max(1) {
             scope.spawn(|| {
-                let converter = Converter::new(meshes, config.clone());
+                let converter = Converter::new(meshes, config.clone()).with_rows(options.rows);
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else {

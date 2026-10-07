@@ -178,10 +178,21 @@ fn dodge_children(dodges: &[Option<Dodge>]) -> Vec<(Field, ArrayRef)> {
     ]
 }
 
-/// Writes the group's columns for the written rows' frames `rows` (ascending).
-pub(crate) fn columns(columns: &mut Columns, rows: &[u32], group: &Resimulation) {
+/// Writes the group's columns for the written rows' frames `rows` (ascending): the entries of frames after `after`
+/// and through `through` (each unbounded when `None`).
+pub(crate) fn columns(
+    columns: &mut Columns,
+    rows: &[u32],
+    group: &Resimulation,
+    after: Option<u32>,
+    through: Option<u32>,
+) {
     // The entries in frame order, so that each row's are contiguous; none without a row to hold them.
     let mut group = group.clone();
+    let keep = |frame: u32| after.is_none_or(|a| frame > a) && through.is_none_or(|t| frame <= t);
+    group.ticks.retain(|t| keep(t.frame));
+    group.car_ticks.retain(|t| keep(t.frame));
+    group.choices.retain(|c| keep(c.frame));
     if rows.is_empty() {
         group = Resimulation::default();
     }
@@ -491,7 +502,7 @@ mod tests {
         // Rows for frames 3 and 6: frames 1-3 go to the first, 4-6 and the later 9 to the second.
         let mut columns = Columns::default();
         columns.u32("frame", "frame", None, [Some(3), Some(6)]);
-        super::columns(&mut columns, &[3, 6], &group);
+        super::columns(&mut columns, &[3, 6], &group, None, None);
         let schema = Arc::new(arrow_schema::Schema::new(columns.fields));
         let batch = RecordBatch::try_new(schema, columns.arrays).unwrap();
         let lists = batch

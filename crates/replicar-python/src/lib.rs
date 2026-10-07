@@ -86,7 +86,8 @@ fn convert(
     let options = options(precision, groups, with_groups, all_frames, rows, tick_step)?;
     let meshes = meshes(meshes_dir)?;
     py.detach(|| {
-        let converter = replicar::Converter::new(&meshes, replicar::Config::default());
+        let converter =
+            replicar::Converter::new(&meshes, replicar::Config::default()).with_rows(options.rows);
         replicar::corpus::convert_file(&converter, &replay, &output, &options).map(|_| ())
     })
     .map_err(runtime)
@@ -197,7 +198,8 @@ fn resimulate(
     let meshes = meshes(meshes_dir)?;
     py.detach(|| -> Result<(), replicar::Error> {
         let bytes = std::fs::read(&replay).map_err(|e| replicar::Error::Io(e.to_string()))?;
-        let converter = replicar::Converter::new(&meshes, replicar::Config::default());
+        let converter =
+            replicar::Converter::new(&meshes, replicar::Config::default()).with_rows(options.rows);
         converter
             .resimulate(&bytes, &file)?
             .write(&output, &options)

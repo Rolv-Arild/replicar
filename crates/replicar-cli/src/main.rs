@@ -190,7 +190,8 @@ fn run(cli: Cli) -> Result<(), String> {
             if input.is_dir() {
                 corpus::convert_folder(&meshes, &input, &output, &options, jobs, skip_existing)
             } else {
-                let converter = replicar::Converter::new(&meshes, replicar::Config::default());
+                let converter = replicar::Converter::new(&meshes, replicar::Config::default())
+                    .with_rows(options.rows);
                 replicar::corpus::convert_file(&converter, &input, &output, &options)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -205,7 +206,8 @@ fn run(cli: Cli) -> Result<(), String> {
         } => {
             let options = options.options()?;
             let meshes = meshes.load()?;
-            let converter = replicar::Converter::new(&meshes, replicar::Config::default());
+            let converter = replicar::Converter::new(&meshes, replicar::Config::default())
+                .with_rows(options.rows);
             let bytes = std::fs::read(&replay).map_err(|e| format!("{}: {e}", replay.display()))?;
             let conversion = converter
                 .resimulate(&bytes, &file)

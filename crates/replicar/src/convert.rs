@@ -11,7 +11,7 @@ use replicar_format::record::{
     State, Updates,
 };
 use replicar_format::resimulation::Resimulation;
-use replicar_format::{CarStatus, Group, PlayerIndex, RecordBatch, WriteOptions};
+use replicar_format::{CarStatus, Group, PlayerIndex, RecordBatch, RowRate, WriteOptions};
 use rocketsim::{ArenaState, CarControls, CarState, PhysState};
 use sha2::{Digest, Sha256};
 
@@ -59,6 +59,8 @@ pub struct Conversion {
     pub header: Header,
     pub frames: Vec<Frame>,
     pub resimulation: Resimulation,
+    /// The rows `frames` has: the frame rows and the tick rows of this rate.
+    pub rows: RowRate,
     network: Arc<NetworkReplay>,
     players: Vec<SimPlayer>,
     diagnostics: Vec<crate::diagnostics_columns::DiagnosticsRow>,
@@ -82,6 +84,12 @@ impl Conversion {
 
     /// Writes the conversion to `path` (the file appears only when complete).
     pub fn write(&self, path: &Path, options: &WriteOptions) -> Result<(), Error> {
+        if !has_rows(self.rows, options.rows) {
+            return Err(Error::RowsNotBuilt {
+                built: self.rows,
+                asked: options.rows,
+            });
+        }
         let network = options
             .groups
             .contains(&Group::Network)
@@ -103,16 +111,41 @@ impl Conversion {
     }
 }
 
+/// A conversion that kept the rows of `built` has those of `asked`: the frame rows always, every n-th tick when it
+/// kept every m-th with n a multiple of m.
+fn has_rows(built: RowRate, asked: RowRate) -> bool {
+    match (built, asked) {
+        (_, RowRate::Frames) => true,
+        (RowRate::Ticks(have), RowRate::Ticks(want)) => want.is_multiple_of(have.max(1)),
+        (RowRate::Frames, RowRate::Ticks(_)) => false,
+    }
+}
+
 /// Converts replays with one configuration.
 pub struct Converter<'m> {
     meshes: &'m Meshes,
     config: Config,
+    rows: RowRate,
 }
 
 impl<'m> Converter<'m> {
+    /// A converter that keeps a row for every tick (`with_rows` to keep fewer).
     #[must_use]
     pub fn new(meshes: &'m Meshes, config: Config) -> Self {
-        Self { meshes, config }
+        Self {
+            meshes,
+            config,
+            rows: RowRate::Ticks(1),
+        }
+    }
+
+    /// Keeps only the rows of `rows` (the frame rows, and with `Ticks(n)` the tick rows whose sim tick is a
+    /// multiple of n): a conversion holds every row it keeps, so a file of fewer rows needs less memory. The
+    /// states are the same.
+    #[must_use]
+    pub fn with_rows(mut self, rows: RowRate) -> Self {
+        self.rows = rows;
+        self
     }
 
     /// Converts the replay file's bytes.
@@ -173,7 +206,7 @@ impl<'m> Converter<'m> {
             &mut recorder,
             self.meshes,
             config,
-            withheld,
+            self.rows,
             on_frame,
         )?;
         let recording = recorder.into_recording();
@@ -226,14 +259,13 @@ impl<'m> Converter<'m> {
         let network = Arc::new(crate::decode::decode(&crate::parse(bytes)?)?);
         let (ticks, recording) = from_group(&group, network.frames.len(), config.update_ticks)?;
         let mut recorded = RecordedInference::new(&recording);
-        let withheld = Withheld(config.simulation.withheld.as_deref());
         let mut conversion = run(
             &network,
             ticks.as_ref(),
             &mut recorded,
             self.meshes,
             &config,
-            withheld,
+            self.rows,
             |_| {},
         )?;
         if conversion.header.state_sha256 != header.state_sha256 {
@@ -257,10 +289,11 @@ fn run(
     inference: &mut dyn Inference,
     meshes: &Meshes,
     config: &Config,
-    withheld: Withheld,
+    rate: RowRate,
     mut on_frame: impl FnMut(&SimulatedFrame),
 ) -> Result<Conversion, Error> {
-    let mut rows = Rows::new(network, ticks, withheld);
+    let withheld = Withheld(config.simulation.withheld.as_deref());
+    let mut rows = Rows::new(network, ticks, withheld, rate);
     let simulation = simulate(
         network,
         ticks,
@@ -288,6 +321,7 @@ fn run(
         header,
         frames,
         resimulation: Resimulation::default(),
+        rows: rate,
         network: Arc::clone(network),
         players: simulation.players,
         diagnostics: rows.diagnostics,
@@ -329,10 +363,17 @@ struct Rows<'a> {
     frames: Vec<Frame>,
     diagnostics: Vec<crate::diagnostics_columns::DiagnosticsRow>,
     last_state: Option<ArenaState>,
+    /// The tick rows kept: every `n`-th sim tick, none for `Frames`.
+    rate: RowRate,
 }
 
 impl<'a> Rows<'a> {
-    fn new(network: &'a NetworkReplay, ticks: Option<&UpdateTicks>, withheld: Withheld) -> Self {
+    fn new(
+        network: &'a NetworkReplay,
+        ticks: Option<&UpdateTicks>,
+        withheld: Withheld,
+        rate: RowRate,
+    ) -> Self {
         let scoreboard = reconstruct(&network.frames);
         let segments = segments(&network.frames, &scoreboard);
         Self {
@@ -350,6 +391,7 @@ impl<'a> Rows<'a> {
             frames: Vec::with_capacity(network.frames.len()),
             diagnostics: Vec::with_capacity(network.frames.len()),
             last_state: None,
+            rate,
         }
     }
 
@@ -443,7 +485,12 @@ impl<'a> Rows<'a> {
         let previous_cooldowns = previous.map(|r| r.state.pad_cooldowns.clone());
         let mut ball_placed = false;
         let mut cars_placed = vec![false; frame_updates.car_updated.len()];
-        for record in between {
+        let keep = |tick: u64| match self.rate {
+            RowRate::Ticks(step) => tick.is_multiple_of(u64::from(step.max(1))),
+            RowRate::Frames => false,
+        };
+        // An update applied at a tick without a row is on the next row (a later kept tick, else the frame row).
+        for record in between.iter().filter(|r| keep(r.sim_tick)) {
             let to_frame = frame_tick.saturating_sub(record.sim_tick);
             let replay_tick = simulated.replay_tick.saturating_sub(to_frame);
             let tick = u32::try_from(replay_tick).unwrap_or(u32::MAX);
@@ -985,5 +1032,19 @@ fn header(
         state_sha256: String::new(),
         configuration: serde_json::Value::Null,
         diagnostics: serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_conversion_writes_only_rows_it_kept() {
+        assert!(has_rows(RowRate::Ticks(1), RowRate::Ticks(8)));
+        assert!(has_rows(RowRate::Ticks(4), RowRate::Ticks(8)));
+        assert!(!has_rows(RowRate::Ticks(8), RowRate::Ticks(4)));
+        assert!(has_rows(RowRate::Ticks(8), RowRate::Frames));
+        assert!(!has_rows(RowRate::Frames, RowRate::Ticks(1)));
     }
 }
