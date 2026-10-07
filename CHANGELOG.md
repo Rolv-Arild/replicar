@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-10-07)
 
 A rewrite of version 1: every stage and the evaluator's held-out reports were checked equal to version 1's on the
 120 development replays (RESULTS.md, the "v2:" sections) before the deliberate changes below. The file holds much more.
