@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/replicar/__init__.py
+src/replicar.egg-info/PKG-INFO
+src/replicar.egg-info/SOURCES.txt
+src/replicar.egg-info/dependency_links.txt
+src/replicar.egg-info/requires.txt
+src/replicar.egg-info/top_level.txt
+tests/test_read.py
