@@ -164,4 +164,8 @@ extra) and `replicar-eval` (parity with v1 and evaluation tools; not published).
   inputs: on held-out test replays the car position just before an update is off by 0.04 / 3.5 / 35 UU (median /
   90th / 99th percentile; RESULTS.md).
 - The `future` columns read later frames by construction: never use them as model inputs.
+- A file converted on one platform (`x86_64-windows`, `x86_64-linux`, ...; the header's `platform`) resimulates only
+  on the same platform: the platforms' maths libraries differ in the last bit and RocketSim uses them every tick.
+  The states agree closely (Windows against Linux: about 99% of rows bit-identical, the rest within 2 UU), but not
+  exactly, and resimulation refuses rather than give other states. Convert where you will resimulate.
 - The final score is in the header, never in a row.

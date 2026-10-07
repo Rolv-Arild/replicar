@@ -1063,6 +1063,7 @@ mod tests {
             replay_sha256: "00".to_owned(),
             replicar_version: "test".to_owned(),
             rocketsim_version: "test".to_owned(),
+            platform: String::new(),
             groups: Vec::new(),
             precision: "float32".to_owned(),
             all_frames: false,

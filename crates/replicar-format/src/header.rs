@@ -60,6 +60,10 @@ pub struct Header {
     pub replay_sha256: String,
     pub replicar_version: String,
     pub rocketsim_version: String,
+    /// The platform the states were simulated on (`x86_64-windows`, `aarch64-linux`, ...): the platforms' maths
+    /// libraries differ in the last bit, so only the same platform resimulates them exactly. Empty when unknown.
+    #[serde(default)]
+    pub platform: String,
     /// The column groups written, the state's precision, and whether frames outside play are included.
     pub groups: Vec<String>,
     pub precision: String,

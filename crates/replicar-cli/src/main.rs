@@ -265,8 +265,8 @@ fn inspect(path: &Path) -> Result<(), String> {
     println!("format        {}", header.format_version);
     println!("replay        {}", header.replay_sha256);
     println!(
-        "versions      replicar {}, RocketSim {}",
-        header.replicar_version, header.rocketsim_version
+        "versions      replicar {}, RocketSim {} ({})",
+        header.replicar_version, header.rocketsim_version, header.platform
     );
     println!(
         "groups        {} ({}{})",

@@ -44,6 +44,21 @@ Status labels: **verified** (isolated with a reproduction), **fixed upstream** (
 
 Measured on 2026-09-30 with an RLBot recording (`rlbot_onestep`): a car in the game's `Jumping` state (on the ground for its first ticks) restored with `is_on_ground = false` and no wheel contacts gained about 500 UU/s of horizontal velocity in one tick (frame 1118 of the recording, player 1); with the contacts set consistently the same steps match the game (jump-window velocity p90 1,075 UU/s to 8 UU/s over 12 ticks). This is the consistency requirement above, with its measured effect.
 
+- **Not bit-identical across platforms (2026-10-07; verified cause class, site suspected).** At `0.2.7`, the same
+  scripted arena (four Octanes, controls from an integer hash, `reset_to_random_kickoff(Some(7))`) gives states that
+  differ in the last bit between `x86_64-pc-windows-msvc` and `x86_64-unknown-linux-gnu` from tick 135 (a car in the
+  air); positions still agree to 1e-4 UU at tick 1,000. Reproduction: `replicar-eval` `platform_probe
+  <collision_meshes> 1` on both, and diff the lines; `platform_probe --libm` shows that Rust's `f32::sin`, `cos`,
+  `powf` and `atan2`, which call the platform's maths library (the MSVC runtime, glibc), return different bits for
+  some of a million inputs. RocketSim calls them every tick, for example in the rotation integrator
+  (`src/bullet/linear_math/transform_util.rs`, lines 34 and 37: `half_angle.cos()`, `half_angle.sin()`) and in
+  rigid-body damping (`src/bullet/dynamics/rigid_body.rs`, line 362: `powf`); which call diverges first was not
+  isolated. Effect in replicar: the same replay converted on Windows and Linux is bit-identical in about 99% of rows
+  and within 2 UU in the rest (6 train replays), but a file's resimulation cannot be reproduced on the other
+  platform. Workaround: the header records the platform and resimulation refuses another platform's file. A
+  portable implementation of these functions (the `libm` crate, or glam's `libm` feature for its own) would make
+  runs reproducible across platforms.
+
 ## 6. Agreement worth knowing (positive validation)
 
 Rechecked at `0b02051` with the same audits: whole-tick ball flight position error p50/p99 0.0051/0.014 UU (0.0050/0.013 at `79f4d22`), 95.1% of 101,202 pairs below 0.01 UU (97.3% before), velocity 0.010 UU/s unchanged, airborne car ballistic pairs 89.7% below 0.01 UU (91.5% before). The small change is not investigated.

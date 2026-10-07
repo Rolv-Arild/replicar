@@ -111,6 +111,11 @@ impl Conversion {
     }
 }
 
+/// The platform this build simulates on, as the header names it.
+fn platform() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
 /// A conversion that kept the rows of `built` has those of `asked`: the frame rows always, every n-th tick when it
 /// kept every m-th with n a multiple of m.
 fn has_rows(built: RowRate, asked: RowRate) -> bool {
@@ -244,6 +249,13 @@ impl<'m> Converter<'m> {
             return refuse(format!(
                 "the file is of replay {}, not {sha256}",
                 header.replay_sha256
+            ));
+        }
+        if !header.platform.is_empty() && header.platform != platform() {
+            return refuse(format!(
+                "the file was simulated on {}, this is {}: their maths libraries differ in the last bit, so the states cannot be reproduced exactly (convert the replay again here)",
+                header.platform,
+                platform()
             ));
         }
         if header.rocketsim_version != crate::ROCKETSIM_VERSION {
@@ -983,6 +995,7 @@ fn header(
         replay_sha256: String::new(),
         replicar_version: env!("CARGO_PKG_VERSION").to_owned(),
         rocketsim_version: crate::ROCKETSIM_VERSION.to_owned(),
+        platform: platform(),
         groups: Vec::new(),
         precision: "float32".to_owned(),
         all_frames: false,
