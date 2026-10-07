@@ -2,7 +2,7 @@
 //! actions (jumps, dodges, double jumps from the counters), and the controls it drives on with.
 
 use glam::{Mat3A, Quat, Vec3A};
-use replicar_format::PlayerIndex;
+use replicar_format::{AirControlSource, GroundControlSource, PlayerIndex};
 use rocketsim::{CarControls, CarState};
 
 use super::updates::{
@@ -586,22 +586,23 @@ impl Simulator<'_, '_> {
         }
         controls.jump &= track.jump_gate.unwrap_or(false);
         let airborne = !state.is_on_ground || (new_life && state.phys.pos.z > 50.0);
-        let mut air_controls_applied = false;
+        let mut air_controls_applied = None;
         if airborne
             && !press.jump
             && ctx.in_play
-            && let Some(air) = self.inference.air_controls(frame.get(), car, &controls)
+            && let Some((air, source)) = self.inference.air_controls(frame.get(), car, &controls)
         {
             controls.pitch = air.pitch;
             controls.yaw = air.yaw;
             controls.roll = air.roll;
-            air_controls_applied = true;
+            air_controls_applied = Some(source);
         }
         let query = self.fit_query(ctx, car, player, state, &controls, new_life);
-        if let Some(pitch) = self.inference.flip_pitch(&query, airborne, press.jump) {
+        let flip_cancel = self.inference.flip_pitch(&query, airborne, press.jump);
+        if let Some(pitch) = flip_cancel {
             controls.pitch = pitch;
         }
-        if !air_controls_applied && airborne {
+        if air_controls_applied.is_none() && airborne {
             if controls.handbrake {
                 controls.roll = controls.steer;
             } else {
@@ -615,6 +616,19 @@ impl Simulator<'_, '_> {
             // The dodge direction is (-pitch, yaw + roll): a roll left over would turn it.
             controls.roll = 0.0;
         }
+        let air_source = if press.jump {
+            AirControlSource::Press
+        } else if flip_cancel.is_some() {
+            AirControlSource::FlipCancel
+        } else if let Some(source) = air_controls_applied {
+            source
+        } else if airborne {
+            AirControlSource::Steer
+        } else {
+            AirControlSource::Unset
+        };
+        *super::sources(&mut self.control_sources, player.get()) =
+            (air_source, GroundControlSource::Network);
         (controls, airborne)
     }
 }

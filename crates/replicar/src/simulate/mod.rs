@@ -10,7 +10,7 @@ mod updates;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use replicar_format::{FrameIndex, PlayerIndex};
+use replicar_format::{AirControlSource, FrameIndex, GroundControlSource, PlayerIndex};
 use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, DemoMode, GameMode};
 
 pub use players::SimPlayer;
@@ -189,6 +189,8 @@ pub struct SimulatedFrame {
     /// The simulated state of each body an update corrected in this frame, just before the correction (the
     /// ball once initialized; a car of a continuing life that is not demolished; simulated frames only).
     pub predictions: Vec<Prediction>,
+    /// Per player slot: what set the controls the frame's state has.
+    pub control_sources: Vec<ControlSources>,
 }
 
 /// What the simulation counted.
@@ -250,6 +252,20 @@ struct FrameContext {
     predictions: Vec<Prediction>,
 }
 
+/// What last set a car's controls: its pitch, yaw and roll, and its throttle, steer, handbrake and boost.
+pub type ControlSources = (AirControlSource, GroundControlSource);
+
+/// The control sources of player slot `slot`, growing the list as players appear.
+fn sources(list: &mut Vec<ControlSources>, slot: usize) -> &mut ControlSources {
+    if list.len() <= slot {
+        list.resize(
+            slot + 1,
+            (AirControlSource::Unset, GroundControlSource::Network),
+        );
+    }
+    &mut list[slot]
+}
+
 /// The ticks of one frame's interval and the control switches due in it.
 struct Interval<'a> {
     span: u64,
@@ -273,6 +289,8 @@ struct Simulator<'a, 'i> {
     /// The ground schedules being driven, and the dodges to press.
     ground_schedules: Vec<(PlayerIndex, GroundSchedule)>,
     pending_dodges: Vec<PendingDodge>,
+    /// Per player slot: what last set the car's pitch, yaw and roll, and its throttle, steer, handbrake and boost.
+    control_sources: Vec<ControlSources>,
     pads: Pads,
     diagnostics: SimDiagnostics,
     first_time: f32,
@@ -316,6 +334,7 @@ pub fn simulate(
         air_schedules: Vec::new(),
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
+        control_sources: Vec::new(),
         pads,
         diagnostics: SimDiagnostics::default(),
         first_time: network.frames.first().map_or(0.0, |frame| frame.time),
@@ -606,6 +625,7 @@ impl<'a> Simulator<'a, '_> {
             controls.handbrake = next.handbrake;
             controls.boost = next.boost;
             self.arena.set_car_controls(player.get(), controls);
+            sources(&mut self.control_sources, player.get()).1 = GroundControlSource::Network;
         }
         let elapsed = interval.span - interval.remaining;
         if target > elapsed {
@@ -642,6 +662,7 @@ impl<'a> Simulator<'a, '_> {
                 controls.yaw = air.yaw;
                 controls.roll = air.roll;
                 self.arena.set_car_controls(slot, controls);
+                sources(&mut self.control_sources, slot).0 = AirControlSource::Schedule;
             }
             self.drive_ground_schedules(sim_tick);
             self.press_dodges(sim_tick);
@@ -679,6 +700,7 @@ impl<'a> Simulator<'a, '_> {
                 controls.jump = jump;
             }
             self.arena.set_car_controls(slot, controls);
+            sources(&mut self.control_sources, slot).1 = GroundControlSource::Schedule;
         }
     }
 
@@ -708,6 +730,8 @@ impl<'a> Simulator<'a, '_> {
                     .any(|(p, _)| *p == dodge.player)
                 {
                     self.arena.set_car_controls(slot, controls);
+                    *sources(&mut self.control_sources, slot) =
+                        (AirControlSource::Dodge, GroundControlSource::Dodge);
                 }
             } else if sim_tick == dodge.start_tick {
                 controls.jump = true;
@@ -716,10 +740,14 @@ impl<'a> Simulator<'a, '_> {
                 // The dodge direction is (-pitch, yaw + roll): a roll left in `base` would turn it.
                 controls.roll = 0.0;
                 self.arena.set_car_controls(slot, controls);
+                *sources(&mut self.control_sources, slot) =
+                    (AirControlSource::Dodge, GroundControlSource::Dodge);
             } else {
                 let sign = self.arena.get_car_state(slot).flip_rel_torque.y.signum();
                 controls.pitch = dodge.cancel * sign;
                 self.arena.set_car_controls(slot, controls);
+                *sources(&mut self.control_sources, slot) =
+                    (AirControlSource::Dodge, GroundControlSource::Dodge);
             }
         }
     }
@@ -845,6 +873,7 @@ impl<'a> Simulator<'a, '_> {
             lives,
             pickups,
             predictions: ctx.predictions,
+            control_sources: self.control_sources.clone(),
         }
     }
 }

@@ -510,6 +510,12 @@ fn state(simulated: &SimulatedFrame) -> State {
             .iter()
             .map(|(_, c)| Some(car(c)))
             .collect(),
+        air_controls_source: (0..simulated.state.cars.len())
+            .map(|p| simulated.control_sources.get(p).map(|s| s.0))
+            .collect(),
+        ground_controls_source: (0..simulated.state.cars.len())
+            .map(|p| simulated.control_sources.get(p).map(|s| s.1))
+            .collect(),
         pad_cooldowns: simulated
             .state
             .boost_pads

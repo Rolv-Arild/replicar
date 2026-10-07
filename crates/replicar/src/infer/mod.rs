@@ -13,6 +13,8 @@ use rocketsim::{BallState, CarControls, CarState};
 pub use air_schedule::{AirSchedule, AirScheduleQuery};
 pub use fits::{DodgePlan, GroundSchedule};
 
+use replicar_format::AirControlSource;
+
 use crate::air::{self, AirControls};
 use crate::decode::{CarLife, NetworkCar, NetworkReplay};
 use crate::hitbox::Hitbox;
@@ -60,13 +62,14 @@ pub struct GroundChoice {
 /// What the simulator asks.
 pub trait Inference {
     /// The pitch, yaw and roll of an airborne car for the interval that starts at frame `index`, given the
-    /// network controls it drives on (`controls`). `None`: no evidence, and the simulator uses the steer.
+    /// network controls it drives on (`controls`), and how they were found (`Lookahead` or `Persisted`). `None`:
+    /// no evidence, and the simulator uses the steer.
     fn air_controls(
         &mut self,
         index: usize,
         car: &NetworkCar,
         controls: &CarControls,
-    ) -> Option<AirControls>;
+    ) -> Option<(AirControls, AirControlSource)>;
 
     /// The pitch of a flipping car (its flip cancel); `None` leaves the pitch as it is. Asked for every car
     /// update (the inference also learns here that a car stopped flipping).
@@ -220,18 +223,18 @@ impl Inference for FittedInference<'_> {
         index: usize,
         car: &NetworkCar,
         controls: &CarControls,
-    ) -> Option<AirControls> {
+    ) -> Option<(AirControls, AirControlSource)> {
         let frames = &self.network.frames;
         if self.options.air_lookahead
             && let Some(solved) =
                 air::lookahead_controls(frames, index, car, AIR_MIN_Z, self.withheld)
         {
-            return Some(solved);
+            return Some((solved, AirControlSource::Lookahead));
         }
         let (solved, lag) = air::past_controls(frames, index, car, AIR_MIN_Z)?;
         let keep = |axis: usize, value: f32| value * air::persistence(axis, lag, value.abs());
         let pitch = keep(0, solved.pitch);
-        Some(if car.inputs.steer.is_none() {
+        let controls = if car.inputs.steer.is_none() {
             AirControls {
                 pitch,
                 yaw: keep(1, solved.yaw),
@@ -249,7 +252,8 @@ impl Inference for FittedInference<'_> {
                 yaw: controls.steer,
                 roll: keep(2, solved.roll),
             }
-        })
+        };
+        Some((controls, AirControlSource::Persisted))
     }
 
     /// A flipping car's cancel is fitted once per update with an angular velocity (cached) and held until the

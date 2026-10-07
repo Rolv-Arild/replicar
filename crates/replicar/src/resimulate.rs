@@ -3,10 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use replicar_format::FrameIndex;
 use replicar_format::resimulation::{
     CarTicks, Choice as Stored, Dodge, FrameTicks, Resimulation, ScheduleEntry,
 };
+use replicar_format::{AirControlSource, FrameIndex};
 
 use crate::air::AirControls;
 use crate::decode::{ActorId, CarLife};
@@ -111,8 +111,10 @@ pub fn to_group(ticks: Option<&UpdateTicks>, recording: &Recording) -> Resimulat
                 ..Stored::default()
             };
             match choice {
-                Choice::AirControls(c) => {
-                    stored.values = [Some(c.pitch), Some(c.yaw), Some(c.roll)]
+                Choice::AirControls(c, source) => {
+                    stored.values = [Some(c.pitch), Some(c.yaw), Some(c.roll)];
+                    // 1: solved to the next update (lookahead); 0: persisted from the last two.
+                    stored.integer = Some(i64::from(*source == AirControlSource::Lookahead));
                 }
                 Choice::FlipPitch(p) => stored.values[0] = Some(*p),
                 Choice::DodgeStart(p) => stored.dodge = Some(dodge(p)),
@@ -209,11 +211,18 @@ pub fn from_group(
         let value = |k: usize| stored.values[k].ok_or_else(|| invalid("value"));
         let integer = || stored.integer.ok_or_else(|| invalid("integer"));
         let choice = match question {
-            Question::AirControls => Choice::AirControls(AirControls {
-                pitch: value(0)?,
-                yaw: value(1)?,
-                roll: value(2)?,
-            }),
+            Question::AirControls => Choice::AirControls(
+                AirControls {
+                    pitch: value(0)?,
+                    yaw: value(1)?,
+                    roll: value(2)?,
+                },
+                if integer()? == 1 {
+                    AirControlSource::Lookahead
+                } else {
+                    AirControlSource::Persisted
+                },
+            ),
             Question::FlipPitch => Choice::FlipPitch(value(0)?),
             Question::DodgeStart => {
                 Choice::DodgeStart(plan(stored.dodge.as_ref().ok_or_else(|| invalid("dodge"))?))

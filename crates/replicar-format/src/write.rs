@@ -463,6 +463,30 @@ fn state_columns(
         body_columns(columns, rows, &prefix, precision, |r| {
             car(r).map(|c| c.body)
         });
+        columns.names(
+            format!("{prefix}_air_controls_source"),
+            STATE,
+            rows.iter().map(|r| {
+                r.state
+                    .air_controls_source
+                    .get(p)
+                    .copied()
+                    .flatten()
+                    .map(|s| s.name())
+            }),
+        );
+        columns.names(
+            format!("{prefix}_ground_controls_source"),
+            STATE,
+            rows.iter().map(|r| {
+                r.state
+                    .ground_controls_source
+                    .get(p)
+                    .copied()
+                    .flatten()
+                    .map(|s| s.name())
+            }),
+        );
         columns.f32(
             format!("{prefix}_boost"),
             STATE,
@@ -920,6 +944,8 @@ mod tests {
                 }],
                 car_status_inferred: vec![false],
                 cars: vec![(!absent).then(Car::default)],
+                air_controls_source: vec![None],
+                ground_controls_source: vec![None],
                 pad_cooldowns: vec![0.0],
             },
             game: Game {

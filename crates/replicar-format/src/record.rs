@@ -2,7 +2,10 @@
 //! keeps the ones asked for. Per-player values are indexed by the player index; `None` is unknown or not
 //! applicable, never zero.
 
-use crate::{CarStatus, ClockPhase, FrameIndex, Period, SegmentEnd, StatKind};
+use crate::{
+    AirControlSource, CarStatus, ClockPhase, FrameIndex, GroundControlSource, Period, SegmentEnd,
+    StatKind,
+};
 
 /// A rigid body: position (UU), velocity (UU/s), angular velocity (rad/s) and rotation (unit quaternion x, y,
 /// z, w with w >= 0).
@@ -86,6 +89,10 @@ pub struct State {
     pub car_status: Vec<CarStatus>,
     pub car_status_inferred: Vec<bool>,
     pub cars: Vec<Option<Car>>,
+    /// Per player: what set the car's pitch, yaw and roll, and its throttle, steer, handbrake and boost (`None`
+    /// without a car).
+    pub air_controls_source: Vec<Option<AirControlSource>>,
+    pub ground_controls_source: Vec<Option<GroundControlSource>>,
     /// Per boost pad of the header's pad layout: seconds until it is available again (0: available).
     pub pad_cooldowns: Vec<f32>,
 }

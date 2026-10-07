@@ -40,7 +40,10 @@ impl Inference for Timed<'_> {
         index: usize,
         car: &NetworkCar,
         controls: &CarControls,
-    ) -> Option<replicar::air::AirControls> {
+    ) -> Option<(
+        replicar::air::AirControls,
+        replicar_format::AirControlSource,
+    )> {
         let start = Instant::now();
         let out = self.inner.air_controls(index, car, controls);
         let mut times = self.times.borrow_mut();

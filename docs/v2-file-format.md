@@ -41,6 +41,8 @@ are dictionary-encoded strings.
 | `ball_ticks_since_kickoff` | uint64, tick | RocketSim's ball counter |
 | `car_<i>_status` | name | `absent`, `active`, `spawning`, `demolished` |
 | `car_<i>_status_inferred` | bool | the status is replicar's inference |
+| `car_<i>_air_controls_source` | name | what set the row's pitch, yaw and roll: `none` (not inferred, 0), `steer`, `persisted`, `lookahead`, `schedule`, `press`, `dodge`, `flip_cancel` (glossary, "Controls source") |
+| `car_<i>_ground_controls_source` | name | what set the row's throttle, steer, handbrake and boost: `network`, `schedule`, `dodge` |
 | `car_<i>_position_{x,y,z}`, `car_<i>_velocity_{x,y,z}`, `car_<i>_angular_velocity_{x,y,z}`, `car_<i>_rotation_{x,y,z,w}` | float32 | as for the ball |
 | `car_<i>_boost` | float32, 0-100 | |
 | `car_<i>_controls_{throttle,steer,pitch,yaw,roll}` | float32 | the controls applied from this frame on |

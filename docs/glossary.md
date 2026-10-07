@@ -152,6 +152,18 @@ this frame's state onward, in RocketSim's ranges. Throttle, steer, handbrake and
 timing inferred); jump and dodge come from the replay's action counters; pitch, yaw and roll are inferred, because
 the replay does not carry them.
 
+**Controls source** (`car_air_controls_source`, `car_ground_controls_source`). What set a row's controls, per car.
+For pitch, yaw and roll: `none` (not inferred, 0: the car was on the ground at its last update), `steer` (in the air
+without a fit: the steer as yaw, or as roll with the handbrake), `persisted` (solved from the car's last two updates
+and decayed since), `lookahead` (solved for the interval to the next update), `schedule` (solved tick by tick to the
+next update), `press` (a jump or dodge from this frame's action counters, with its direction), `dodge` (a fitted
+dodge press and its flip cancel), `flip_cancel` (a flipping car's fitted cancel as the pitch; yaw and roll as
+`steer`, `persisted` or `lookahead`). For throttle, steer, handbrake and boost: `network` (the replay's values from
+the tick their effect is inferred at), `schedule` (a fitted ground schedule: control timing or a jump), `dodge` (a
+fitted dodge press, with the controls of the update it was planned at). `lookahead` and both `schedule`s are
+future-derived: they use the car's next update. The jump input is the action counters' (observed), or a fitted press
+(`fitted_inputs` in the `resimulation` group).
+
 **Previous controls** (`car_previous_controls`). The controls of the tick before; part of RocketSim's car state,
 needed to restore it.
 

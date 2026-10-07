@@ -59,6 +59,39 @@ pub enum StatKind {
     Demolished,
 }
 
+/// What set a car's pitch, yaw and roll in a frame (docs/glossary.md, "Controls source"). The replay does not carry
+/// them: every value but `Unset` is inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AirControlSource {
+    /// Not inferred: 0. The car was on the ground at its last update (it may have left it since).
+    Unset,
+    /// In the air without a fit: the steer as yaw (as roll with the handbrake), pitch 0.
+    Steer,
+    /// The air controls solved from the car's last two updates, decayed with the time since.
+    Persisted,
+    /// The air controls solved for the interval to the car's next update (future-derived).
+    Lookahead,
+    /// A per-tick air schedule solved to the car's next update (future-derived).
+    Schedule,
+    /// A jump or dodge press from this frame's action counters, with its direction.
+    Press,
+    /// A fitted dodge press: the jump release before it, the press with its direction, then the flip cancel.
+    Dodge,
+    /// A flipping car's fitted flip cancel as the pitch; yaw and roll as `Steer` or `Persisted`/`Lookahead`.
+    FlipCancel,
+}
+
+/// What set a car's throttle, steer, handbrake and boost in a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroundControlSource {
+    /// The replay's values, from the tick replicar infers they took effect.
+    Network,
+    /// A fitted ground schedule (control timing or a jump) to the car's next update (future-derived).
+    Schedule,
+    /// A fitted dodge press: the controls of the update it was planned at.
+    Dodge,
+}
+
 /// A player's car in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CarStatus {
@@ -131,6 +164,21 @@ names!(StatKind {
     FlipReset => "flip_reset",
     Demolished => "demolished",
 });
+names!(AirControlSource {
+    Unset => "none",
+    Steer => "steer",
+    Persisted => "persisted",
+    Lookahead => "lookahead",
+    Schedule => "schedule",
+    Press => "press",
+    Dodge => "dodge",
+    FlipCancel => "flip_cancel",
+});
+names!(GroundControlSource {
+    Network => "network",
+    Schedule => "schedule",
+    Dodge => "dodge",
+});
 names!(CarStatus {
     Absent => "absent",
     Active => "active",
@@ -152,6 +200,12 @@ mod tests {
         }
         for &status in CarStatus::ALL {
             assert_eq!(CarStatus::from_name(status.name()), Some(status));
+        }
+        for &source in AirControlSource::ALL {
+            assert_eq!(AirControlSource::from_name(source.name()), Some(source));
+        }
+        for &source in GroundControlSource::ALL {
+            assert_eq!(GroundControlSource::from_name(source.name()), Some(source));
         }
         assert_eq!(Period::from_name("overtime"), Some(Period::Overtime));
         assert_eq!(Period::from_name("halftime"), None);

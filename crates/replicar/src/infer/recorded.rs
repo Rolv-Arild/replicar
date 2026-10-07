@@ -14,6 +14,8 @@ use rocketsim::CarControls;
 use super::{
     AirSchedule, AirScheduleQuery, DodgePlan, FitQuery, GroundChoice, Inference, PressInFlight,
 };
+use replicar_format::AirControlSource;
+
 use crate::air::AirControls;
 use crate::decode::{CarLife, NetworkCar};
 
@@ -33,7 +35,8 @@ pub enum Question {
 /// An answer that changes something.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Choice {
-    AirControls(AirControls),
+    /// The controls and how they were found (`Lookahead` or `Persisted`).
+    AirControls(AirControls, AirControlSource),
     FlipPitch(f32),
     DodgeStart(DodgePlan),
     /// The schedule and the shift of the flip's start it chose.
@@ -124,10 +127,10 @@ impl Inference for Recorder<'_> {
         index: usize,
         car: &NetworkCar,
         controls: &CarControls,
-    ) -> Option<AirControls> {
+    ) -> Option<(AirControls, AirControlSource)> {
         let answer = self.inner.air_controls(index, car, controls);
         self.record(car.life, Question::AirControls, Some(index), answer, |a| {
-            a.map(Choice::AirControls)
+            a.map(|(c, s)| Choice::AirControls(c, s))
         })
     }
 
@@ -233,9 +236,9 @@ impl Inference for RecordedInference<'_> {
         _index: usize,
         car: &NetworkCar,
         _controls: &CarControls,
-    ) -> Option<AirControls> {
+    ) -> Option<(AirControls, AirControlSource)> {
         match self.answer(car.life, Question::AirControls) {
-            Some(Choice::AirControls(controls)) => Some(*controls),
+            Some(Choice::AirControls(controls, source)) => Some((*controls, *source)),
             _ => None,
         }
     }

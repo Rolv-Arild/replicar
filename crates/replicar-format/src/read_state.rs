@@ -12,7 +12,7 @@ use arrow_schema::DataType;
 use crate::header::Header;
 use crate::read::{ReadError, read};
 use crate::record::{Ball, Body, Car, CarInternals, Controls, State};
-use crate::{CarStatus, FrameIndex};
+use crate::{AirControlSource, CarStatus, FrameIndex, GroundControlSource};
 
 /// One row's state: the frame, the sim tick and the state.
 #[derive(Debug, Clone, PartialEq)]
@@ -245,14 +245,26 @@ pub fn read_states(path: &Path) -> Result<(Header, Vec<StateRow>), ReadError> {
     let players = header.players.len();
     let mut cars_by_player = Vec::with_capacity(players);
     let mut status_by_player = Vec::with_capacity(players);
+    let mut air_by_player = Vec::with_capacity(players);
+    let mut ground_by_player = Vec::with_capacity(players);
     let mut inferred_by_player = Vec::with_capacity(players);
     for p in 0..players {
         cars_by_player.push(cars(&batch, p)?);
         let status = batch
             .column_by_name(&format!("car_{p}_status"))
             .ok_or_else(|| missing("car status"))?;
-        let status = arrow_cast_names(status.as_ref())?;
+        let status = arrow_cast_names(status.as_ref(), CarStatus::from_name)?;
         status_by_player.push(status);
+        // Files written before the controls sources have none.
+        let sources = |suffix: &str| batch.column_by_name(&format!("car_{p}_{suffix}"));
+        air_by_player.push(match sources("air_controls_source") {
+            Some(c) => arrow_cast_names(c.as_ref(), AirControlSource::from_name)?,
+            None => vec![None; rows],
+        });
+        ground_by_player.push(match sources("ground_controls_source") {
+            Some(c) => arrow_cast_names(c.as_ref(), GroundControlSource::from_name)?,
+            None => vec![None; rows],
+        });
         inferred_by_player.push(bools(&batch, &format!("car_{p}_status_inferred"))?);
     }
     let pads = (0..header.pads.len())
@@ -278,6 +290,8 @@ pub fn read_states(path: &Path) -> Result<(Header, Vec<StateRow>), ReadError> {
                     .map(|s| s[r].unwrap_or(false))
                     .collect(),
                 cars: cars_by_player.iter().map(|c| c[r]).collect(),
+                air_controls_source: air_by_player.iter().map(|s| s[r]).collect(),
+                ground_controls_source: ground_by_player.iter().map(|s| s[r]).collect(),
                 pad_cooldowns: pads.iter().map(|p| p[r].unwrap_or(0.0)).collect(),
             },
         });
@@ -286,7 +300,10 @@ pub fn read_states(path: &Path) -> Result<(Header, Vec<StateRow>), ReadError> {
 }
 
 /// The values of a name column.
-fn arrow_cast_names(column: &dyn Array) -> Result<Vec<Option<CarStatus>>, ReadError> {
+fn arrow_cast_names<T>(
+    column: &dyn Array,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<Option<T>>, ReadError> {
     use arrow_array::types::UInt8Type;
     let dictionary = column
         .as_any()
@@ -300,6 +317,6 @@ fn arrow_cast_names(column: &dyn Array) -> Result<Vec<Option<CarStatus>>, ReadEr
     Ok(dictionary
         .keys()
         .iter()
-        .map(|k| k.and_then(|k| CarStatus::from_name(values.value(usize::from(k)))))
+        .map(|k| k.and_then(|k| parse(values.value(usize::from(k)))))
         .collect())
 }
