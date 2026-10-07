@@ -9,9 +9,9 @@ per replay frame.
 
 Replay packets are exact server states, placed on their inferred 120 Hz tick; RocketSim simulates every tick in
 between, and the inputs a replay does not record (jump, dodge and control timing, flip cancels, air pitch, yaw and
-roll) are fitted against later packets. On 60 held-out test replays version 1 converted every replay, and the car position
-predicted just before each replay packet was off by 0.04 / 3.5 / 35 UU (median / 90th / 99th percentile;
-[RESULTS.md](RESULTS.md), "Test-split assessment").
+roll) are fitted against later packets. On 60 held-out test replays every replay converted, and the car position predicted
+just before each replay packet is off by 0.03 / 3.0 / 35 UU (median / 90th / 99th percentile; second, labelled run;
+[RESULTS.md](RESULTS.md), "Test-split assessment, second run").
 
 This is version 2: a rewrite of version 1 with a more accurate reconstruction of the inputs between frames (jump
 holds, analog sticks, steer in the air; held-out car velocity p90 about 11% lower) and much more in each file (see

@@ -199,7 +199,7 @@ A large gap between the test value and these is a finding about generalisation, 
 * The one-step rows and the full offline conversion use the frame's own packet for the correction at that frame
   (by design: the residual is measured before it). Only the fits listed in section 2 are held out.
 
-## 7. Second run: version 2 (labelled; 2026-10-07)
+## 7. Second run: version 2 (labelled; 2026-10-07; run once at tag `test-assessment-2` = `a287f14`, results in RESULTS.md, "Test-split assessment, second run")
 
 The user asked on 2026-10-07 for a final check before merging v2, and allowed running the test split again. This run is **the second, labelled run**: the split was seen once (section 3), so it is not an unseen estimate, and nothing is tuned on it. It measures the converter as merged: v2 at tag `test-assessment-2` (the commit after the input changes of RESULTS.md, "v2: inputs between frames", whose evaluator reports equal `target/ref-v2-inputs/` byte for byte), RocketSim crate `0.2.7`, `Cargo.lock` as committed.
 

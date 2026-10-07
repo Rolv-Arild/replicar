@@ -199,7 +199,7 @@ extra) and `replicar-eval` (parity with v1 and evaluation tools; not published).
 
 - At an update's tick the state is the replay's exact server state; from there to the next update it is RocketSim's
   prediction with the inferred inputs: on held-out test replays the car position just before an update is off by
-  0.04 / 3.5 / 35 UU (median / 90th / 99th percentile; RESULTS.md). At the tick an update lands a body can jump by
+  0.03 / 3.0 / 35 UU (median / 90th / 99th percentile; RESULTS.md, second test run). At the tick an update lands a body can jump by
   that error.
 - Observed and inferred are kept apart: the network values and the replay's events and statistics are observed;
   update ticks, air controls, presses, control timing, spawn poses and held wrecks are inferred and say so
