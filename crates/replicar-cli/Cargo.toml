@@ -10,6 +10,8 @@ publish = false
 [[bin]]
 name = "replicar"
 path = "src/main.rs"
+# Its docs would overwrite the library's (the same name); its usage is `replicar --help`.
+doc = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
