@@ -2531,3 +2531,49 @@ User story 6 (user: "it should definitely be possible to run on Linux, if we nee
 - **The states are not bit-identical across platforms.** The same 6 train replays converted on Windows and Linux are bit-identical in 98.5-99.5% of rows; the rest differ by at most 2 UU (car position; p99 0), from about 1 s into each replay, and do not grow (each update re-anchors). Each platform resimulates its own files; a file of the other platform failed the state checksum. Cause: RocketSim itself (an arena on scripted controls, no replay, differs from tick 135), through Rust's `f32::sin`, `cos`, `powf`, `atan2`, which call the platform's maths library and differ in the last bit (`platform_probe --libm`). replicar cannot change this without changing RocketSim (ROCKETSIM_NOTES, section 5). The header now records `platform` (`x86_64-windows`, `x86_64-linux`, ...), and resimulation refuses another platform's file at once with that reason, instead of after a whole simulation.
 
 CI: `.github/workflows/ci.yml` (on every push and pull request: format, clippy with warnings as errors, the workspace tests, the reader's tests, a native module build and import; Linux and Windows) and `release.yml` (on `v*` tags or by hand: the native wheels for Linux x86_64 and aarch64 in manylinux_2_28 containers, Windows x86_64, macOS arm64 and x86_64; the reader's wheel and sdist; the `replicar` command for four platforms; each smoke-tested and kept as an artifact; nothing published). Neither has run yet: they run once the branch is pushed to GitHub. macOS and aarch64 Linux are untested locally.
+
+## v2: inputs between frames (2026-10-07)
+
+The user asked whether the converter reconstructs inputs between frames or only repeats them, and asked to try interpolating throttle and steer, timing boost from its amount, and similar tricks before merging (assuming that a lower error means more accurate inputs). Two kinds of evidence: (1) **the true inputs** of the RLBot LAN recordings (`replays/2026-09-30T*_lan_remote_4bots_game{1,2}`: the server's `last_input` per tick, 4 bots and 2 humans, host and client replays) and of four RocketSim `.rlpr` recordings the user added (`replays/rlpr`: three matches of one human with a controller, 6-7 min each, and 73 min of the bots London against Nexto; read by `scripts/rlpr.py`, after RocketSim's MIT reader), compared tick by tick with a file's tick rows by `scripts/rlbot_input_ticks.py` (each player's rows mapped to server ticks by the local median offset of its exactly matching packets, so the alignment does not depend on the controls; the input of the next server tick is a row's, the convention under which the fitted jump presses are exact, 0 / 0 / 0 ticks on the host replays and on `.rlpr`); (2) **the held-out evaluator** on train, decided on validation, against `target/ref-v1-final/`, with `scripts/compare_reports_by_size.py` (per game size, and per replay the changes of each replay's p90 beyond 2% on six main rows).
+
+**What the converter did.** Throttle and steer are one byte each, sent only when they change (a car's steer in 25-50% of frames in play, throttle in 9-23%); the last value is held, and a new one takes effect at the midpoint rule plus a per-car fitted shift, refined per event by the ground timing fit. Jump and dodge presses are fitted per event. Against the true inputs the presses were good (jump p50 0 ticks), but three things were not:
+
+1. **The jump was released at the update that shows it.** The jump input was held only while its counter was odd *and* no update yet showed the car rising, so it ended at the first such update (or was never held when the jump's own update showed it), although holding adds force for up to 24 ticks: release error p50 -14 to -16 ticks for the humans, -6 for the bots (host). Now a jump the updates already show is held while its counter is odd, the car set jumping with the ticks since the press from its rise speed (impulse 291.7 UU/s, then 1,458.3 UU/s^2 of hold force against 650 of gravity).
+2. **Analog sticks stepped.** Only 50-58% of a player's steer values are -1, 0 or 1; the rest come from analog sticks moving between frames. Now throttle and steer ramp linearly across a change that involves another value (over one frame gap centred on the switch tick); a change between -1, 0 and 1 stays a step.
+3. **In the air nothing switched before the car's update.** The network control switches applied only to cars on the ground. Now the steer switches in the air too (physics-neutral in RocketSim; the labels were 1.5-2.5 times worse in the air).
+
+**True inputs** (mean |error| of throttle and steer per tick; jump: share of ticks that disagree; baseline -> adopted):
+
+| recording | steer | throttle | jump disagree | jump release p50 (ticks) |
+| --- | --- | --- | --- | --- |
+| LAN client, bots | 0.278 -> 0.220-0.224 | 0.063 -> 0.063 | 4.8-5.0% -> 3.7% | -3/-4 -> -2 |
+| LAN client, humans | 0.119-0.121 -> 0.084-0.087 | 0.040-0.042 -> 0.038-0.040 | 5.5-6.6% -> 4.9-5.9% | -11/-14 -> -6/-8 |
+| LAN host, bots | 0.112-0.116 -> 0.026-0.030 | 0.018-0.021 -> 0.018-0.020 | 4.5-4.6% -> 2.3-2.5% | -6 -> -1/+1 |
+| LAN host, humans | 0.034-0.036 -> 0.024-0.027 | 0.010 -> 0.010 | 5.1-5.8% -> 3.4-4.0% | -16 -> -5/-2 |
+| `.rlpr` human, 3 matches | 0.048-0.055 -> 0.025-0.028 | 0.027-0.048 -> 0.025-0.047 | 6.8-11.6% -> 4.8-9.7% | -12/-13 -> -5/+1 |
+| `.rlpr` bots, 73 min | 0.108 -> 0.105 | 0.055 -> 0.057 | 4.4% -> 2.8% | -5 -> 0 |
+
+What is left of the humans' jump release is mostly holding past the 24 ticks after which jump has no effect (not in the replay).
+
+**Held-out evaluator** (pooled p50 / p90 / p99; per replay: p90 better / worse by more than 2%):
+
+| | train | validation |
+| --- | --- | --- |
+| one-step car position, 2v2 | 0.051/3.83/37.6 -> 0.048/3.31/37.6 | 0.061/4.11/37.6 -> 0.057/3.61/37.6 |
+| one-step car position, 3v3 | 0.040/3.04/34.6 -> 0.038/2.66/34.6 | 0.035/2.92/36.0 -> 0.033/2.55/35.9 |
+| one-step car position, per replay | 56 / 0 | 53 / 0 |
+| one-step car velocity UU/s, 2v2 | 1.42/48.6/357 -> 1.34/42.4/356 | 1.65/49.8/361 -> 1.56/44.4/356 |
+| one-step car velocity, per replay | 60 / 0 | 60 / 0 |
+| one-step rotation / angular velocity, per replay | 2 / 1 (+2.1%) and 2 / 0 | 3 / 2 (1v1 +2.0%, +2.6%) and 5 / 0 |
+| aligned masked car h4, per replay | 27 / 3 (1v1/00b3d382 +11.9%, 2v2/00b4c5c1 +6.6%, 1v1/0000a984 +4.6%) | 36 / 1 (2v2/1a1f9312 +4.3%) |
+| default masked car h4, per replay | 0 / 1 (2v2/00b0c3e7 +9.8%) | 3 / 1 (3v3/1a1d66e3 +3.5%) |
+
+The aligned masked p99 rises slightly (validation 2v2 56.4 -> 57.1 UU, 3v3 55.3 -> 56.5); its p50 and p90 fall at every size. By change (train): the jump hold gives most of it (one-step car position p90 3.80 -> 3.39, velocity 47.2 -> 42.5 UU/s, velocity better in 60 of 60 replays); the ramp adds velocity p90 better in 27 replays and none worse, and the aligned masked h4 regressions above came with it (not inspected frame by frame); the steer in the air changes no physics. The default masked rows hardly move: the default masked predictor infers no update ticks, and the ramp applies only where they are. The adopted code reproduces the experiment's per-tick inputs exactly; the new reference reports are `target/ref-v2-inputs/`. Across every per-replay p90 row (`scripts/compare_reports.py`, validation): default 440 better / 100 worse / 1,860 equal, beyond 2% 218 better and 23 worse; aligned 824 / 212 / 1,364, beyond 2% 518 better and 69 worse (most in masked velocity, angular velocity and rotation rows).
+
+**Not adopted.**
+- **Every control switching in the air** (boost and throttle too): better boost timing against the true inputs (LAN press p50 +2 -> -1/-2 ticks, host spread -2..+1; `.rlpr` p50 +2 -> 0/+1) but slightly worse held-out physics (train one-step velocity p90 worse in 12 replays, better in 2). The air fits are solved with the controls as they were at the car's update; switching boost earlier without them is inconsistent. Left for when the fits use the same timing.
+- **Ramping every change**, discrete ones too: worse for the bots (LAN client steer 0.278 -> 0.279-0.280).
+- **Classifying players as discrete** (99% of steer values in -1, 0, 1; the user's suggestion: steps, never ramps, for keyboard players and bots): mixed (`.rlpr` bots 0.105 -> 0.099, LAN host bots 0.026 -> 0.057, whose occasional analog values are real), and the per-change rule already steps every discrete change. In the corpus 2 of 82 players (20 train replays) steer discretely, 4 have a discrete throttle.
+- **Boost timing from the boost amount**: the replay sends the amount in 1.5% of the frames a car boosts (the client simulates it), too rarely to time anything.
+
+Open: the switch tick of a change (discrete or analog) is the midpoint rule plus a per-car shift, except where the ground timing fit runs (flat ground, ball away, no action, chained update ticks); on the `.rlpr` matches ground boost and steer changes are about 1-2 ticks late (boost press p50 +2). A per-change switch-tick search, the air fits on the same switch timing, and discrete air controls for discrete players are the next candidates.

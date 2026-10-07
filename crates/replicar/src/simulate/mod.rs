@@ -306,6 +306,11 @@ struct Simulator<'a, 'i> {
     pending_dodges: Vec<PendingDodge>,
     /// The ticks stepped in the current frame's interval.
     stepped: Vec<TickRecord>,
+    /// The interval's cars whose throttle and steer ramp across a change (by player slot), the replay tick of sim
+    /// tick 0 (replay tick = sim tick + offset), and the frame.
+    ramp_cars: Vec<(usize, &'a NetworkCar)>,
+    ramp_offset: i64,
+    ramp_frame: usize,
     /// Per player slot: what last set the car's pitch, yaw and roll, and its throttle, steer, handbrake and boost.
     control_sources: Vec<ControlSources>,
     pads: Pads,
@@ -352,6 +357,9 @@ pub fn simulate(
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
         stepped: Vec::new(),
+        ramp_cars: Vec::new(),
+        ramp_offset: 0,
+        ramp_frame: 0,
         control_sources: Vec::new(),
         pads,
         diagnostics: SimDiagnostics::default(),
@@ -439,6 +447,18 @@ impl<'a> Simulator<'a, '_> {
             switches: self.switches(&frame_cars, f, replay_tick, span, gap, withheld),
             next_switch: 0,
         };
+        self.ramp_cars.clear();
+        if simulated && !withheld && self.ticks.is_some() {
+            self.ramp_frame = f;
+            self.ramp_offset = replay_tick as i64 - (self.arena.tick_count() + span) as i64;
+            for &car in &frame_cars {
+                if let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor)
+                    && created == car.life.created
+                {
+                    self.ramp_cars.push((player.get(), car));
+                }
+            }
+        }
         let mut events = Vec::new();
         if !self.options.simulated_pad_pickups {
             // Held on cooldown from the first tick: the arena carries the true cooldowns written back at the end
@@ -633,11 +653,19 @@ impl<'a> Simulator<'a, '_> {
             let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
                 continue;
             };
-            if created != car.life.created || !self.arena.get_car_state(player.get()).is_on_ground {
+            if created != car.life.created {
                 continue;
             }
             let next = updates::network_controls(car);
             let mut controls = *self.arena.get_car_controls(player.get());
+            // In the air only the steer switches: the air fits solve from the car's update with the other controls
+            // as they were (switching boost and throttle there too made the held-out errors worse; RESULTS.md,
+            // "Inputs between frames").
+            if !self.arena.get_car_state(player.get()).is_on_ground {
+                controls.steer = next.steer;
+                self.arena.set_car_controls(player.get(), controls);
+                continue;
+            }
             controls.throttle = next.throttle;
             controls.steer = next.steer;
             controls.handbrake = next.handbrake;
@@ -682,6 +710,7 @@ impl<'a> Simulator<'a, '_> {
                 self.arena.set_car_controls(slot, controls);
                 sources(&mut self.control_sources, slot).0 = AirControlSource::Schedule;
             }
+            self.drive_ramps(sim_tick);
             self.drive_ground_schedules(sim_tick);
             self.press_dodges(sim_tick);
             self.record_tick();
@@ -694,6 +723,75 @@ impl<'a> Simulator<'a, '_> {
             );
         }
         updates::limit_velocities(&mut self.arena, self.players.len());
+    }
+
+    /// An analog stick's throttle and steer at `sim_tick`: linear across each observed change that involves a value
+    /// other than -1, 0 or 1 (over one frame gap centred on its switch tick), held elsewhere; a change between
+    /// those values is a step. In the air only the steer ramps, as only it switches there. The replay sends one
+    /// value per frame, so the ramp is a guess at the stick's path between two; against the true inputs of the
+    /// RLBot and RocketSim recordings it halves the steer error of a stick player (RESULTS.md).
+    fn drive_ramps(&mut self, sim_tick: u64) {
+        if self.ramp_cars.is_empty() {
+            return;
+        }
+        let t = sim_tick as i64 + self.ramp_offset;
+        let frames = &self.network.frames;
+        let first_time = f64::from(self.first_time);
+        let tick_of = |x: usize| ((f64::from(frames[x].time) - first_time) * 120.0).round() as i64;
+        for i in 0..self.ramp_cars.len() {
+            let (slot, car) = self.ramp_cars[i];
+            let airborne = !self.arena.get_car_state(slot).is_on_ground;
+            let shift = self.inference.control_shift(car.life).unwrap_or(0);
+            let f = self.ramp_frame;
+            // (switch tick, half gap, throttle, steer) of this car life's frames around this one.
+            let mut points: Vec<(i64, i64, f32, f32)> = Vec::new();
+            for g in f.saturating_sub(8)..=(f + 8).min(frames.len() - 1) {
+                let Some(other) = frames[g].cars.iter().find(|c| c.life == car.life) else {
+                    continue;
+                };
+                let spacing = if g == 0 {
+                    4
+                } else {
+                    tick_of(g) - tick_of(g - 1)
+                };
+                let c = updates::network_controls(other);
+                points.push((
+                    tick_of(g) - 2 - spacing / 2 + shift,
+                    (spacing / 2).max(1),
+                    c.throttle,
+                    c.steer,
+                ));
+            }
+            let Some(k) = points.iter().rposition(|p| p.0 <= t) else {
+                continue;
+            };
+            let ramp = |a: f32, b: f32, frac: f64| -> Option<f32> {
+                let digital = |v: f32| v == -1.0 || v == 0.0 || v == 1.0;
+                if a == b || (digital(a) && digital(b)) {
+                    return None;
+                }
+                Some(a + (b - a) * frac.clamp(0.0, 1.0) as f32)
+            };
+            let mut value = (points[k].2, points[k].3);
+            if let Some(next) = points.get(k + 1)
+                && t >= next.0 - next.1
+            {
+                let frac = (t - (next.0 - next.1)) as f64 / (2 * next.1) as f64;
+                value.0 = ramp(points[k].2, next.2, frac).unwrap_or(value.0);
+                value.1 = ramp(points[k].3, next.3, frac).unwrap_or(value.1);
+            } else if k >= 1 && t <= points[k].0 + points[k].1 {
+                let (prev, here) = (points[k - 1], points[k]);
+                let frac = 0.5 + (t - here.0) as f64 / (2 * here.1) as f64;
+                value.0 = ramp(prev.2, here.2, frac).unwrap_or(value.0);
+                value.1 = ramp(prev.3, here.3, frac).unwrap_or(value.1);
+            }
+            let mut controls = *self.arena.get_car_controls(slot);
+            if !airborne {
+                controls.throttle = value.0;
+            }
+            controls.steer = value.1;
+            self.arena.set_car_controls(slot, controls);
+        }
     }
 
     /// Records the current tick's state with the controls about to be applied.

@@ -22,6 +22,8 @@ pub(super) struct CarTrack {
     pub(super) spawn_demolished: bool,
     /// The jump counter's last value said a jump the updates have not shown yet.
     pub(super) jump_gate: Option<bool>,
+    /// The jump counter is odd and the car is jumping (a jump the updates already show): jump is held.
+    pub(super) jump_held: bool,
     pub(super) last_dodge_raw: Option<u8>,
     pub(super) last_double_jump_raw: Option<u8>,
     /// Action counters (jump, double jump, dodge) at the car's last frame, and at its last frame on the
@@ -506,6 +508,34 @@ impl Simulator<'_, '_> {
                 }
             }
         }
+        // A jump the updates already show is held while its counter is odd: holding jump adds force for up to 24
+        // ticks. The car is set jumping (no second impulse), with the ticks since the press from its rise speed:
+        // the impulse of 291.7 UU/s, then 1,458.3 UU/s^2 of hold force against 650 of gravity. Releasing at the
+        // update that shows the jump, as before, cut the hold short (RESULTS.md, "Inputs between frames").
+        if let Some(raw) = fresh(&car.inputs.jump_active_raw) {
+            track.jump_held = false;
+            if raw % 2 == 1 && !press.jump && !jump_impulse_unseen(car, frame) {
+                if state.is_jumping {
+                    track.jump_held = true;
+                } else if let Some(v) = car
+                    .body
+                    .linear_velocity
+                    .as_ref()
+                    .filter(|v| v.frame == frame)
+                    && v.value[2] > 150.0
+                    && !state.has_jumped
+                {
+                    let ticks = ((v.value[2] - 291.667) / 808.333 * 120.0)
+                        .round()
+                        .clamp(1.0, 23.0);
+                    state.has_jumped = true;
+                    state.is_jumping = true;
+                    state.jump_ticks = ticks as u32;
+                    track.jump_held = true;
+                    dirty = true;
+                }
+            }
+        }
         let counter = |v: &Option<NetworkValue<u8>>| v.as_ref().map_or(0, |v| v.value);
         let current = [
             counter(&car.inputs.jump_active_raw),
@@ -582,7 +612,8 @@ impl Simulator<'_, '_> {
             .as_ref()
             .filter(|raw| raw.frame == frame)
         {
-            track.jump_gate = Some(raw.value % 2 == 1 && jump_impulse_unseen(car, frame));
+            track.jump_gate =
+                Some(raw.value % 2 == 1 && (jump_impulse_unseen(car, frame) || track.jump_held));
         }
         controls.jump &= track.jump_gate.unwrap_or(false);
         let airborne = !state.is_on_ground || (new_life && state.phys.pos.z > 50.0);
