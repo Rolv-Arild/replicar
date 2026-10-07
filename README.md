@@ -17,8 +17,8 @@ This is version 2 (in development on branch `v2`). It reproduces version 1's rec
 
 ## Quick start
 
-Requirements: Rust 1.97 or newer, and RocketSim's soccar collision meshes (`collision_meshes/soccar/*.cmf`, which
-come from the game). Pass the folder with `--meshes DIR`, set `REPLICAR_MESHES`, or run where `collision_meshes/` is.
+Requirements: Rust 1.97 or newer on Linux, Windows or macOS (Linux and Windows are tested), and RocketSim's soccar
+collision meshes (`collision_meshes/soccar/*.cmf`, which come from the game). Pass the folder with `--meshes DIR`, set `REPLICAR_MESHES`, or run where `collision_meshes/` is.
 
 ```sh
 cargo build --release -p replicar-cli
@@ -110,9 +110,14 @@ exactly from the replay and the `resimulation` group.
 | `src/`, `python/replicar.py` | version 1, kept as the reference v2 is checked against |
 
 ```sh
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets     # building the Python module's crate needs a Python 3.12+ (PYO3_PYTHON)
 cd python/v2 && PYTHONPATH=src python -m pytest tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs the format check, clippy and every test on Linux and Windows; the tests that need
+collision meshes or replays skip there. `.github/workflows/release.yml` builds the native wheels (Linux x86_64 and
+aarch64 manylinux_2_28, Windows x86_64, macOS arm64 and x86_64; one abi3 wheel each for CPython 3.12+), the reader's
+wheel and sdist, and the `replicar` command per platform, as artifacts; it publishes nothing.
 
 The evaluation tools refuse paths with a `test` component unless given `--final-assessment`.
 

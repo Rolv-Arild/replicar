@@ -1,0 +1,85 @@
+# Builds what a release ships, as workflow artifacts: the native wheels (one abi3 wheel per platform, CPython 3.12+),
+# the pure-Python reader (wheel and sdist), and the `replicar` command for each platform. It publishes nothing:
+# uploading to PyPI or a GitHub release is a separate, deliberate step.
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native-wheels:
+    name: wheel (${{ matrix.platform.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { name: windows-x86_64, runner: windows-latest, target: x64, manylinux: "" }
+          - { name: macos-aarch64, runner: macos-14, target: aarch64, manylinux: "" }
+          - { name: macos-x86_64, runner: macos-13, target: x86_64, manylinux: "" }
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          rust-toolchain: "1.97.1"
+          args: --release --out dist -m crates/replicar-python/Cargo.toml
+      - name: Smoke test
+        shell: bash
+        run: |
+          python -m pip install --find-links dist replicar-native ./python/v2
+          python -c "import replicar, replicar_native; print(replicar_native.version())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.name }}
+          path: dist/*.whl
+
+  reader:
+    name: reader (wheel and sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install build
+          python -m build python/v2 -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reader
+          path: dist/*
+
+  command:
+    name: command (${{ matrix.platform.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64, runner: ubuntu-latest, binary: replicar }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, binary: replicar }
+          - { name: windows-x86_64, runner: windows-latest, binary: replicar.exe }
+          - { name: macos-aarch64, runner: macos-14, binary: replicar }
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p replicar-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: replicar-${{ matrix.platform.name }}
+          path: target/release/${{ matrix.platform.binary }}

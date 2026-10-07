@@ -1,0 +1,46 @@
+# Tests on Linux and Windows. The tests that need collision meshes or replays (not in the repository) skip.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # The native module (pyo3, stable ABI from 3.12) needs a Python 3.12 to build against.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --workspace --all-targets
+      - name: Python reader tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ./python/v2[test]
+          python -m pytest python/v2/tests
+      - name: Native module
+        run: |
+          python -m pip install maturin
+          maturin build --release -m crates/replicar-python/Cargo.toml -o dist
+          python -m pip install --find-links dist replicar-native
+          python -c "import replicar_native; print(replicar_native.version())"
