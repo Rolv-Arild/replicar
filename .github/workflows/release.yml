@@ -21,8 +21,8 @@ jobs:
           - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2_28" }
           - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
           - { name: windows-x86_64, runner: windows-latest, target: x64, manylinux: "" }
-          - { name: macos-aarch64, runner: macos-14, target: aarch64, manylinux: "" }
-          - { name: macos-x86_64, runner: macos-13, target: x86_64, manylinux: "" }
+          # One wheel for Apple silicon and Intel Macs, built on the arm64 runner (the macos-13 Intel runner is gone).
+          - { name: macos-universal2, runner: macos-14, target: universal2-apple-darwin, manylinux: "" }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v5
