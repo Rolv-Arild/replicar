@@ -1,6 +1,6 @@
 # replicar v2: design and migration plan
 
-Status: sixth draft, 2026-10-06, branch `v2-plan`; in progress on branch `v2` since 2026-10-07 (PLAN.md has the stories done).
+Status: sixth draft, 2026-10-06, branch `v2-plan`; implemented on branch `v2` (2026-10-07) and merged to `master`. PLAN.md has the stories done and the user stories added after this plan (tick rows by default, statistics, controls sources, the RocketSim and RLGym bridges, Linux and CI); where this plan and the code differ, the code and docs/v2-file-format.md are current.
 
 Earlier drafts:
 - `ac4b8c4`: a refactor of v1 in place;

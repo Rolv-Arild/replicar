@@ -198,3 +198,29 @@ A large gap between the test value and these is a finding about generalisation, 
 * The five-second kickoff fallback of the match clock never occurred in the data and is unverified.
 * The one-step rows and the full offline conversion use the frame's own packet for the correction at that frame
   (by design: the residual is measured before it). Only the fits listed in section 2 are held out.
+
+## 7. Second run: version 2 (labelled; 2026-10-07)
+
+The user asked on 2026-10-07 for a final check before merging v2, and allowed running the test split again. This run is **the second, labelled run**: the split was seen once (section 3), so it is not an unseen estimate, and nothing is tuned on it. It measures the converter as merged: v2 at tag `test-assessment-2` (the commit that adds this section), RocketSim crate `0.2.7`, `Cargo.lock` as committed.
+
+**Frozen before the run.** The commands below; the acceptance bands rebuilt from the development reports of this converter, `target/ref-v2-inputs/{train,validation}-{default,aligned}.json` (after the input changes of RESULTS.md, "v2: inputs between frames"), into `target/acceptance-bands-2.json` with `scripts/acceptance.py bands`, before any test result. The first run's bands (`target/acceptance-bands.json`, from RocketSim `0b02051`) are also checked, for comparison with the first run. The method and the null of section 4 are unchanged.
+
+**Commands** (`target/test-run-2/run.sh`, outputs and logs in `target/test-run-2/`):
+
+```
+cargo build --release -p replicar-eval -p replicar-cli
+target/release/evaluate.exe replays/test target/test-run-2/test-default.json --final-assessment
+target/release/evaluate.exe replays/test target/test-run-2/test-aligned.json --aligned-targets --final-assessment
+target/release/evaluate.exe replays/test target/test-run-2/test-aligned-raw.json --aligned-targets-raw-predictor --final-assessment
+target/release/evaluate.exe replays/test target/test-run-2/test-offline.json --offline-fits --final-assessment
+target/release/error_budget.exe replays/test --final-assessment
+python scripts/summarize_reference.py <the four reports>
+python scripts/acceptance.py check target/acceptance-bands-2.json <default> <aligned>
+python scripts/acceptance.py check target/acceptance-bands.json <default> <aligned>
+target/release/replicar convert replays/test -o target/test-run-2/files --with resimulation --jobs 32
+python scripts/check_test_files.py target/test-run-2/files replays/test
+```
+
+**What v2 adds to the checks** (reported, not graded; `scripts/check_test_files.py`): every test replay converts with the `replicar` command in the default output (tick rows) and with the `resimulation` group; each file resimulates to the same states; per player and counted statistic the stat events add up to `final_stats`; every goal report has a scorer; consecutive tick rows are one tick apart within a segment. The v1 consistency tools of section 3a (`check_scoreboard`, `count_demolitions`, `consistency_counts`) run v1's converter and are not repeated.
+
+**Rules.** As in section 3: run once, in this order; nothing is changed after a result; every result is reported; a defect found is recorded and fixed on a new branch without running the split again.

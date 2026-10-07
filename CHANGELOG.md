@@ -1,9 +1,9 @@
 # Changelog
 
-## 2.0.0 (unreleased, branch `v2`)
+## 2.0.0 (unreleased)
 
-A rewrite with the same reconstruction: every stage, the full default conversion and the evaluator's reports equal
-version 1's on the 120 development replays (RESULTS.md, the "v2:" sections).
+A rewrite of version 1: every stage and the evaluator's held-out reports were checked equal to version 1's on the
+120 development replays (RESULTS.md, the "v2:" sections) before the deliberate changes below. The file holds much more.
 
 - A Cargo workspace: `replicar-format` (the file, readable without the parser or the simulator), `replicar` (the
   library), `replicar-cli` (the `replicar` command), `replicar-python` and the `replicar` Python package.
@@ -19,7 +19,25 @@ version 1's on the 120 development replays (RESULTS.md, the "v2:" sections).
   arrays and a native extra to convert.
 - RocketSim from crates.io (`0.2.7`), measured neutral against `9910c58`.
 - mimalloc as the allocator of the command and the Python module: folder conversion scales past 16 threads (the Windows system allocator serialized them).
-- The one change of results: a flipping car's air controls are solved in segments of about eight ticks instead of four, 15% faster with the same held-out accuracy.
+- A flipping car's air controls are solved in segments of about eight ticks instead of four, 15% faster with the same held-out accuracy.
+- Inputs between frames, checked against the true per-tick inputs of RLBot and RocketSim recordings: a jump is held while its counter is active (it was released at the first update showing it), analog throttle and steer ramp across a change instead of stepping, and the steer switches in the air too. Held-out one-step car velocity p90 about 11% lower and position p90 about 12% lower on validation, velocity better in every replay (RESULTS.md, "v2: inputs between frames").
+- A row per simulated 120 Hz tick by default (`frame_row` marks the replay frames' own ticks), every N-th tick
+  (`--tick-step N`) or a row per frame (`--rows frames`). A row's controls are those RocketSim applied in the step
+  after its tick, so the fitted press timing, control timing and air and ground schedules are in the file; in a row
+  per frame this also changes the controls of cars on per-tick schedules (3-11% of a car's frame rows).
+- Where each row's controls came from: `car_<i>_air_controls_source` and `car_<i>_ground_controls_source`.
+- The players' match statistics as they happen (`stat_events`: goal, assist, save, shot, demolition and, from the
+  September 2026 builds, epic save, clear, center, aerial hit, first touch, crossbar, bicycle and juggle hits, flip
+  reset, demolished), goals with their scorer and assister, each player's `final_stats`, and the statistics the
+  replay's build counts (`counted_stats`: 0 is then known, otherwise unknown).
+- `players_table()` and `long()` in the Python reader, `replicar inspect --players`.
+- `replicar.rocketsim` (a row as a state of mtheall's RocketSim bindings) and `replicar.rlgym` (a row as an RLGym
+  `GameState`); neither steps anything.
+- Linux: tested, with CI on Linux and Windows and a release workflow for the wheels (Linux, Windows, macOS) and the
+  command. The header records the `platform`: the platforms' maths libraries differ in the last bit, so a file is
+  resimulated only where it was converted (ROCKETSIM_NOTES.md).
+- Memory: the writer encodes 16,384 rows at a time and a conversion keeps only the rows its file will have (a long
+  3v3 replay: 330 MB with tick rows, 210 MB with frame rows).
 
 ## 1.0.1 (2026-10-04)
 

@@ -3,8 +3,8 @@
 replicar reconstructs Rocket League replays as [RocketSim](https://github.com/ZealanL/RocketSim) states: one row per
 120 Hz simulation tick in play (or per replay frame), with the ball and every car's full physics state, the controls
 applied at that tick, boost, pads, the scoreboard, events, ball contacts and boost pickups, and how each value is
-known. It writes one ordinary Parquet file per replay. The
-words are defined in [glossary.md](glossary.md); every column is listed in [v2-file-format.md](v2-file-format.md).
+known. It writes one ordinary Parquet file per replay. The words are defined in [glossary.md](glossary.md); every
+column is listed in [v2-file-format.md](v2-file-format.md).
 
 ## How it works, in one paragraph
 
@@ -15,6 +15,40 @@ in RocketSim between updates; where the replay does not say what happened, an in
 updates (control timing, presses, dodge direction and flip cancel, air controls, and a tick or two of alignment
 before ball hits). The simulation applies each update at its tick, so every frame has a full state that agrees with
 the replay wherever the replay says something.
+
+## What a row is
+
+By default a file has a row for every tick RocketSim simulated in play: the replay frames' own ticks (`frame_row`
+true, about one in four) and the ticks between them. A row's state is the simulation's at its tick, and its controls
+are the ones RocketSim applied in the step after it: the action taken at that state, with the fitted jump and dodge
+presses, control timing and air controls at the ticks the fits put them. `car_<i>_air_controls_source` (`none`,
+`steer`, `persisted`, `lookahead`, `schedule`, `press`, `dodge`, `flip_cancel`) and `car_<i>_ground_controls_source`
+(`network`, `schedule`, `dodge`) say what set them; `lookahead` and `schedule` used the car's next update.
+
+A tick row belongs to the frame that ends its interval (`frame`): its state is simulated toward that frame's updates,
+which are applied at their update ticks inside the interval, so a tick row can show an update a few ticks before the
+frame that carries it (offline reconstruction). What the replay reports per frame is not repeated early: a tick
+row's scoreboard, clock and ping are the previous frame's, its events and statistics are on the frame rows, its
+update ages count from the update ticks, and its seconds since update are null. `--tick-step N` keeps the rows whose
+`sim_tick` is a multiple of N and passes the records and update flags of the others to the next row kept;
+`--rows frames` keeps the frame rows only.
+
+## Statistics and events
+
+`events` holds what the replay reports: goals (with the `scorer` and `assister`), demolitions and flip resets.
+`stat_events` holds each player's match counters going up, in the frame the replay updates them: goals, assists,
+saves, shots and demolitions, and in replays from the builds of September 2026 on also epic saves, clears, centers,
+aerial hits, first touches, crossbar, bicycle and juggle hits, flip resets and times demolished. They are the game's
+own judgement, seen with the replay's delay; an assist credited during the goal pause is kept on the last row before
+it, with its `updated_frame`. A player's events add up to the header's `final_stats`. The header's `counted_stats`
+lists the statistics the replay's build counts: for those a player without any has 0; the others are unknown, not 0.
+
+## Resources
+
+On a 16-core machine (AMD 5950X, Windows), 120 train and validation replays convert at 32 jobs in 39 s with tick
+rows (6.1 GB peak for the 32 conversions in flight), 35.5 s with frame rows (4.1 GB); a long 3v3 replay alone takes
+about 5 s and 330 MB. Files: about 8.5 MB per replay with tick rows, 3.2 MB with frame rows, 1.7 MB with
+`--tick-step 8`; quantized about a quarter less. For 140,000 replays that is about 12 h and 1.2 TB with tick rows.
 
 ## The command
 
@@ -109,11 +143,10 @@ replicar.rocketsim.car_state(f, 1200, player=0)        # or one RocketSim.CarSta
 
 The cars get the players' hitboxes and teams; a player without a car in the row gets none. The bindings are the C++
 RocketSim, replicar simulates with its Rust port: they model the same game but are not the same simulator. Checked with
-`scripts/check_rocketsim_bridge.py` on 12 train and 12 validation files: the state reads back from the arena as the
-file has it (within 0.0005), and one frame ahead (stepping the row's controls to the next row's tick, for bodies the
-next row does not update and controls that are constant over the interval) the ball is within 0.05 UU of the file
-(p99) and a car within 0.15-0.27 UU (p50) and 2.5 UU (p99), against 30-50 UU (p50) for not stepping. The difference
-grows with time. Left at the bindings' defaults, because a row does not have them: the ball's heatseeker state, a
+`scripts/check_rocketsim_bridge.py`: the state reads back from the arena as the file has it (within 0.0005), and one
+tick ahead in a file of tick rows (stepping a row's controls, for bodies the next row does not update) every car is
+within 0.03 UU (p50) and 0.62 UU (p99) of the next row and the ball within 0.04 UU (p99), against 12-13 UU (p50) for
+not stepping. The difference grows with time. Left at the bindings' defaults, because a row does not have them: the ball's heatseeker state, a
 car's flip-reset flags, the car its bump cooldown is for, and the tick of its last extra ball-hit impulse. The
 bindings have no `psyclops` hitbox: `arena(..., hitboxes={"psyclops": "OCTANE"})` accepts a stand-in.
 
@@ -144,6 +177,11 @@ let converter = replicar::Converter::new(&meshes, replicar::Config::default());
 let conversion = converter.convert(&std::fs::read("match.replay")?)?;
 conversion.write("match.parquet".as_ref(), &replicar_format::WriteOptions::default())?;
 
+// A file of fewer rows: keep only those in memory (writing rows the conversion did not keep is refused).
+let rows = replicar_format::RowRate::Ticks(8);
+let converter = replicar::Converter::new(&meshes, replicar::Config::default()).with_rows(rows);
+let options = replicar_format::WriteOptions { rows, ..Default::default() };
+
 // Every simulated frame with its full RocketSim state, as it is made:
 let network = replicar::decode::decode(&replicar::parse(&bytes)?)?;
 converter.convert_network_with(network, |frame| { /* frame.state: rocketsim::ArenaState */ })?;
@@ -159,10 +197,13 @@ extra) and `replicar-eval` (parity with v1 and evaluation tools; not published).
 
 ## What to rely on
 
-- Every value of the state at a frame with an update is the replay's exact server state at the update's tick, moved
-  to the frame's time by the simulation. Between updates the state is RocketSim's prediction with the inferred
-  inputs: on held-out test replays the car position just before an update is off by 0.04 / 3.5 / 35 UU (median /
-  90th / 99th percentile; RESULTS.md).
+- At an update's tick the state is the replay's exact server state; from there to the next update it is RocketSim's
+  prediction with the inferred inputs: on held-out test replays the car position just before an update is off by
+  0.04 / 3.5 / 35 UU (median / 90th / 99th percentile; RESULTS.md). At the tick an update lands a body can jump by
+  that error.
+- Observed and inferred are kept apart: the network values and the replay's events and statistics are observed;
+  update ticks, air controls, presses, control timing, spawn poses and held wrecks are inferred and say so
+  (`car_status_inferred`, the controls sources, the `resimulation` group).
 - The `future` columns read later frames by construction: never use them as model inputs.
 - A file converted on one platform (`x86_64-windows`, `x86_64-linux`, ...; the header's `platform`) resimulates only
   on the same platform: the platforms' maths libraries differ in the last bit and RocketSim uses them every tick.
