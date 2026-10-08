@@ -121,8 +121,10 @@ def car_state(file, row: int, player: int):
     state.has_double_jumped = flag("has_double_jumped")
     state.has_flipped = flag("has_flipped")
     state.flip_rel_torque = _vec(rs, a["car_flip_relative_torque"][row, p])
-    # The Rust port counts the jump in ticks; the bindings in seconds.
-    state.jump_time = float(a["car_jump_ticks"][row, p]) / 120.0
+    # The port counts `jump_ticks` on every tick, on the ground too, and restarts it when a jump ends; the bindings'
+    # `jump_time` is 0 until the car jumps and then counts from the jump's start (measured, 2026-10-08). The same
+    # while the jump lasts; 0 before any jump; after the jump the port's count is the time since it ended.
+    state.jump_time = float(a["car_jump_ticks"][row, p]) / 120.0 if flag("has_jumped") else 0.0
     state.flip_time = number("flip_time")
     state.is_flipping = flag("is_flipping")
     state.is_jumping = flag("is_jumping")
@@ -130,8 +132,8 @@ def car_state(file, row: int, player: int):
     state.air_time_since_jump = number("air_time_since_jump")
     state.time_spent_boosting = number("boosting_time")
     state.is_supersonic = flag("is_supersonic")
-    # The bindings keep a car supersonic below the start speed while `supersonic_time` is under the maintain time;
-    # the port counts the time spent below it: the same time left.
+    # Not the same quantity: the bindings' `supersonic_time` counts from when the car became supersonic, the port's
+    # grace timer the time spent below the start speed (measured, 2026-10-08); which matches the game is open.
     state.supersonic_time = number("supersonic_grace_timer")
     state.handbrake_val = number("handbrake_value")
     state.is_auto_flipping = flag("is_auto_flipping")

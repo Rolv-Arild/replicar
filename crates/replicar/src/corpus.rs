@@ -151,7 +151,19 @@ pub fn convert_jobs(
                     let row = if skip_existing && job.output.exists() {
                         row_of_file(job)
                     } else {
-                        match convert_file(&converter, &job.input, &job.output, options) {
+                        // A panic in one replay (a bug) is that replay's error, not the end of the batch.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            convert_file(&converter, &job.input, &job.output, options)
+                        }))
+                        .unwrap_or_else(|panic| {
+                            let message = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_owned())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown".to_owned());
+                            Err(Error::Io(format!("the conversion panicked: {message}")))
+                        });
+                        match result {
                             Ok(_) => row_of_file(job),
                             Err(error) => IndexRow {
                                 replay: job.replay.clone(),

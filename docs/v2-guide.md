@@ -150,6 +150,16 @@ not stepping. The difference grows with time. Left at the bindings' defaults, be
 car's flip-reset flags, the car its bump cooldown is for, and the tick of its last extra ball-hit impulse. The
 bindings have no `psyclops` hitbox: `arena(..., hitboxes={"psyclops": "OCTANE"})` accepts a stand-in.
 
+Fields whose meaning differs between the port and the bindings (measured by stepping both, 2026-10-08): `jump_time`
+(set from `car_jump_ticks` while the car has jumped, else 0; after the jump the port counts from its end, the
+bindings from its start), `flip_time` (the port's stops at the end of the flip, the bindings' keeps counting while
+airborne), `supersonic_time` (the port's grace timer counts time below 2,200 UU/s, the bindings' time since the car
+became supersonic) and `time_since_boosted` (not in the bindings' `CarState`). A model that sees both should not rely
+on these. **Air throttle while boosting:** in the game and in the port an airborne car that boosts accelerates as if
+throttle were 1, whatever the throttle (LAN truth: 1,057.7 UU/s^2 at throttle 0 and 1); the bindings add the throttle
+on top (1,058.3 at 0, 1,125 at 1, 991.7 at -1). To step a row in the bindings as the game would, set the throttle to
+0 while an airborne car boosts.
+
 For RLGym 2, `replicar.rlgym.game_state(f, row)` is the row as a `GameState`, for `RocketSimEngine.set_state` or a
 state mutator, so an environment can start from any replay frame:
 
