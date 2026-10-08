@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The interval that ends at a goal frame is simulated: the ticks in which the ball crosses the line were left out, and the goal frame's row repeated the previous `sim_tick`.
+- Folder conversion records a panicking replay as an error row instead of ending the run.
+- `replicar.rocketsim`: `jump_time` is 0 until the car has jumped, as in the bindings; the guide lists the fields whose meaning differs between the Rust port and the C++ bindings, and the bindings' air throttle while boosting.
+
 ## 2.0.0 (2026-10-07)
 
 A rewrite of version 1: every stage and the evaluator's held-out reports were checked equal to version 1's on the

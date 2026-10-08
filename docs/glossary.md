@@ -77,7 +77,8 @@ to touch the ground); `decided` (the ball touched the ground after expiry); `goa
 replay). Within play segments only `kickoff`, `running`, `expired` and `decided` occur.
 
 **In play.** The replay's game state is `Active`: from the frame where the kickoff countdown has ended and the
-cars can move **[verify]** until play stops.
+cars can move **[verify]** until play stops. The interval that ends at a goal frame (state `PostGoalScored`) is
+simulated too: the ball crossed the line in it.
 
 **Play segment** (`segment`, 0..n). A stretch of play from a kickoff to the frame that reports the goal, or to
 the last frame in play when no goal follows (regulation ending, before overtime). The overtime kickoff starts a

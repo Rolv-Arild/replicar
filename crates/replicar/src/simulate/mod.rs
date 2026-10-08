@@ -390,13 +390,16 @@ impl<'a> Simulator<'a, '_> {
             as u64)
             .max(self.previous_tick);
         let gap = replay_tick - self.previous_tick;
-        let in_play = frame
-            .game_state
-            .as_ref()
-            .is_some_and(|s| s.value == GameState::Active);
+        let state = frame.game_state.as_ref().map(|s| &s.value);
+        let active = state == Some(&GameState::Active);
+        // The frame that reports a goal ends the play before it: the ball crossed the line in its interval, so the
+        // interval is simulated like any other (it is the last of its play segment); play stops after it.
+        let goal_frame =
+            !active && self.previous_in_play && state == Some(&GameState::PostGoalScored);
+        let in_play = active || goal_frame;
         let simulated = in_play && self.previous_in_play && gap > 0 && gap <= MAX_GAP_TICKS;
         self.previous_tick = replay_tick;
-        self.previous_in_play = in_play;
+        self.previous_in_play = active;
         if !simulated {
             self.diagnostics.skipped_replay_ticks += gap;
         }
