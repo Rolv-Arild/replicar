@@ -5,7 +5,7 @@ record per car (`CarRecord`) and one for the ball (`PhysRecord`, 332 bytes), all
 
 `load(path)` returns {"version", "frame" (ticks,), "pos" (ticks, cars, 3), "controls" (ticks, cars, 8: throttle,
 steer, pitch, yaw, roll, jump, boost, handbrake), "on_ground" (ticks, cars), "boost" (ticks, cars, 0-100),
-"ball_pos" (ticks, 3)}, cached beside the file as `.npz`.
+"ball_pos" (ticks, 3), "has_jumped", "double_jumped_or_flipped" (ticks, cars)}, cached beside the file as `.npz`.
 """
 
 import struct
@@ -40,6 +40,8 @@ def load(path) -> dict:
     controls = np.zeros((num_ticks, num_cars, 8), np.float32)
     on_ground = np.zeros((num_ticks, num_cars), bool)
     boost = np.zeros((num_ticks, num_cars), np.float32)
+    jumped = np.zeros((num_ticks, num_cars), bool)
+    flipped = np.zeros((num_ticks, num_cars), bool)
     ball = np.zeros((num_ticks, 3), np.float32)
     car_size = CAR_SIZES[version]
     for t in range(num_ticks):
@@ -56,12 +58,15 @@ def load(path) -> dict:
             frame[t] = struct.unpack_from("<I", data, record)[0]
             pos[t, car] = struct.unpack_from("<3f", data, record + 4)
             on_ground[t, car] = data[record + 332] != 0
+            jumped[t, car] = data[record + 344] != 0
+            flipped[t, car] = data[record + 345] != 0
             boost[t, car] = struct.unpack_from("<f", data, record + 360)[0] * 100.0
             c = struct.unpack_from("<5f3?", data, record + 368)
             controls[t, car] = c
             car += 1
     out = {"version": np.array(version), "frame": frame, "pos": pos, "controls": controls,
-           "on_ground": on_ground, "boost": boost, "ball_pos": ball}
+           "on_ground": on_ground, "boost": boost, "ball_pos": ball, "has_jumped": jumped,
+           "double_jumped_or_flipped": flipped}
     np.savez(cache, **out)
     return out
 

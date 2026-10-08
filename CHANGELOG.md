@@ -3,6 +3,7 @@
 ## Unreleased
 
 - The interval that ends at a goal frame is simulated: the ticks in which the ball crosses the line were left out, and the goal frame's row repeated the previous `sim_tick`.
+- A jump, double jump or dodge whose impulse the frame's update already shows is pressed before that update, so the controls show it (it was set as flags only): presses that took effect in the game and are missing from the file, human 1.3-2.0% -> 0%, bots 5.1% -> 0.8% (RocketSim recordings).
 - Folder conversion records a panicking replay as an error row instead of ending the run.
 - `replicar.rocketsim`: `jump_time` is 0 until the car has jumped, as in the bindings; the guide lists the fields whose meaning differs between the Rust port and the C++ bindings, and the bindings' air throttle while boosting.
 

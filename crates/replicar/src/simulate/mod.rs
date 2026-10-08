@@ -133,6 +133,28 @@ struct PendingDodge {
     base: rocketsim::CarControls,
 }
 
+/// What an early press is: a jump from the ground, a double jump, or a dodge with its direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum EarlyKind {
+    Jump,
+    DoubleJump,
+    Dodge { pitch: f32, yaw: f32 },
+}
+
+/// A press the frame's update already shows (its impulse is in the update), planned at the start of the
+/// interval at a tick before that update, so that RocketSim applies it and the controls show it. `tick` is the
+/// sim tick of the step the press is applied in; `update_tick` the sim tick the car's update lands at.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EarlyPress {
+    pub(super) player: PlayerIndex,
+    pub(super) life: CarLife,
+    pub(super) kind: EarlyKind,
+    tick: u64,
+    update_tick: u64,
+    /// RocketSim got the press (the car was in the state the press needs at its tick).
+    pub(super) applied: bool,
+}
+
 /// A pickup the replay reports in a frame (new, with an instigator), as the simulation matched it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PickupMatch {
@@ -304,6 +326,8 @@ struct Simulator<'a, 'i> {
     /// The ground schedules being driven, and the dodges to press.
     ground_schedules: Vec<(PlayerIndex, GroundSchedule)>,
     pending_dodges: Vec<PendingDodge>,
+    /// The current interval's early presses (`EarlyPress`).
+    pub(super) early_presses: Vec<EarlyPress>,
     /// The ticks stepped in the current frame's interval.
     stepped: Vec<TickRecord>,
     /// The interval's cars whose throttle and steer ramp across a change (by player slot), the replay tick of sim
@@ -356,6 +380,7 @@ pub fn simulate(
         air_schedules: Vec::new(),
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
+        early_presses: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
         ramp_offset: 0,
@@ -461,6 +486,10 @@ impl<'a> Simulator<'a, '_> {
                     self.ramp_cars.push((player.get(), car));
                 }
             }
+        }
+        self.early_presses.clear();
+        if simulated && !withheld && self.ticks.is_some() {
+            self.plan_early_presses(&frame_cars, f, span, gap);
         }
         let mut events = Vec::new();
         if !self.options.simulated_pad_pickups {
@@ -716,6 +745,7 @@ impl<'a> Simulator<'a, '_> {
             self.drive_ramps(sim_tick);
             self.drive_ground_schedules(sim_tick);
             self.press_dodges(sim_tick);
+            self.press_early(sim_tick);
             self.record_tick();
             events.extend(
                 self.arena
@@ -794,6 +824,147 @@ impl<'a> Simulator<'a, '_> {
             }
             controls.steer = value.1;
             self.arena.set_car_controls(slot, controls);
+        }
+    }
+
+    /// The presses this frame's updates already show: a jump, double-jump or dodge counter that turns odd in this
+    /// frame while the car's update in it carries the impulse. Without a press here the update would set the car's
+    /// flags and the controls would never show the press. A jump is placed by the time since it started (from the
+    /// update's rise speed: the impulse of 291.7 UU/s, then 1,458.3 UU/s^2 of hold force against 650 of gravity); a
+    /// double jump or dodge at the midpoint rule, before the update. Cars a fit already plans are left to it.
+    fn plan_early_presses(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+        if f == 0 {
+            return;
+        }
+        let start = self.arena.tick_count();
+        let frames = &self.network.frames;
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            if created != car.life.created
+                || self.pending_dodges.iter().any(|d| d.player == player)
+                || self.ground_schedules.iter().any(|(p, _)| *p == player)
+                || self.inference.dodge_handled(car.life, f)
+            {
+                continue;
+            }
+            let Some(previous) = frames[f - 1].cars.iter().find(|c| c.life == car.life) else {
+                continue;
+            };
+            let frame = FrameIndex(f as u32);
+            let rose = |now: &Option<crate::decode::NetworkValue<u8>>,
+                        before: &Option<crate::decode::NetworkValue<u8>>| {
+                now.as_ref()
+                    .is_some_and(|v| v.frame == frame && v.value % 2 == 1)
+                    && before.as_ref().is_none_or(|v| v.value % 2 == 0)
+            };
+            let Some(velocity) = car
+                .body
+                .linear_velocity
+                .as_ref()
+                .filter(|v| v.frame == frame)
+            else {
+                continue;
+            };
+            let update = span - self.car_ticks(car, f, true, gap).min(span);
+            if update == 0 {
+                continue;
+            }
+            let state = self.arena.get_car_state(player.get());
+            let airborne = !state.is_on_ground || state.phys.pos.z > 50.0;
+            let rule = (gap / 2).saturating_sub(2).min(update - 1);
+            let kind = if rose(
+                &car.inputs.dodge_active_raw,
+                &previous.inputs.dodge_active_raw,
+            ) {
+                let Some([tx, ty, _]) = updates::dodge_torque(frames, f, car) else {
+                    continue;
+                };
+                let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
+                if !airborne || (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
+                    continue;
+                }
+                (EarlyKind::Dodge { pitch, yaw }, rule)
+            } else if rose(
+                &car.inputs.double_jump_active_raw,
+                &previous.inputs.double_jump_active_raw,
+            ) {
+                if !airborne {
+                    continue;
+                }
+                (EarlyKind::DoubleJump, rule)
+            } else if rose(
+                &car.inputs.jump_active_raw,
+                &previous.inputs.jump_active_raw,
+            ) {
+                if !state.is_on_ground || velocity.value[2] <= 150.0 {
+                    continue;
+                }
+                let since = ((velocity.value[2] - 291.667) / 808.333 * 120.0)
+                    .round()
+                    .clamp(1.0, 23.0) as u64;
+                (EarlyKind::Jump, update.saturating_sub(since))
+            } else {
+                continue;
+            };
+            self.early_presses.push(EarlyPress {
+                player,
+                life: car.life,
+                kind: kind.0,
+                tick: start + kind.1 + 1,
+                update_tick: start + update,
+                applied: false,
+            });
+        }
+    }
+
+    /// Applies the early presses due at `sim_tick`: the press (released the tick before), and a jump held from
+    /// its press to the update.
+    fn press_early(&mut self, sim_tick: u64) {
+        for i in 0..self.early_presses.len() {
+            let press = self.early_presses[i];
+            let slot = press.player.get();
+            let state = *self.arena.get_car_state(slot);
+            let mut controls = *self.arena.get_car_controls(slot);
+            if sim_tick + 1 == press.tick {
+                controls.jump = false;
+                self.arena.set_car_controls(slot, controls);
+            } else if sim_tick == press.tick {
+                let ready = match press.kind {
+                    EarlyKind::Jump => state.is_on_ground && !state.has_jumped,
+                    EarlyKind::DoubleJump => {
+                        !state.is_on_ground && !state.has_double_jumped && !state.has_flipped
+                    }
+                    EarlyKind::Dodge { .. } => !state.is_on_ground && !state.has_flipped,
+                };
+                if !ready {
+                    continue;
+                }
+                controls.jump = true;
+                if let EarlyKind::Dodge { pitch, yaw } = press.kind {
+                    controls.pitch = pitch;
+                    controls.yaw = yaw;
+                    // The dodge direction is (-pitch, yaw + roll): a roll left over would turn it.
+                    controls.roll = 0.0;
+                } else if press.kind == EarlyKind::DoubleJump {
+                    // A jump press with no direction is RocketSim's double jump.
+                    (controls.pitch, controls.yaw, controls.roll) = (0.0, 0.0, 0.0);
+                }
+                self.arena.set_car_controls(slot, controls);
+                sources(&mut self.control_sources, slot).0 = AirControlSource::Press;
+                self.early_presses[i].applied = true;
+            } else if press.applied
+                && press.kind == EarlyKind::Jump
+                && sim_tick > press.tick
+                && sim_tick <= press.update_tick
+            {
+                controls.jump = true;
+                self.arena.set_car_controls(slot, controls);
+            } else if press.applied && sim_tick == press.tick + 1 && press.kind != EarlyKind::Jump {
+                controls.jump = false;
+                self.arena.set_car_controls(slot, controls);
+            }
         }
     }
 

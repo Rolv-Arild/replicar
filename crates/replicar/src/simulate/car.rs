@@ -454,7 +454,15 @@ impl Simulator<'_, '_> {
         let mut press = Press::default();
         let mut dirty = false;
         let pending_dodge = self.dodge_pending(player);
-        let handled = self.inference.dodge_handled(car.life, frame.get());
+        let early = |kind: fn(&super::EarlyKind) -> bool| {
+            self.early_presses
+                .iter()
+                .any(|p| p.life == car.life && p.applied && kind(&p.kind))
+        };
+        // A press RocketSim already applied in this interval: its flags are the simulation's own.
+        let early_dodge = early(|k| matches!(k, super::EarlyKind::Dodge { .. }));
+        let early_double = early(|k| *k == super::EarlyKind::DoubleJump);
+        let handled = self.inference.dodge_handled(car.life, frame.get()) || early_dodge;
         let track = self.cars.entry(car.life).or_default();
         let fresh = |value: &Option<NetworkValue<u8>>| {
             value.as_ref().filter(|v| v.frame == frame).map(|v| v.value)
@@ -492,7 +500,7 @@ impl Simulator<'_, '_> {
         }
         if let Some(raw) = fresh(&car.inputs.double_jump_active_raw) {
             let activated = rising(track.last_double_jump_raw.replace(raw), raw);
-            if activated && !press.jump {
+            if activated && !press.jump && !early_double {
                 if dodge_impulse_unseen(car, frame, state) {
                     // A jump press with no direction is RocketSim's double jump.
                     press = Press {

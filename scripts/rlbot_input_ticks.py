@@ -32,8 +32,9 @@ def truth_rlpr(path):
     out = {}
     c = r["controls"]
     for i in range(r["pos"].shape[1]):
+        # An effective press: has_jumped or double-jumped-or-flipped turns on within 4 ticks of it (12, 13).
         values = np.column_stack([r["pos"][:, i], c[:, i, 0], c[:, i, 1], c[:, i, 6], c[:, i, 5], c[:, i, 7],
-                                  c[:, i, 2], c[:, i, 3], c[:, i, 4]])
+                                  c[:, i, 2], c[:, i, 3], c[:, i, 4], r["has_jumped"][:, i], r["double_jumped_or_flipped"][:, i]])
         out[f"car{i}"] = (r["frame"].astype(np.int64), values.astype(np.float64))
     return out, {}
 
@@ -183,6 +184,12 @@ def main() -> None:
                 for kind, edge in (("press", presses), ("release", releases)):
                     tp = edge(tv[s0:e0, k]); cp = edge(conv[s0:e0])
                     for t in tp:
+                        if name_k == "jump" and kind == "press" and tv.shape[1] > 12:
+                            after = tv[s0 + t:s0 + t + 5, 11:13].astype(bool)
+                            before = tv[s0 + max(t - 1, 0), 11:13].astype(bool)
+                            effective = bool((after & ~before).any())
+                            hit = len(cp) > 0 and np.min(np.abs(cp - t)) <= 30
+                            g[f"jump press missed ({'effective' if effective else 'no effect'})"].append(0 if hit else 1)
                         if len(cp) == 0:
                             g[f"{name_k} {kind} missed"].append(1)
                             continue
