@@ -133,6 +133,14 @@ impl Simulator<'_, '_> {
             self.arena.set_car_state(slot, state);
             self.arena.set_car_controls(slot, controls);
             self.diagnostics.flip_resets_applied += 1;
+            // A reset refreshes the car as touching the ground does: the action counters it has now are its new
+            // baseline, so the counter rule does not set the flags it just cleared again.
+            if let Some(track) = self.cars.get_mut(&crate::decode::CarLife {
+                actor: *car,
+                created,
+            }) {
+                track.ground_counters = track.last_counters;
+            }
         }
     }
 }

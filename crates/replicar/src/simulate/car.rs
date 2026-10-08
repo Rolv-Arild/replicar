@@ -463,13 +463,18 @@ impl Simulator<'_, '_> {
         let early_dodge = early(|k| matches!(k, super::EarlyKind::Dodge { .. }));
         let early_double = early(|k| *k == super::EarlyKind::DoubleJump);
         let handled = self.inference.dodge_handled(car.life, frame.get()) || early_dodge;
-        let track = self.cars.entry(car.life).or_default();
         let fresh = |value: &Option<NetworkValue<u8>>| {
             value.as_ref().filter(|v| v.frame == frame).map(|v| v.value)
         };
         let rising = |previous: Option<u8>, now: u8| {
             previous.map_or(now % 2 == 1, |p| p % 2 == 0 && now % 2 == 1)
         };
+        if let Some(raw) = fresh(&car.inputs.dodge_active_raw)
+            && raw % 2 == 0
+        {
+            self.deferred_dodges.retain(|d| d.life != car.life);
+        }
+        let track = self.cars.entry(car.life).or_default();
         if let Some(raw) = fresh(&car.inputs.dodge_active_raw) {
             let activated = rising(track.last_dodge_raw.replace(raw), raw);
             let torque = dodge_torque(&self.network.frames, frame.get(), car);
@@ -494,6 +499,15 @@ impl Simulator<'_, '_> {
                         state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
                         state.flip_time = 0.0;
                         dirty = true;
+                    } else {
+                        // The counter leads the updates: the car is still on the ground here.
+                        self.deferred_dodges.push(super::DeferredDodge {
+                            player,
+                            life: car.life,
+                            pitch,
+                            yaw,
+                            until: self.arena.tick_count() + 60,
+                        });
                     }
                 }
             }
@@ -582,7 +596,9 @@ impl Simulator<'_, '_> {
             }
             // An action pressed now, or a dodge planned for later, is applied by the simulation itself;
             // setting its flag first would block it.
-            let acting = press.jump || pending_dodge;
+            let acting = press.jump
+                || pending_dodge
+                || self.deferred_dodges.iter().any(|d| d.life == car.life);
             if double_jumped && !state.has_double_jumped && !acting {
                 state.has_double_jumped = true;
                 state.has_jumped = true;

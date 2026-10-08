@@ -34,7 +34,8 @@ def truth_rlpr(path):
     for i in range(r["pos"].shape[1]):
         # An effective press: has_jumped or double-jumped-or-flipped turns on within 4 ticks of it (12, 13).
         values = np.column_stack([r["pos"][:, i], c[:, i, 0], c[:, i, 1], c[:, i, 6], c[:, i, 5], c[:, i, 7],
-                                  c[:, i, 2], c[:, i, 3], c[:, i, 4], r["has_jumped"][:, i], r["double_jumped_or_flipped"][:, i]])
+                                  c[:, i, 2], c[:, i, 3], c[:, i, 4], r["has_jumped"][:, i], r["double_jumped_or_flipped"][:, i],
+                                  r["is_flipping"][:, i]])
         out[f"car{i}"] = (r["frame"].astype(np.int64), values.astype(np.float64))
     return out, {}
 
@@ -54,8 +55,11 @@ def truth(path):
             for pl in p["players"]:
                 li = pl["last_input"]
                 loc = pl["physics"]["location"]
+                # 11, 12: placeholders (no has_jumped / double jump split); 13: flipping (RLBot `has_dodged` while the
+                # dodge is under 0.65 s old).
                 rows[pl["name"]][n] = (loc["x"], loc["y"], loc["z"], li["throttle"], li["steer"],
-                                       li["boost"], li["jump"], li["handbrake"], li["pitch"], li["yaw"], li["roll"])
+                                       li["boost"], li["jump"], li["handbrake"], li["pitch"], li["yaw"], li["roll"],
+                                       0.0, 0.0, float(pl["has_dodged"] and 0 <= pl["dodge_elapsed"] < 0.65))
                 bots[pl["name"]] = pl["is_bot"]
     out = {}
     for name, by_tick in rows.items():
@@ -172,6 +176,25 @@ def main() -> None:
                     j = same[np.argmin(np.abs(same - t))]
                     g[f"{name_k} change error {where}"].append(int(j - t))
                     g[f"{name_k} change missed {where}"].append(0)
+        # Flips: each true flip start (flipping turns on) against the nearest simulated one within 15 ticks.
+        if tv.shape[1] > 13:
+            sim_flip = a["car_is_flipping"][rows, p] == 1
+            for s0, e0 in zip(starts, ends):
+                if e0 - s0 < 5:
+                    continue
+                tf = presses(tv[s0:e0, 13]); sf = presses(sim_flip[s0:e0])
+                for t in tf:
+                    where = "kickoff" if (tick[rows][s0 + t] - tick[rows][s0]) < 360 and s0 == starts[np.searchsorted(starts, s0)] else "play"
+                    hit = len(sf) > 0 and np.min(np.abs(sf - t)) <= 15
+                    g["flip missed"].append(0 if hit else 1)
+                    if not hit and os.environ.get("DEBUG_FLIPS"):
+                        r = rows[s0 + t]
+                        near = (sf - t)[np.abs(sf - t) <= 60].tolist() if len(sf) else []
+                        print(f"   missed flip: player {p} row {r} frame {a['frame'][r] if 'frame' in a else ''} sim flips within 60 ticks at {near}; "
+                              f"sim on_ground {a['car_is_on_ground'][r, p]} has_flipped {a['car_has_flipped'][r, p]} z {a['car_position'][r, p, 2]:.0f}; "
+                              f"src {f.table.column(f'car_{p}_air_controls_source')[r].as_py()}")
+                    if hit:
+                        g["flip start error"].append(int(sf[np.argmin(np.abs(sf - t))] - t))
         for k, name_k in ((5, "boost"), (6, "jump"), (7, "handbrake")):
             conv = a[f"car_controls_{name_k}"][rows, p] == 1
             g[f"{name_k} disagree"].extend((conv != tv[:, k].astype(bool)).tolist())
@@ -218,7 +241,7 @@ def main() -> None:
             v = np.array(g[key], dtype=float)
             if key.endswith("|error|") or key.endswith("|error| air"):
                 print(f"  {key:30} mean {v.mean():.4f}  within 0.01 {np.mean(v <= 0.01):.3f}  p90 {np.percentile(v, 90):.3f}  n {len(v)}")
-            elif "press error" in key or "release error" in key or "change error" in key:
+            elif "press error" in key or "release error" in key or "change error" in key or "start error" in key:
                 p10, p50, p90 = np.percentile(v, [10, 50, 90])
                 print(f"  {key:30} p10 / p50 / p90 {p10:+.0f} / {p50:+.0f} / {p90:+.0f}  |e| mean {np.abs(v).mean():.2f}  n {len(v)}")
             else:

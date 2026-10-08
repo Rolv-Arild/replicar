@@ -155,6 +155,18 @@ pub(super) struct EarlyPress {
     pub(super) applied: bool,
 }
 
+/// A dodge the replay's counter shows while the simulated car is still on the ground (its takeoff not yet in the
+/// updates, which can lag the counters by frames): pressed at the first tick the car is airborne, unless the
+/// counter turns even or `until` passes first.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DeferredDodge {
+    pub(super) player: PlayerIndex,
+    pub(super) life: CarLife,
+    pub(super) pitch: f32,
+    pub(super) yaw: f32,
+    pub(super) until: u64,
+}
+
 /// A pickup the replay reports in a frame (new, with an instigator), as the simulation matched it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PickupMatch {
@@ -328,6 +340,8 @@ struct Simulator<'a, 'i> {
     pending_dodges: Vec<PendingDodge>,
     /// The current interval's early presses (`EarlyPress`).
     pub(super) early_presses: Vec<EarlyPress>,
+    /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
+    pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
     stepped: Vec<TickRecord>,
     /// The interval's cars whose throttle and steer ramp across a change (by player slot), the replay tick of sim
@@ -381,6 +395,7 @@ pub fn simulate(
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
         early_presses: Vec::new(),
+        deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
         ramp_offset: 0,
@@ -746,6 +761,7 @@ impl<'a> Simulator<'a, '_> {
             self.drive_ground_schedules(sim_tick);
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
+            self.press_deferred(sim_tick);
             self.record_tick();
             events.extend(
                 self.arena
@@ -968,6 +984,42 @@ impl<'a> Simulator<'a, '_> {
         }
     }
 
+    /// Presses the deferred dodges whose car is airborne and has not flipped (released the tick before when jump is
+    /// still held); drops those past their time.
+    fn press_deferred(&mut self, sim_tick: u64) {
+        self.deferred_dodges.retain(|d| d.until >= sim_tick);
+        let mut done = Vec::new();
+        for (i, dodge) in self.deferred_dodges.iter().enumerate() {
+            let slot = dodge.player.get();
+            let mut state = *self.arena.get_car_state(slot);
+            if state.is_on_ground || state.has_flipped || state.is_demoed {
+                continue;
+            }
+            let mut controls = *self.arena.get_car_controls(slot);
+            if state.prev_controls.jump {
+                controls.jump = false;
+                self.arena.set_car_controls(slot, controls);
+                continue;
+            }
+            if !state.has_jumped {
+                // Airborne without a jump the simulation saw (its update came after the counter): the jump happened.
+                state.has_jumped = true;
+                self.arena.set_car_state(slot, state);
+            }
+            controls.jump = true;
+            controls.pitch = dodge.pitch;
+            controls.yaw = dodge.yaw;
+            // The dodge direction is (-pitch, yaw + roll): a roll left over would turn it.
+            controls.roll = 0.0;
+            self.arena.set_car_controls(slot, controls);
+            sources(&mut self.control_sources, slot).0 = AirControlSource::Press;
+            done.push(i);
+        }
+        for i in done.into_iter().rev() {
+            self.deferred_dodges.remove(i);
+        }
+    }
+
     /// Records the current tick's state with the controls about to be applied.
     fn record_tick(&mut self) {
         let slots = self.players.len();
@@ -1026,8 +1078,31 @@ impl<'a> Simulator<'a, '_> {
     /// the direction on the press tick, then the pitch cancel. An air schedule solved around the dodge owns the
     /// controls except on the press tick.
     fn press_dodges(&mut self, sim_tick: u64) {
+        let mut deferred = Vec::new();
         for dodge in &self.pending_dodges {
             let slot = dodge.player.get();
+            if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground {
+                // The car is not yet airborne (its takeoff can reach the updates after the counters): pressing now
+                // would jump, not dodge. The dodge waits for the car to leave the ground.
+                if let Some((actor, (_, created))) = self
+                    .players
+                    .by_actor
+                    .iter()
+                    .find(|(_, (player, _))| *player == dodge.player)
+                {
+                    deferred.push(DeferredDodge {
+                        player: dodge.player,
+                        life: CarLife {
+                            actor: *actor,
+                            created: *created,
+                        },
+                        pitch: dodge.pitch,
+                        yaw: dodge.yaw,
+                        until: sim_tick + 60,
+                    });
+                }
+                continue;
+            }
             if sim_tick != dodge.start_tick
                 && self.air_schedules.iter().any(|s| s.player == dodge.player)
             {
@@ -1068,6 +1143,7 @@ impl<'a> Simulator<'a, '_> {
                     (AirControlSource::Dodge, GroundControlSource::Dodge);
             }
         }
+        self.deferred_dodges.extend(deferred);
     }
 
     fn update_ball(&mut self, ctx: &mut FrameContext, body: &crate::decode::NetworkBody) {
