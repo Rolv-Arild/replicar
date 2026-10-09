@@ -140,7 +140,10 @@ fn convert_many(
             &options,
             threads,
             skip_existing,
-            &|_, _, _| {},
+            &replicar::corpus::Report {
+                progress: &|_, _, _| {},
+                checkpoint: &|_| {},
+            },
         );
         replicar::corpus::write_index(&output_dir.join("index.parquet"), &rows, &options)?;
         Ok(rows)

@@ -125,6 +125,8 @@ pub enum FittedKind {
 #[derive(Debug, Clone, Copy)]
 struct PendingDodge {
     player: PlayerIndex,
+    /// The car life the dodge was planned for.
+    life: CarLife,
     start_tick: u64,
     end_tick: u64,
     pitch: f32,
@@ -859,12 +861,12 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             };
             if created != car.life.created
-                || self.pending_dodges.iter().any(|d| d.player == player)
                 || self.ground_schedules.iter().any(|(p, _)| *p == player)
                 || self.inference.dodge_handled(car.life, f)
             {
                 continue;
             }
+            let dodge_planned = self.pending_dodges.iter().any(|d| d.player == player);
             let Some(previous) = frames[f - 1].cars.iter().find(|c| c.life == car.life) else {
                 continue;
             };
@@ -898,7 +900,7 @@ impl<'a> Simulator<'a, '_> {
                     continue;
                 };
                 let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
-                if !airborne || (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
+                if dodge_planned || !airborne || (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
                     continue;
                 }
                 (EarlyKind::Dodge { pitch, yaw }, rule)
@@ -906,14 +908,30 @@ impl<'a> Simulator<'a, '_> {
                 &car.inputs.double_jump_active_raw,
                 &previous.inputs.double_jump_active_raw,
             ) {
-                if !airborne {
+                if dodge_planned || !airborne {
                     continue;
                 }
                 (EarlyKind::DoubleJump, rule)
-            } else if rose(
+            } else if (rose(
                 &car.inputs.jump_active_raw,
                 &previous.inputs.jump_active_raw,
-            ) {
+            ) && !dodge_planned)
+                || (state.is_on_ground
+                    && !state.has_jumped
+                    && car
+                        .body
+                        .position
+                        .as_ref()
+                        .is_some_and(|p| p.frame == frame && p.value[2] < 150.0)
+                    && car
+                        .inputs
+                        .jump_active_raw
+                        .as_ref()
+                        .is_some_and(|v| v.frame.get() + 10 >= f))
+            {
+                // A jump counter that rose in this frame, or a takeoff in this frame's update while the simulated
+                // car is still on the ground (the counters can lead the updates by frames, and an update showing
+                // the car at rest undoes the simulation's own jump): the jump that took off.
                 if !state.is_on_ground || velocity.value[2] <= 150.0 {
                     continue;
                 }
@@ -1084,23 +1102,13 @@ impl<'a> Simulator<'a, '_> {
             if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground {
                 // The car is not yet airborne (its takeoff can reach the updates after the counters): pressing now
                 // would jump, not dodge. The dodge waits for the car to leave the ground.
-                if let Some((actor, (_, created))) = self
-                    .players
-                    .by_actor
-                    .iter()
-                    .find(|(_, (player, _))| *player == dodge.player)
-                {
-                    deferred.push(DeferredDodge {
-                        player: dodge.player,
-                        life: CarLife {
-                            actor: *actor,
-                            created: *created,
-                        },
-                        pitch: dodge.pitch,
-                        yaw: dodge.yaw,
-                        until: sim_tick + 60,
-                    });
-                }
+                deferred.push(DeferredDodge {
+                    player: dodge.player,
+                    life: dodge.life,
+                    pitch: dodge.pitch,
+                    yaw: dodge.yaw,
+                    until: sim_tick + 60,
+                });
                 continue;
             }
             if sim_tick != dodge.start_tick

@@ -10,7 +10,7 @@ use super::updates::{
     zero_sleeping_velocity,
 };
 use super::{FittedKind, FrameContext, HoldSource, PendingDodge, Simulator};
-use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkValue};
+use crate::decode::{CarLife, DemolitionReport, NetworkCar, NetworkEvent, NetworkValue};
 use crate::infer::{AirScheduleQuery, FitQuery, PressInFlight};
 
 /// What the simulation keeps per car life.
@@ -154,6 +154,7 @@ impl Simulator<'_, '_> {
         &mut self,
         ctx: &mut FrameContext,
         player: PlayerIndex,
+        life: CarLife,
         plan: &crate::infer::DodgePlan,
         base: CarControls,
     ) {
@@ -170,6 +171,7 @@ impl Simulator<'_, '_> {
         ));
         self.pending_dodges.push(PendingDodge {
             player,
+            life,
             start_tick: now + plan.start_offset,
             end_tick: now + plan.duration,
             pitch: plan.pitch,
@@ -190,7 +192,7 @@ impl Simulator<'_, '_> {
     ) {
         let query = self.fit_query(ctx, car, player, state, controls, false);
         if let Some(plan) = self.inference.dodge_start(&query) {
-            self.queue_dodge(ctx, player, &plan, *controls);
+            self.queue_dodge(ctx, player, car.life, &plan, *controls);
         }
     }
 
@@ -212,7 +214,7 @@ impl Simulator<'_, '_> {
             return;
         };
         if let Some(plan) = &choice.dodge {
-            self.queue_dodge(ctx, player, plan, *controls);
+            self.queue_dodge(ctx, player, car.life, plan, *controls);
         }
         // Each press of the schedule is a rising edge of the jump control.
         let mut jumping = previous_jump;

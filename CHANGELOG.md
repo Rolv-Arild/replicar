@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2 (2026-10-09)
+
+- Conversion is deterministic again: 2.0.1 could give different states for the same replay in different processes (a deferred dodge looked its car up in a hash map). A test converts replays twice and compares their states.
+- First jumps of quick jump-and-dodge combinations (speed flips at kickoff) are pressed: a takeoff the updates show while the simulated car is still on the ground gets its jump. Takeoffs without a jump input, kickoff 12.3% -> 2.4%, open play 4.4% -> 3.2%.
+- `final_scores` is never null: a team the replay never put on the scoreboard has the goals its play segments end in.
+- Folder conversion rewrites `index.parquet` every 100 replays, so an interrupted run keeps most of its index.
+
 ## 2.0.1 (2026-10-09)
 
 Fixes from a downstream project's feedback (RESULTS.md, "User feedback from a downstream project"). Conversion output changes: files made with 2.0.0 should be converted again.

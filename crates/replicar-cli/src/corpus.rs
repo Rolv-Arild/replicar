@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use replicar::corpus::{convert_jobs, folder_jobs, write_index};
+use replicar::corpus::{Report, convert_jobs, folder_jobs, write_index};
 use replicar_format::WriteOptions;
 
 pub(crate) fn convert_folder(
@@ -23,9 +23,17 @@ pub(crate) fn convert_folder(
         options,
         threads,
         skip_existing,
-        &|done, total, row| match &row.error {
-            Some(error) => eprintln!("{done}/{total}  FAILED {}: {error}", row.replay),
-            None => eprintln!("{done}/{total}  {}", row.replay),
+        &Report {
+            progress: &|done, total, row| match &row.error {
+                Some(error) => eprintln!("{done}/{total}  FAILED {}: {error}", row.replay),
+                None => eprintln!("{done}/{total}  {}", row.replay),
+            },
+            // The index of the replays finished so far, rewritten as the run goes (complete at the end).
+            checkpoint: &|rows| {
+                if let Err(error) = write_index(&output.join("index.parquet"), rows, options) {
+                    eprintln!("could not write the index checkpoint: {error}");
+                }
+            },
         },
     );
     let index = output.join("index.parquet");

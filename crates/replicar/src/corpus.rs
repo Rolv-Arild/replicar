@@ -39,6 +39,17 @@ pub struct IndexRow {
     pub segments: Option<u32>,
 }
 
+/// What `convert_jobs` tells its caller as it goes.
+pub struct Report<'a> {
+    /// After each replay: how many are done, of how many, and its index row.
+    pub progress: &'a (dyn Fn(usize, usize, &IndexRow) + Sync),
+    /// Every `CHECKPOINT_EVERY` replays: the index rows of the replays done so far.
+    pub checkpoint: &'a (dyn Fn(&[IndexRow]) + Sync),
+}
+
+/// How many finished replays apart `convert_jobs` hands its rows to the checkpoint.
+pub const CHECKPOINT_EVERY: usize = 100;
+
 /// Converts the replay at `input` and writes it to `output`, creating its folder.
 pub fn convert_file(
     converter: &Converter,
@@ -134,9 +145,15 @@ pub fn convert_jobs(
     options: &WriteOptions,
     threads: usize,
     skip_existing: bool,
-    progress: &(dyn Fn(usize, usize, &IndexRow) + Sync),
+    report: &Report,
 ) -> Vec<IndexRow> {
+    let Report {
+        progress,
+        checkpoint,
+    } = report;
     let next = AtomicUsize::new(0);
+    // One checkpoint at a time: they write the same index.
+    let checkpointing = Mutex::new(());
     let done = AtomicUsize::new(0);
     let rows = Mutex::new(vec![IndexRow::default(); jobs.len()]);
     std::thread::scope(|scope| {
@@ -175,9 +192,26 @@ pub fn convert_jobs(
                             },
                         }
                     };
-                    progress(done.fetch_add(1, Ordering::Relaxed) + 1, jobs.len(), &row);
+                    let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress(finished, jobs.len(), &row);
                     if let Ok(mut rows) = rows.lock() {
                         rows[i] = row;
+                    }
+                    // Every 100 replays, the rows finished so far: an interrupted run keeps most of its index.
+                    if finished.is_multiple_of(CHECKPOINT_EVERY)
+                        && finished < jobs.len()
+                        && let Ok(_turn) = checkpointing.try_lock()
+                    {
+                        let snapshot: Vec<IndexRow> = rows
+                            .lock()
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter(|r| !r.replay.is_empty())
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        checkpoint(&snapshot);
                     }
                 }
             });

@@ -76,7 +76,7 @@ Options of `convert` and `resimulate`:
 | `--tick-step N` | with tick rows: only the ticks whose `sim_tick` is a multiple of N (8: 15 rows per second) |
 | `--all-frames` | also the frames outside play segments (countdowns, goal pauses and replays) |
 | `--jobs N` | replays converted at once (folder input; default: every core) |
-| `--skip-existing` | leave replays whose output exists (folder input; resumes a run) |
+| `--skip-existing` | leave replays whose output exists (folder input; resumes a run). The index is rewritten every 100 replays, so an interrupted run keeps most of it |
 | `--meshes DIR` | RocketSim's collision meshes |
 | `--replay FILE` | `resimulate` and `verify`: the replay the file was converted from |
 

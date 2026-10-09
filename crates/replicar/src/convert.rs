@@ -1031,11 +1031,23 @@ fn header(
                 end: s.end.name().to_owned(),
             })
             .collect(),
-        final_scores: network.frames.last().map_or([None, None], |f| {
-            f.team_scores
-                .each_ref()
-                .map(|s| s.as_ref().map(|v| v.value))
-        }),
+        // The last scoreboard value; a team the replay never put on the scoreboard has scored the goals its play
+        // segments end in (0 when it never scored), not an unknown score.
+        final_scores: {
+            let scored = |end: crate::annotate::segments::SegmentEnd| {
+                found.iter().filter(|s| s.end == end).count() as i32
+            };
+            let goals = [
+                scored(crate::annotate::segments::SegmentEnd::BlueGoal),
+                scored(crate::annotate::segments::SegmentEnd::OrangeGoal),
+            ];
+            let last = network.frames.last().map_or([None, None], |f| {
+                f.team_scores
+                    .each_ref()
+                    .map(|s| s.as_ref().map(|v| v.value))
+            });
+            [0, 1].map(|t| last[t].or(Some(goals[t])))
+        },
         counted_stats: network
             .header
             .counted_stats

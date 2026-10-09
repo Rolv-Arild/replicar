@@ -145,7 +145,7 @@ JSON in the Parquet key-value metadata under `replicar`:
 | `counted_stats` | the `stat_events` kinds the replay's object table names: counted by its build. A kind not named is unknown (builds before September 2026 name `demolition` only once someone has one) |
 | `pads` | per pad index: `position`, `is_big` |
 | `segments` | per play segment: `first_frame`, `last_frame`, `end` (future-derived) |
-| `final_scores` | the match result as the replay's last frame shows it; never in a row |
+| `final_scores` | the match result as the replay's last frame shows it (a team never on the scoreboard: the goals its play segments end in); never in a row |
 | `state_sha256` | the SHA-256 of every frame's bodies; a resimulation must reproduce it |
 | `configuration`, `diagnostics` | the conversion's options and what it counted |
 
