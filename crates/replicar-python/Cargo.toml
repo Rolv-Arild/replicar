@@ -1,6 +1,6 @@
 [package]
 name = "replicar-python"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,8 +17,8 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.29", features = ["abi3-py312"] }
 # The system allocator serializes `convert_many`'s threads on Windows (RESULTS.md, "v2: corpus throughput").
 mimalloc = { version = "0.1", default-features = false }
-replicar = { path = "../replicar", version = "2.0.1" }
-replicar-format = { path = "../replicar-format", version = "2.0.1" }
+replicar = { path = "../replicar", version = "2.0.2" }
+replicar-format = { path = "../replicar-format", version = "2.0.2" }
 
 [lints]
 workspace = true

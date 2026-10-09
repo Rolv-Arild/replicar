@@ -856,7 +856,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "replicar"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "boxcars",
  "glam",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "replicar-cli"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "clap",
  "mimalloc",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "replicar-eval"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "boxcars",
  "glam",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "replicar-format"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "replicar-python"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "mimalloc",
  "pyo3",

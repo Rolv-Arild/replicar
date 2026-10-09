@@ -1,6 +1,6 @@
 [package]
 name = "replicar"
-version = "2.0.1"
+version = "2.0.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,7 +14,7 @@ categories = ["simulation", "parser-implementations"]
 boxcars.workspace = true
 # `Quat`, which RocketSim's re-export of glam lacks; the same pin as RocketSim's, so the types unify.
 glam.workspace = true
-replicar-format = { path = "../replicar-format", version = "2.0.1" }
+replicar-format = { path = "../replicar-format", version = "2.0.2" }
 rocketsim.workspace = true
 serde.workspace = true
 serde_json.workspace = true
