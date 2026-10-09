@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let packaged = manifest.join(".cargo_vcs_info.json").exists();
     let start = if packaged { out } else { manifest };
