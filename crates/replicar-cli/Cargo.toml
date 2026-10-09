@@ -1,6 +1,6 @@
 [package]
 name = "replicar-cli"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,8 +20,8 @@ doc = false
 clap = { version = "4", features = ["derive"] }
 # The system allocator serializes the conversion threads on Windows (RESULTS.md, "v2: corpus throughput").
 mimalloc = { version = "0.1", default-features = false }
-replicar = { path = "../replicar", version = "2.0.0" }
-replicar-format = { path = "../replicar-format", version = "2.0.0" }
+replicar = { path = "../replicar", version = "2.0.1" }
+replicar-format = { path = "../replicar-format", version = "2.0.1" }
 serde_json.workspace = true
 sha2.workspace = true
 

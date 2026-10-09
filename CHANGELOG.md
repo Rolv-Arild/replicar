@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.0.1 (2026-10-09)
+
+Fixes from a downstream project's feedback (RESULTS.md, "User feedback from a downstream project"). Conversion output changes: files made with 2.0.0 should be converted again.
 
 - The interval that ends at a goal frame is simulated: the ticks in which the ball crosses the line were left out, and the goal frame's row repeated the previous `sim_tick`.
 - A jump, double jump or dodge whose impulse the frame's update already shows is pressed before that update, so the controls show it (it was set as flags only): presses that took effect in the game and are missing from the file, human 1.3-2.0% -> 0%, bots 5.1% -> 0.8% (RocketSim recordings).

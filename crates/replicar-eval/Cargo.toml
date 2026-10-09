@@ -1,6 +1,6 @@
 [package]
 name = "replicar-eval"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,8 +11,8 @@ publish = false
 [dependencies]
 boxcars.workspace = true
 glam.workspace = true
-replicar = { path = "../replicar", version = "2.0.0" }
-replicar-format = { path = "../replicar-format", version = "2.0.0" }
+replicar = { path = "../replicar", version = "2.0.1" }
+replicar-format = { path = "../replicar-format", version = "2.0.1" }
 # v1, kept at the repository root until v2 replaces it, is the oracle every v2 stage is compared with
 # (docs/v2-plan.md, section 5).
 replicar-v1 = { path = "../.." }
