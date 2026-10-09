@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "replicar-native"
-version = "2.0.2"
+version = "2.0.3"
 description = "The native part of replicar: convert Rocket League replays to replicar files and resimulate them"
 requires-python = ">=3.12"
 license = { text = "MIT" }
