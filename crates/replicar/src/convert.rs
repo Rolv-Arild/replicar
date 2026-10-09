@@ -258,7 +258,12 @@ impl<'m> Converter<'m> {
                 platform()
             ));
         }
-        if header.rocketsim_version != crate::ROCKETSIM_VERSION {
+        // Another RocketSim release simulates differently; an unknown one is left to the state checksum below.
+        let known = |v: &str| !v.is_empty() && v != "unknown";
+        if known(&header.rocketsim_version)
+            && known(crate::ROCKETSIM_VERSION)
+            && header.rocketsim_version != crate::ROCKETSIM_VERSION
+        {
             return refuse(format!(
                 "the file was simulated with RocketSim {}, this build has {}",
                 header.rocketsim_version,

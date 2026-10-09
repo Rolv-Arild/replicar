@@ -17,9 +17,9 @@ arrow-buffer = "=60.0.0"
 arrow-schema = "=60.0.0"
 arrow-select = "=60.0.0"
 boxcars = "=0.12.0"
-glam = "=0.33.11"
+glam = "0.33"
 parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "zstd"] }
-rocketsim = "=0.2.7"
+rocketsim = "0.2.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"

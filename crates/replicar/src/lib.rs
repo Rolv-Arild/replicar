@@ -30,8 +30,9 @@ pub use meshes::Meshes;
 pub use replicar_format::{FrameIndex, PlayerIndex, ReplayTick, SimTick, TICKS_PER_SECOND, Team};
 pub use rocketsim;
 
-/// The RocketSim release replicar simulates with (the pinned `rocketsim` crate).
-pub const ROCKETSIM_VERSION: &str = "0.2.7";
+/// The RocketSim release this build simulates with: any compatible release (at least the one in `Cargo.toml`), read
+/// from the build's `Cargo.lock` by `build.rs`; "unknown" when it could not be found.
+pub const ROCKETSIM_VERSION: &str = env!("REPLICAR_ROCKETSIM_VERSION");
 
 /// Parse a replay, requiring its network frames: a replay that parses only as far as its header is an
 /// error, never an empty conversion.

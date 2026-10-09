@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- RocketSim: any compatible release from 0.2.9 (the newest is assumed best), instead of exactly 0.2.7. Each file's header records the release that simulated it, read from the build's `Cargo.lock`; CI and the release builds take the newest release. 0.2.9 against 0.2.7: held-out one-step car velocity and position medians about 7% lower, tails unchanged; closer to the game for airborne cars (true-input one-step velocity p90 about 10-15% lower).
+
 ## 2.0.2 (2026-10-09)
 
 Fixes from the downstream project's feedback on 2.0.1. Conversion output changes; 2.0.1 was not deterministic, so convert its files again with 2.0.2.

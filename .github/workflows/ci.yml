@@ -5,6 +5,9 @@ name: ci
 on:
   push:
   pull_request:
+  # Weekly, so that a new RocketSim release is tested even when nothing here changes.
+  schedule:
+    - cron: "17 4 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +31,9 @@ jobs:
           toolchain: "1.97.1"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # replicar takes the newest compatible RocketSim (assumed best): test with it, not only the one in the lock.
+      - name: Newest RocketSim
+        run: cargo update -p rocketsim
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

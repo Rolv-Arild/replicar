@@ -29,6 +29,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      # Every build takes the newest compatible RocketSim; the files it writes record which one.
+      - run: cargo update -p rocketsim
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -78,6 +83,8 @@ jobs:
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
+      # Every build takes the newest compatible RocketSim; the files it writes record which one.
+      - run: cargo update -p rocketsim
       - run: cargo build --release --locked -p replicar-cli
       - uses: actions/upload-artifact@v4
         with:
