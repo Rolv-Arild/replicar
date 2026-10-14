@@ -13,6 +13,10 @@ name: release
 on:
   workflow_dispatch:
     inputs:
+      ref:
+        description: "Tag or commit to build (empty: the ref the workflow runs from)"
+        required: false
+        default: ""
       build_number:
         description: "Wheel build number (empty for a release's own wheels)"
         required: false
@@ -38,6 +42,8 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -76,6 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -100,6 +108,8 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"

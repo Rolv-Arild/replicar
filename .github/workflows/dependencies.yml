@@ -103,4 +103,5 @@ jobs:
         run: |
           tag=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
           echo "rebuilding $tag with build number ${{ github.run_number }}"
-          gh workflow run release.yml --ref "$tag" -f build_number=${{ github.run_number }}
+          # The workflow as on master (fixes apply without retagging), the code as released.
+          gh workflow run release.yml --ref master -f ref="$tag" -f build_number=${{ github.run_number }}
