@@ -31,9 +31,9 @@ jobs:
           toolchain: "1.97.1"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # replicar takes the newest compatible RocketSim (assumed best): test with it, not only the one in the lock.
-      - name: Newest RocketSim
-        run: cargo update -p rocketsim
+      # replicar takes the newest compatible RocketSim and boxcars (assumed best): test with them, not only the lock's.
+      - name: Newest RocketSim and boxcars
+        run: cargo update -p rocketsim -p boxcars
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy

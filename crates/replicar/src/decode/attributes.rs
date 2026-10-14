@@ -84,6 +84,9 @@ pub(super) const SCORED_ON_TEAM: &str = "TAGame.GameEvent_Soccar_TA:ReplicatedSc
 pub(super) const MUTATOR_INDEX: &str = "ProjectX.GRI_X:ReplicatedGameMutatorIndex";
 pub(super) const BALL_GRAVITY_SCALE: &str = "TAGame.Ball_TA:ReplicatedBallGravityScale";
 pub(super) const BALL_MAX_SPEED_SCALE: &str = "TAGame.Ball_TA:ReplicatedBallMaxLinearSpeedScale";
+/// Sent only by matches with a jump mutator (values 3-5 seen; standard matches do not send it). Decoded by boxcars
+/// from 0.12.1.
+pub(super) const MAX_NUM_JUMPS: &str = "TAGame.Car_TA:MaxNumJumps";
 
 // Replay header properties.
 pub(super) const HEADER_MAP_NAME: &str = "MapName";

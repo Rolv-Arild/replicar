@@ -482,7 +482,7 @@ impl Tracker {
                     events.push(NetworkEvent::GoalScoredOn { team });
                 }
             }
-            MUTATOR_INDEX | BALL_GRAVITY_SCALE | BALL_MAX_SPEED_SCALE => {
+            MUTATOR_INDEX | BALL_GRAVITY_SCALE | BALL_MAX_SPEED_SCALE | MAX_NUM_JUMPS => {
                 let value = match attribute {
                     Attribute::Int(v) => Some(v.to_string()),
                     Attribute::Float(v) => Some(v.to_string()),
@@ -809,6 +809,15 @@ pub(super) fn nonstandard_notes(
         Some(_) => {}
     }
     for (name, values) in settings {
+        if name == MAX_NUM_JUMPS {
+            // Not sent in standard matches (none of the corpus replays has it): its presence is the mutator.
+            for value in values {
+                notes.push(format!(
+                    "{name} = {value} (not sent in standard matches: a jump mutator)"
+                ));
+            }
+            continue;
+        }
         let standard = if name == MUTATOR_INDEX { "-1" } else { "1" };
         let standard_value: f32 = standard.parse().unwrap_or(0.0);
         for value in values {
@@ -993,7 +1002,9 @@ mod tests {
         );
         assert!(nonstandard_notes(Some("CS_P"), &BTreeMap::new()).is_empty());
         let mutated = BTreeMap::from([(MUTATOR_INDEX.to_owned(), vec!["3".to_owned()])]);
-        assert_eq!(nonstandard_notes(Some("Stadium_P"), &mutated).len(), 1);
+        assert_eq!(nonstandard_notes(Some("Stadium_P"), &mutated).len(), 1); // A jump mutator: the attribute is sent only when it is on.
+        let jumps = BTreeMap::from([(MAX_NUM_JUMPS.to_owned(), vec!["3".to_owned()])]);
+        assert_eq!(nonstandard_notes(Some("Stadium_P"), &jumps).len(), 1);
     }
 
     /// A report of the same victim 1.7 s later is a repeat, 4.4 s later a new demolition; another victim
