@@ -5,8 +5,9 @@
 # that wheel build number (`replicar_native-<version>-<n>-...`, which pip prefers to the release's own wheels) and the
 # reader is not rebuilt: the same release, with the newest dependencies.
 #
-# Publishing to PyPI (the `publish` job) runs only when the repository variable PUBLISH_PYPI is `true` and PyPI trusts
-# this workflow (trusted publishing, environment `pypi`); otherwise the artifacts are uploaded by hand.
+# Publishing to PyPI runs only when the repository variable PUBLISH_PYPI is `true` and PyPI trusts this workflow
+# (trusted publishing): `replicar-native` from the environment `pypi-native`, `replicar` from `pypi`; otherwise the
+# artifacts are uploaded by hand.
 name: release
 
 on:
@@ -111,11 +112,31 @@ jobs:
           name: replicar-${{ matrix.platform.name }}
           path: target/release/${{ matrix.platform.binary }}
 
-  publish:
-    name: publish to PyPI
-    needs: [native-wheels, reader]
-    # Off until PyPI trusts this workflow; `reader` is skipped for a rebuild, which is not a failure here.
-    if: vars.PUBLISH_PYPI == 'true' && !failure() && !cancelled()
+  # One job per PyPI project: PyPI lets a workflow and environment be the trusted publisher of one pending project.
+  publish-native:
+    name: publish replicar-native to PyPI
+    needs: native-wheels
+    if: vars.PUBLISH_PYPI == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi-native
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: wheel-*
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  publish-reader:
+    name: publish replicar to PyPI
+    needs: reader
+    # The reader is not rebuilt for a build-number rebuild, so there is nothing to publish then.
+    if: vars.PUBLISH_PYPI == 'true' && inputs.build_number == ''
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -124,8 +145,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
-          pattern: "{wheel-*,reader}"
+          name: reader
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
