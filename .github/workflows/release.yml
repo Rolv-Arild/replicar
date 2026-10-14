@@ -7,7 +7,8 @@
 #
 # Publishing to PyPI runs only when the repository variable PUBLISH_PYPI is `true` and PyPI trusts this workflow
 # (trusted publishing): `replicar-native` from the environment `pypi-native`, `replicar` from `pypi`; otherwise the
-# artifacts are uploaded by hand.
+# artifacts are uploaded by hand. The crates go to crates.io (trusted publishing, environment `crates-io`) when
+# PUBLISH_CRATES is `true`, for a new version only.
 name: release
 
 on:
@@ -160,3 +161,35 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+
+  publish-crates:
+    name: publish the crates to crates.io
+    # A new replicar version only (a tag push or a manual run), never a build-number rebuild: crates.io users resolve
+    # the newest RocketSim and boxcars themselves. After the builds pass; a version already published is skipped.
+    needs: [native-wheels, command]
+    if: vars.PUBLISH_CRATES == 'true' && inputs.build_number == ''
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish (in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          for crate in replicar-format replicar replicar-cli; do
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            if curl -sf -A "replicar-release (github.com/Rolv-Arild/replicar)" "https://crates.io/api/v1/crates/$crate/$version" > /dev/null; then
+              echo "$crate $version is already on crates.io"
+            else
+              cargo publish -p "$crate"
+            fi
+          done
