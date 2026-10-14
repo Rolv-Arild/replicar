@@ -69,6 +69,9 @@ pub fn arena_state(header: &Header, row: &replicar_format::StateRow) -> Result<A
                 team,
                 config: hitbox.config(),
             },
+            // Fields a later RocketSim release adds (any compatible release is accepted) start at their defaults;
+            // with a release that adds none, the update is needless.
+            #[allow(clippy::needless_update)]
             CarState {
                 phys: phys(&car.body),
                 controls: controls(&car.controls),
@@ -102,6 +105,7 @@ pub fn arena_state(header: &Header, row: &replicar_format::StateRow) -> Result<A
                 world_contact_normal: i.world_contact_normal.map(Vec3A::from),
                 is_demoed: i.is_demoed,
                 demo_respawn_timer: i.demo_respawn_timer,
+                ..CarState::default()
             },
         ));
     }

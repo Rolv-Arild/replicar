@@ -81,6 +81,9 @@ impl BallRecord {
 }
 
 impl CarRecord {
+    // Fields a later RocketSim release adds (any compatible release is accepted) start at their defaults; with a
+    // release that adds none, the update is needless.
+    #[allow(clippy::needless_update)]
     fn to_rocketsim(&self) -> CarState {
         CarState {
             phys: self.physics.to_rocketsim(),
@@ -115,6 +118,7 @@ impl CarRecord {
             world_contact_normal: self.world_contact_normal.map(vec3),
             is_demoed: self.is_demoed,
             demo_respawn_timer: self.demo_respawn_timer,
+            ..CarState::default()
         }
     }
 }

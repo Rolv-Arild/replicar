@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Builds with RocketSim releases that add fields to its state types (0.2.11 added two to `CarState` and broke the build of 2.0.3 when Cargo picked it); the lock follows RocketSim 0.2.11.
+
 ## 2.0.3 (2026-10-09)
 
 Conversion output changes with the RocketSim release (each file records it); later RocketSim releases need no replicar release.
