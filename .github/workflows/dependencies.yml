@@ -1,0 +1,106 @@
+# Keeps replicar on the newest compatible RocketSim and boxcars (the newest is assumed best): daily, it updates both in
+# Cargo.lock; if that changes the lock, it runs the checks of ci.yml with the new lock, commits it to master when they
+# pass, and rebuilds the latest release's native wheels with a wheel build number (release.yml), so pip users get the
+# new simulator without a replicar release. A failing check leaves master as it was and shows as a failed run.
+name: dependencies
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: newest RocketSim and boxcars
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.update.outputs.changed }}
+      summary: ${{ steps.update.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - id: update
+        run: |
+          cargo update -p rocketsim -p boxcars
+          version() { grep -A1 "^name = \"$1\"$" Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p'; }
+          summary="rocketsim $(version rocketsim), boxcars $(version boxcars)"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Cargo.lock already has $summary"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"; echo "Cargo.lock updated: $summary"
+          fi
+      - if: steps.update.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock
+          path: Cargo.lock
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked --exclude replicar-v1
+
+  commit:
+    name: commit the lock and rebuild the wheels
+    needs: [check, test]
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: cargo-lock
+      - name: Commit Cargo.lock
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "Cargo.lock: ${{ needs.check.outputs.summary }}"
+          git push origin HEAD:master
+      - name: Rebuild the latest release's wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(git describe --tags --abbrev=0 --match 'v*' HEAD)
+          echo "rebuilding $tag with build number ${{ github.run_number }}"
+          gh workflow run release.yml --ref "$tag" -f build_number=${{ github.run_number }}

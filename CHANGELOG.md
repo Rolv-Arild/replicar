@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 2.0.4 (2026-10-14)
+
+Output unchanged for standard replays except through the RocketSim release (0.2.11 in the lock).
 
 - boxcars: any compatible release from 0.12.1 (the newest is assumed best), instead of exactly 0.12.0. 0.12.1 decodes `TAGame.Car_TA:MaxNumJumps`, so the private matches that failed to parse at frame 0 (5 of 140,328 downstream replays) now convert; the attribute is sent only by matches with a jump mutator (3-5 jumps), which the diagnostics now report as non-standard.
+- Daily dependency workflow: a newer RocketSim or boxcars release is tested, committed to the lock and built into the latest release's wheels (with a wheel build number) without a replicar release. The release workflow can publish to PyPI by trusted publishing (off until configured).
 - Builds with RocketSim releases that add fields to its state types (0.2.11 added two to `CarState` and broke the build of 2.0.3 when Cargo picked it); the lock follows RocketSim 0.2.11.
 
 ## 2.0.3 (2026-10-09)

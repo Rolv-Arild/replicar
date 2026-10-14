@@ -133,10 +133,15 @@ cargo test --workspace --all-targets     # building the Python module's crate ne
 cd python/v2 && PYTHONPATH=src python -m pytest tests
 ```
 
-CI (`.github/workflows/ci.yml`) runs the format check, clippy and v2's tests on Linux and Windows; the tests that need
-collision meshes or replays skip there, and version 1's unit tests (which need the meshes) run locally only. `.github/workflows/release.yml` builds the native wheels (Linux x86_64 and
-aarch64 manylinux_2_28, Windows x86_64, macOS universal2 for arm64 and Intel; one abi3 wheel each for CPython 3.12+), the reader's
-wheel and sdist, and the `replicar` command per platform, as artifacts; it publishes nothing.
+CI (`.github/workflows/ci.yml`) runs the format check, clippy and v2's tests on Linux and Windows with the newest
+compatible RocketSim and boxcars; the tests that need collision meshes or replays skip there, and version 1's unit
+tests (which need the meshes) run locally only. replicar accepts any compatible RocketSim and boxcars release (the
+newest is assumed best; each file records its RocketSim release). `.github/workflows/dependencies.yml` checks daily
+for new ones: when the lock changes and the checks pass, it commits the lock and rebuilds the latest release's native
+wheels with a wheel build number, which pip prefers. `.github/workflows/release.yml` builds the native wheels (Linux
+x86_64 and aarch64 manylinux_2_28, Windows x86_64, macOS universal2; one abi3 wheel each for CPython 3.12+), the
+reader's wheel and sdist, and the `replicar` command per platform; it publishes to PyPI only when trusted publishing
+is set up (see the workflow).
 
 The evaluation tools refuse paths with a `test` component unless given `--final-assessment`.
 

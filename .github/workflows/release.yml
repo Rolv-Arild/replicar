@@ -1,10 +1,21 @@
 # Builds what a release ships, as workflow artifacts: the native wheels (one abi3 wheel per platform, CPython 3.12+),
-# the pure-Python reader (wheel and sdist), and the `replicar` command for each platform. It publishes nothing:
-# uploading to PyPI or a GitHub release is a separate, deliberate step.
+# the pure-Python reader (wheel and sdist), and the `replicar` command for each platform.
+#
+# With `build_number` (dependencies.yml sets it when RocketSim or boxcars has a new release), the native wheels get
+# that wheel build number (`replicar_native-<version>-<n>-...`, which pip prefers to the release's own wheels) and the
+# reader is not rebuilt: the same release, with the newest dependencies.
+#
+# Publishing to PyPI (the `publish` job) runs only when the repository variable PUBLISH_PYPI is `true` and PyPI trusts
+# this workflow (trusted publishing, environment `pypi`); otherwise the artifacts are uploaded by hand.
 name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Wheel build number (empty for a release's own wheels)"
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
@@ -40,6 +51,13 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           rust-toolchain: "1.97.1"
           args: --release --out dist -m crates/replicar-python/Cargo.toml
+      - name: Wheel build number
+        if: inputs.build_number != ''
+        shell: bash
+        run: |
+          python -m pip install wheel
+          python -m wheel tags --build "${{ inputs.build_number }}" --remove dist/*.whl
+          ls dist
       - name: Smoke test
         shell: bash
         run: |
@@ -52,6 +70,8 @@ jobs:
 
   reader:
     name: reader (wheel and sdist)
+    # The reader holds no RocketSim: a rebuild with a build number leaves it as released.
+    if: inputs.build_number == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -90,3 +110,23 @@ jobs:
         with:
           name: replicar-${{ matrix.platform.name }}
           path: target/release/${{ matrix.platform.binary }}
+
+  publish:
+    name: publish to PyPI
+    needs: [native-wheels, reader]
+    # Off until PyPI trusts this workflow; `reader` is skipped for a rebuild, which is not a failure here.
+    if: vars.PUBLISH_PYPI == 'true' && !failure() && !cancelled()
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: "{wheel-*,reader}"
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
