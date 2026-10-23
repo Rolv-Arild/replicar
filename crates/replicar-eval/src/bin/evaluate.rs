@@ -573,6 +573,10 @@ struct Failure {
     error: String,
 }
 
+fn is_default_mask_block(block: &usize) -> bool {
+    *block == 100
+}
+
 #[derive(Serialize)]
 struct Report {
     schema_version: u32,
@@ -580,6 +584,10 @@ struct Report {
     metric: &'static str,
     masked_metric: &'static str,
     mask_seed: Option<u64>,
+    /// The mask's block length when not the default 100 (more masked samples per replay: decisions on
+    /// per-replay masked rows rest on 100-200 samples a replay at 100).
+    #[serde(skip_serializing_if = "is_default_mask_block")]
+    mask_block: usize,
     boxcars_version: &'static str,
     rocketsim_revision: &'static str,
     options: ConvertOptions,
@@ -855,18 +863,19 @@ fn add_masked_kinematics(
 struct MaskSchedule {
     seed: Option<u64>,
     replay_hash: u64,
+    block: usize,
 }
 
 impl MaskSchedule {
     fn horizon(self, index: usize) -> Option<usize> {
-        let offset = index % 100;
+        let offset = index % self.block;
         let start = if let Some(seed) = self.seed {
-            let mut value = seed ^ self.replay_hash ^ (index / 100) as u64;
+            let mut value = seed ^ self.replay_hash ^ (index / self.block) as u64;
             value = value.wrapping_add(0x9e3779b97f4a7c15);
             value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
             value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
             value ^= value >> 31;
-            1 + (value % 95) as usize
+            1 + (value % (self.block as u64 - 5)) as usize
         } else {
             1
         };
@@ -1306,6 +1315,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     options.fit_on_next_packet = false;
     let mut meshes = None;
     let mut mask_seed = None;
+    let mut mask_block = 100;
     let mut aligned_targets = false;
     // Whether the masked predictor infers packet lags (and so also uses the lag-dependent ground and jump
     // fits) in the aligned variant. `--aligned-targets-raw-predictor` scores the unchanged default
@@ -1343,6 +1353,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .to_string_lossy()
                     .parse::<u64>()?,
             );
+        } else if arg == "--mask-block" {
+            mask_block = args
+                .next()
+                .ok_or("--mask-block requires a frame count")?
+                .to_string_lossy()
+                .parse::<usize>()?;
+            if mask_block < 6 {
+                return Err("--mask-block must be at least 6".into());
+            }
         } else if arg == "--rotation-trace" {
             rotation_trace_path = Some(PathBuf::from(
                 args.next()
@@ -1351,7 +1370,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if meshes.is_none() {
             meshes = Some(PathBuf::from(arg));
         } else {
-            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--aligned-targets] [--aligned-targets-raw-predictor] [--offline-fits] [--no-infer-packet-lag] [--octane-hitbox] [--mask-seed u64] [--rotation-trace trace.jsonl] [--final-assessment]".into());
+            return Err("usage: evaluate_corpus <split_dir_or_replay> <report.json> [collision_meshes] [--aligned-targets] [--aligned-targets-raw-predictor] [--offline-fits] [--no-infer-packet-lag] [--octane-hitbox] [--mask-seed u64] [--mask-block frames] [--rotation-trace trace.jsonl] [--final-assessment]".into());
         }
     }
     if replicar_v1::sealed_path_refused(&root, final_assessment) {
@@ -1379,6 +1398,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         metric: "pre-correction position error (UU) on fresh replay positions after an active simulation interval; quantiles pool samples within each group",
         masked_metric: "every 100-frame block masks four consecutive ball/car body and car boost frames; default start offset 1 or replay-hash/seed-derived offset when mask_seed is set; compare uncorrected output with fresh original fields in Active phase and a <=0.5 second field-specific gap; hold baseline uses the last unmasked value",
         mask_seed,
+        mask_block,
         boxcars_version: "0.12.0",
         rocketsim_revision: replicar_v1::serialization::ROCKETSIM_REVISION,
         options: options.clone(),
@@ -1525,6 +1545,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let schedule = MaskSchedule {
                     seed: mask_seed,
                     replay_hash,
+                    block: mask_block,
                 };
                 let masked = masked_observations(&conversion.observations, schedule);
                 let masked_options = masked_conversion_options(
@@ -1570,6 +1591,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 replicar_eval::mask::MaskSchedule {
                                     seed: mask_seed,
                                     replay_hash,
+                                    block: mask_block,
                                 },
                             );
                             convert_network(&masked_network, &masked_options, None)

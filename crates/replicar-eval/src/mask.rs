@@ -1,5 +1,5 @@
 //! The masked evaluation's schedule and masking (v1: `evaluate_corpus.rs`, `MaskSchedule` and
-//! `masked_observations`): in every block of 100 frames, four consecutive frames have their body updates,
+//! `masked_observations`): in every block of 100 frames (`--mask-block`), four consecutive frames have their body updates,
 //! boost and pad records withheld (replaced by the previous frame's), and the conversion is told which frames
 //! those are, so that no inference reads them.
 
@@ -13,20 +13,22 @@ pub struct MaskSchedule {
     pub seed: Option<u64>,
     /// The first 16 hex digits of the replay's SHA-256, as a number.
     pub replay_hash: u64,
+    /// The block length in frames, one window of four per block (100 by default; at least 6).
+    pub block: usize,
 }
 
 impl MaskSchedule {
     /// The horizon of frame `index` (1-4), or `None` when it is not withheld.
     #[must_use]
     pub fn horizon(self, index: usize) -> Option<usize> {
-        let offset = index % 100;
+        let offset = index % self.block;
         let start = if let Some(seed) = self.seed {
-            let mut value = seed ^ self.replay_hash ^ (index / 100) as u64;
+            let mut value = seed ^ self.replay_hash ^ (index / self.block) as u64;
             value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
             value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             value ^= value >> 31;
-            1 + (value % 95) as usize
+            1 + (value % (self.block as u64 - 5)) as usize
         } else {
             1
         };

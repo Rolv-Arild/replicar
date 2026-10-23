@@ -39,6 +39,7 @@ use replicar_eval::{collect_replays, first_difference, v1_shape};
 const MASK: MaskSchedule = MaskSchedule {
     seed: None,
     replay_hash: 0,
+    block: 100,
 };
 
 /// A stage check: `None` when v2 equals v1 on the replay, else the first difference.
