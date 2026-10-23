@@ -476,6 +476,8 @@ impl Simulator<'_, '_> {
         {
             self.deferred_dodges.retain(|d| d.life != car.life);
         }
+        // A flip reset inferred since the last frame (`infer_flip_resets`), or below.
+        let mut inferred_reset = self.inferred_resets.remove(&player.get());
         let track = self.cars.entry(car.life).or_default();
         if let Some(raw) = fresh(&car.inputs.dodge_active_raw) {
             let activated = rising(track.last_dodge_raw.replace(raw), raw);
@@ -496,6 +498,13 @@ impl Simulator<'_, '_> {
                             yaw,
                         };
                     } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
+                        if !state.is_on_ground() && !state.has_flip_or_jump() {
+                            // The car could not flip in the simulation: a reset it missed (`infer_flip_resets`).
+                            super::reports::reset_flip(state);
+                            self.diagnostics.flip_resets_inferred += 1;
+                            inferred_reset = true;
+                        }
+                        state.has_jumped = true;
                         state.has_flipped = true;
                         state.is_flipping = true;
                         state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
@@ -573,7 +582,7 @@ impl Simulator<'_, '_> {
         {
             track.ground_counters = Some(previous);
         }
-        track.last_counters = Some(current);
+        let previous = track.last_counters.replace(current);
         if !state.is_on_ground()
             && let Some(ground) = track.ground_counters
         {
@@ -607,6 +616,12 @@ impl Simulator<'_, '_> {
                 dirty = true;
             }
             if flipped && !state.has_flipped && !acting {
+                if state.has_double_jumped {
+                    // A flip after the double jump: a reset the simulation missed (`infer_flip_resets`).
+                    state.has_double_jumped = false;
+                    self.diagnostics.flip_resets_inferred += 1;
+                    inferred_reset = true;
+                }
                 state.has_flipped = true;
                 state.has_jumped = true;
                 // RocketSim's `flip_time` counts from the end of the flip's torque (0.65 s after its start), and the
@@ -616,6 +631,11 @@ impl Simulator<'_, '_> {
                     .clamp(0.0, 1.0);
                 dirty = true;
             }
+        }
+        if inferred_reset && let Some(track) = self.cars.get_mut(&car.life) {
+            // As after an observed reset: the counters before this frame are the new baseline, so the counter
+            // rule does not set the flags the reset cleared again (this frame's action is the simulation's own).
+            track.ground_counters = previous;
         }
         (press, dirty)
     }

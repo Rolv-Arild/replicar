@@ -254,6 +254,7 @@ pub struct SimDiagnostics {
     pub active_car_demolition_corrections: usize,
     pub flip_resets_observed: usize,
     pub flip_resets_applied: usize,
+    pub flip_resets_inferred: usize,
     pub sleeping_car_updates: usize,
     pub cars_started_from_spawn_pose: usize,
     pub goal_explosion_demolitions: usize,
@@ -342,6 +343,8 @@ struct Simulator<'a, 'i> {
     pending_dodges: Vec<PendingDodge>,
     /// The current interval's early presses (`EarlyPress`).
     pub(super) early_presses: Vec<EarlyPress>,
+    /// The players whose flip reset was inferred since their last frame (`infer_flip_resets`).
+    inferred_resets: BTreeSet<usize>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
     pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
@@ -397,6 +400,7 @@ pub fn simulate(
         ground_schedules: Vec::new(),
         pending_dodges: Vec::new(),
         early_presses: Vec::new(),
+        inferred_resets: BTreeSet::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
@@ -764,6 +768,7 @@ impl<'a> Simulator<'a, '_> {
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
+            self.infer_flip_resets();
             self.record_tick();
             events.extend(
                 self.arena
@@ -774,6 +779,31 @@ impl<'a> Simulator<'a, '_> {
             );
         }
         updates::limit_velocities(&mut self.arena, self.players.len());
+    }
+
+    /// A jump press RocketSim would refuse: an airborne car whose double jump and flip are used up or expired.
+    /// Every press in the air comes from the replay's action counters (or a fit of them), so the car did double
+    /// jump or dodge in the game, which it can only after a flip reset the simulation missed: its wheels touched
+    /// the ball, but in the simulation fewer of them than the three RocketSim needs. The reset is applied before
+    /// the press, as an observed one is, so that the press double jumps or flips (with its direction).
+    fn infer_flip_resets(&mut self) {
+        for slot in 0..self.players.len() {
+            let state = self.arena.get_car_state(slot);
+            let pressed = state.controls.jump && !state.prev_controls().jump;
+            if !pressed
+                || state.is_on_ground()
+                || state.is_demoed
+                || state.is_auto_flipping
+                || state.has_flip_or_jump()
+            {
+                continue;
+            }
+            let mut state = *state;
+            reports::reset_flip(&mut state);
+            self.arena.set_car_state_full(slot, state);
+            self.diagnostics.flip_resets_inferred += 1;
+            self.inferred_resets.insert(slot);
+        }
     }
 
     /// An analog stick's throttle and steer at `sim_tick`: linear across each observed change that involves a value

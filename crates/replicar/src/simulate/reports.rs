@@ -1,5 +1,7 @@
 //! What the replay reports at the end of an interval: demolitions and flip resets, applied to the simulation.
 
+use rocketsim::CarState;
+
 use super::{HoldSource, Simulator};
 use crate::decode::{DemolitionReport, NetworkCar, NetworkEvent, NetworkFrame};
 
@@ -121,18 +123,7 @@ impl Simulator<'_, '_> {
             {
                 continue;
             }
-            state.has_jumped = false;
-            state.has_double_jumped = false;
-            state.has_flipped = false;
-            // RocketSim's `flip_time` is the time since the flip activity last changed and keeps the pitch locked
-            // below 0.3 s: touching restarts it only for a car still flipping (as landing does).
-            if state.is_flipping {
-                state.flip_time = 0.0;
-            }
-            state.is_flipping = false;
-            state.is_jumping = false;
-            state.air_time = 0.0;
-            state.air_time_since_jump = 0.0;
+            reset_flip(&mut state);
             let controls = *self.arena.get_car_controls(slot);
             self.arena.set_car_state_full(slot, state);
             self.arena.set_car_controls(slot, controls);
@@ -147,4 +138,20 @@ impl Simulator<'_, '_> {
             }
         }
     }
+}
+
+/// What RocketSim does to a car's flags on the tick a wheel touches something (an observed or inferred flip reset).
+pub(super) fn reset_flip(state: &mut CarState) {
+    state.has_jumped = false;
+    state.has_double_jumped = false;
+    state.has_flipped = false;
+    // RocketSim's `flip_time` is the time since the flip activity last changed and keeps the pitch locked below
+    // 0.3 s: touching restarts it only for a car still flipping (as landing does).
+    if state.is_flipping {
+        state.flip_time = 0.0;
+    }
+    state.is_flipping = false;
+    state.is_jumping = false;
+    state.air_time = 0.0;
+    state.air_time_since_jump = 0.0;
 }
