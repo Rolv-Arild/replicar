@@ -83,7 +83,9 @@ pub fn fly(
 #[must_use]
 pub fn pitch_lock_ticks(flip_time: f32) -> u32 {
     const PITCHLOCK_EXTRA_TIME: f32 = 0.3;
-    ((PITCHLOCK_EXTRA_TIME - flip_time) * 120.0 - 1e-3).ceil().max(0.0) as u32
+    ((PITCHLOCK_EXTRA_TIME - flip_time) * 120.0 - 1e-3)
+        .ceil()
+        .max(0.0) as u32
 }
 
 /// `fly` with the pitch locked for the first `pitch_lock` ticks (`pitch_lock_ticks`): no pitch torque, and the

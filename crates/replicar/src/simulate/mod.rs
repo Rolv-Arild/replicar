@@ -928,6 +928,10 @@ impl<'a> Simulator<'a, '_> {
             }
             let state = self.arena.get_car_state(player.get());
             let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
+            // About to land: low and coming down. The game's car can be on the ground already and jump; the
+            // press waits for the simulated car to land (`press_early`).
+            let landing =
+                !state.is_on_ground() && state.phys.pos.z < 40.0 && state.phys.vel.z <= 0.0;
             let rule = (gap / 2).saturating_sub(2).min(update - 1);
             // A dodge or double jump the counters show, pressed before the update; when that does not apply (a
             // fit plans the dodge, or the simulated car is still on the ground), the frame may still show the
@@ -959,8 +963,7 @@ impl<'a> Simulator<'a, '_> {
                 &previous.inputs.jump_active_raw,
             ) && !dodge_planned
                 && !dodge_fitted)
-                || (state.is_on_ground()
-                    && !state.has_jumped
+                || (((state.is_on_ground() && !state.has_jumped) || landing)
                     && car
                         .body
                         .position
@@ -978,7 +981,7 @@ impl<'a> Simulator<'a, '_> {
                 // the car's dodge or the dodge counter rose with it (a jump-and-dodge whose takeoff the updates
                 // show late): the dodge waits for the car to be airborne, and without this press the takeoff came
                 // from the update alone.
-                if !state.is_on_ground() || velocity.value[2] <= 150.0 {
+                if !(state.is_on_ground() || landing) || velocity.value[2] <= 150.0 {
                     continue;
                 }
                 let since = ((velocity.value[2] - 291.667) / 808.333 * 120.0)
@@ -1019,6 +1022,13 @@ impl<'a> Simulator<'a, '_> {
                     EarlyKind::Dodge { .. } => !state.is_on_ground() && !state.has_flipped,
                 };
                 if !ready {
+                    // A takeoff jump for a car still landing waits for it to touch down, up to the update.
+                    if press.kind == EarlyKind::Jump
+                        && !state.is_on_ground()
+                        && sim_tick < press.update_tick
+                    {
+                        self.early_presses[i].tick += 1;
+                    }
                     continue;
                 }
                 controls.jump = true;
