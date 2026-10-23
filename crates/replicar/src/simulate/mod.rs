@@ -892,10 +892,11 @@ impl<'a> Simulator<'a, '_> {
             };
             if created != car.life.created
                 || self.ground_schedules.iter().any(|(p, _)| *p == player)
-                || self.inference.dodge_handled(car.life, f)
             {
                 continue;
             }
+            // A dodge fit plans the dodge only: the takeoff's jump below is still this pass's.
+            let dodge_fitted = self.inference.dodge_handled(car.life, f);
             let dodge_planned = self.pending_dodges.iter().any(|d| d.player == player);
             let Some(previous) = frames[f - 1].cars.iter().find(|c| c.life == car.life) else {
                 continue;
@@ -922,30 +923,36 @@ impl<'a> Simulator<'a, '_> {
             let state = self.arena.get_car_state(player.get());
             let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
             let rule = (gap / 2).saturating_sub(2).min(update - 1);
-            let kind = if rose(
+            // A dodge or double jump the counters show, pressed before the update; when that does not apply (a
+            // fit plans the dodge, or the simulated car is still on the ground), the frame may still show the
+            // takeoff of the jump before it.
+            let air_press = if rose(
                 &car.inputs.dodge_active_raw,
                 &previous.inputs.dodge_active_raw,
             ) {
-                let Some([tx, ty, _]) = updates::dodge_torque(frames, f, car) else {
-                    continue;
-                };
-                let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
-                if dodge_planned || !airborne || (pitch * pitch + yaw * yaw).sqrt() <= 0.01 {
-                    continue;
-                }
-                (EarlyKind::Dodge { pitch, yaw }, rule)
+                updates::dodge_torque(frames, f, car).and_then(|[tx, ty, _]| {
+                    let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
+                    (!dodge_fitted
+                        && !dodge_planned
+                        && airborne
+                        && (pitch * pitch + yaw * yaw).sqrt() > 0.01)
+                        .then_some(EarlyKind::Dodge { pitch, yaw })
+                })
             } else if rose(
                 &car.inputs.double_jump_active_raw,
                 &previous.inputs.double_jump_active_raw,
             ) {
-                if dodge_planned || !airborne {
-                    continue;
-                }
-                (EarlyKind::DoubleJump, rule)
+                (!dodge_fitted && !dodge_planned && airborne).then_some(EarlyKind::DoubleJump)
+            } else {
+                None
+            };
+            let kind = if let Some(kind) = air_press {
+                (kind, rule)
             } else if (rose(
                 &car.inputs.jump_active_raw,
                 &previous.inputs.jump_active_raw,
-            ) && !dodge_planned)
+            ) && !dodge_planned
+                && !dodge_fitted)
                 || (state.is_on_ground()
                     && !state.has_jumped
                     && car
@@ -961,7 +968,10 @@ impl<'a> Simulator<'a, '_> {
             {
                 // A jump counter that rose in this frame, or a takeoff in this frame's update while the simulated
                 // car is still on the ground (the counters can lead the updates by frames, and an update showing
-                // the car at rest undoes the simulation's own jump): the jump that took off.
+                // the car at rest undoes the simulation's own jump): the jump that took off. Also when a fit plans
+                // the car's dodge or the dodge counter rose with it (a jump-and-dodge whose takeoff the updates
+                // show late): the dodge waits for the car to be airborne, and without this press the takeoff came
+                // from the update alone.
                 if !state.is_on_ground() || velocity.value[2] <= 150.0 {
                     continue;
                 }
