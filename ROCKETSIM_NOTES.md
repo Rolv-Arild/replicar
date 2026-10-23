@@ -112,7 +112,8 @@ From `9910c58` to 0.2.7 (= `v3-rust` `dc5d60e`; RESULTS.md, "RocketSim `9910c58`
   `CarState::DEFAULT` and assign fields. **Workaround** in replicar (`crates/replicar/src/restore.rs`, v1
   `src/restoration.rs`): the normal goes in through the state's serde form (the `serde` feature), which serializes
   the cache. A `set_world_contact_normal` (or a full-cache setter for replay use) would remove the need.
-- **Hidden state still carries over** (`set_car_state_full`: "Hidden wheel contacts and the sticky gate carry over"),
+- **Hidden state still carries over, and the sticky-gate refresh is enough** (`set_car_state_full`: "Hidden wheel contacts and the sticky gate carry over"). Measured 2026-10-23 (RESULTS 'Fit leads'): a seeded state run for 24 ticks after three different previous trials matches the reference arena's own continuation bit for bit when `refresh_car_sticky_gate` follows the setter (driving, landing, a ball contact), and drifts by up to 0.05 UU and 0.8 UU/s without it. A one-car arena's `clone` costs 28 us, about 26 of its ticks.
+- **Hidden state in other tools** (`set_car_state_full`: "Hidden wheel contacts and the sticky gate carry over"),
   as the downstream project found in the C++ bindings (its feedback item 12: a car restored into an arena another
   policy drove reproduced episodes up to 140 UU differently from a fresh arena). 0.3 adds
   `reset_car_transient_contacts` and `refresh_car_contacts` for that; replicar's own simulation keeps contact

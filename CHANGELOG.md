@@ -9,6 +9,10 @@ RocketSim 0.3 (any compatible release from 0.3.2; 0.2 releases are no longer acc
 - Flip resets the simulation misses are inferred (downstream feedback item 18): a double jump or dodge the counters show for a car whose flip RocketSim says is used up gets the reset first, so it flips with its direction. The replay's dodges with a simulated flip: 96.3% -> 97.8% (train), 96.5% -> 97.7% (validation); airborne rows with a flip after the double jump 0.27% -> 0.03%. Counted in the header's simulation diagnostics as `flip_resets_inferred`.
 - The jump of a jump-and-dodge whose dodge a fit plans, or whose dodge counter rises in the takeoff's frame, is pressed: takeoffs without a jump input, kickoff 2.9% -> 1.8%, open play 3.4% -> 2.7% (train).
 - The daily dependency workflow opens an issue when a newer release is outside the requirement (as RocketSim 0.3 was).
+- Jumps off walls and the ceiling are pressed (the takeoff is recognised along the car's up axis, not the world's): open-play takeoffs without a jump input 2.7% -> 1.6% (train); jump presses missed against the true inputs 8.8% -> 4.3% and 8.3% -> 3.5% (LAN client bots).
+- A dodge or double jump planned while the jump is still held releases it first: dodges set as flags without a flip 1.1% -> 0.3% (train), 1.3% -> 0.3% (validation).
+- The air fits know RocketSim's pitch lock after a flip: airborne roll labels closer to the true inputs (for example 0.169 -> 0.159 mean error on a human's recordings).
+- `evaluate --mask-block N`: masked windows every N frames (default 100) for denser masked samples.
 
 ## 2.0.4 (2026-10-14)
 
