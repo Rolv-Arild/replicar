@@ -74,14 +74,41 @@ pub fn fly(
     ang_vel_start: Vec3A,
     segments: &[(AirControls, u32)],
 ) -> (Mat3A, Vec3A) {
+    fly_locked(rot_start, ang_vel_start, segments, 0)
+}
+
+/// The ticks, from a car state's own tick, for which RocketSim (from 0.2.12) locks its pitch: while `flip_time`
+/// is below 0.3 s, which it is for 0.3 s after a flip ends (it counts from there, also on the ground). 0 for
+/// a car still flipping, which the air fits fly through RocketSim itself.
+#[must_use]
+pub fn pitch_lock_ticks(flip_time: f32) -> u32 {
+    const PITCHLOCK_EXTRA_TIME: f32 = 0.3;
+    ((PITCHLOCK_EXTRA_TIME - flip_time) * 120.0 - 1e-3).ceil().max(0.0) as u32
+}
+
+/// `fly` with the pitch locked for the first `pitch_lock` ticks (`pitch_lock_ticks`): no pitch torque, and the
+/// pitch damped in full whatever the pitch input, as RocketSim does then.
+#[must_use]
+pub fn fly_locked(
+    rot_start: Mat3A,
+    ang_vel_start: Vec3A,
+    segments: &[(AirControls, u32)],
+    pitch_lock: u32,
+) -> (Mat3A, Vec3A) {
     const TICK: f32 = 1.0 / 120.0;
     let (mut rot, mut omega) = (rot_start, ang_vel_start);
+    let mut locked = pitch_lock;
     for &(controls, ticks) in segments {
         for _ in 0..ticks {
+            let mut controls = controls;
+            let any = controls.pitch != 0.0 || controls.yaw != 0.0 || controls.roll != 0.0;
+            if locked > 0 {
+                locked -= 1;
+                controls.pitch = 0.0;
+            }
             let dir_pitch = -rot.y_axis;
             let dir_yaw = rot.z_axis;
             let dir_roll = -rot.x_axis;
-            let any = controls.pitch != 0.0 || controls.yaw != 0.0 || controls.roll != 0.0;
             let torque = if any {
                 dir_pitch * (controls.pitch * TORQUE_PITCH)
                     + dir_yaw * (controls.yaw * TORQUE_YAW)
@@ -425,19 +452,29 @@ pub fn solve_bvp(
     omega_end: Vec3A,
     ticks: &[u32],
     prior: &[AirControls],
+    pitch_lock: u32,
 ) -> (Vec<AirControls>, f32, f32) {
     let mut residual = |u: &[f32]| -> [f32; 6] {
-        let (rot, omega) = fly(rot_start, omega_start, &segments_of(u, ticks));
+        let (rot, omega) = fly_locked(rot_start, omega_start, &segments_of(u, ticks), pitch_lock);
         residual_of(rot, omega, rot_end, omega_end)
     };
+    // The pitch lock left at the start of each segment.
+    let locks: Vec<u32> = ticks
+        .iter()
+        .scan(0u32, |elapsed, &n| {
+            let lock = pitch_lock.saturating_sub(*elapsed);
+            *elapsed += n;
+            Some(lock)
+        })
+        .collect();
     let mut jacobian = |u: &[f32], r: &[f32; 6]| -> Vec<[f32; 6]> {
         let segments = segments_of(u, ticks);
         // The state at the start of each segment.
         let mut starts = Vec::with_capacity(segments.len());
         let mut state = (rot_start, omega_start);
-        for segment in &segments {
+        for (segment, &lock) in segments.iter().zip(&locks) {
             starts.push(state);
-            state = fly(state.0, state.1, std::slice::from_ref(segment));
+            state = fly_locked(state.0, state.1, std::slice::from_ref(segment), lock);
         }
         (0..u.len())
             .map(|k| {
@@ -445,7 +482,7 @@ pub fn solve_bvp(
                 let mut up = u.to_vec();
                 up[k] += DIFFERENCE;
                 let perturbed = segments_of(&up, ticks);
-                let (rot, omega) = fly(starts[j].0, starts[j].1, &perturbed[j..]);
+                let (rot, omega) = fly_locked(starts[j].0, starts[j].1, &perturbed[j..], locks[j]);
                 let rp = residual_of(rot, omega, rot_end, omega_end);
                 std::array::from_fn(|i| (rp[i] - r[i]) / DIFFERENCE)
             })
@@ -621,6 +658,31 @@ mod tests {
     }
 
     /// Over a span the refinement closes most of what the analytic start misses.
+    #[test]
+    fn a_locked_pitch_has_no_effect_and_is_damped_in_full() {
+        let rot = Mat3A::from_rotation_z(0.4) * Mat3A::from_rotation_x(0.3);
+        let omega = Vec3A::new(0.5, -1.2, 0.8);
+        let with = |pitch| AirControls {
+            pitch,
+            yaw: 0.4,
+            roll: -0.6,
+        };
+        // Locked throughout: any pitch input flies as no pitch input.
+        assert_eq!(
+            fly_locked(rot, omega, &[(with(1.0), 12)], 12),
+            fly(rot, omega, &[(with(0.0), 12)])
+        );
+        // Locked for the first 5 ticks of 12: as no pitch for 5, then the input.
+        let (rot5, omega5) = fly(rot, omega, &[(with(0.0), 5)]);
+        assert_eq!(
+            fly_locked(rot, omega, &[(with(1.0), 12)], 5),
+            fly(rot5, omega5, &[(with(1.0), 7)])
+        );
+        assert_eq!(pitch_lock_ticks(0.25), 6);
+        assert_eq!(pitch_lock_ticks(0.3), 0);
+        assert_eq!(pitch_lock_ticks(2.0), 0);
+    }
+
     #[test]
     fn the_span_solve_reaches_the_end_angular_velocity() {
         let rot = Mat3A::from_quat(Quat::from_rotation_z(0.6));

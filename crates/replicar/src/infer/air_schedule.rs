@@ -202,8 +202,10 @@ pub(super) fn plan(
             best?
         }
         _ => {
+            // RocketSim ignores the pitch for 0.3 s after a flip ends (`air::pitch_lock_ticks`).
+            let lock = air::pitch_lock_ticks(state.flip_time);
             let (solved, rot_error, omega_error) =
-                air::solve_bvp(rot_a, omega_a, rot_b, omega_b, &segments, &prior);
+                air::solve_bvp(rot_a, omega_a, rot_b, omega_b, &segments, &prior, lock);
             (solved, rot_error, omega_error, 0)
         }
     };
