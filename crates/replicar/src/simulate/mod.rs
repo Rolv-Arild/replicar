@@ -964,11 +964,9 @@ impl<'a> Simulator<'a, '_> {
             ) && !dodge_planned
                 && !dodge_fitted)
                 || (((state.is_on_ground() && !state.has_jumped) || landing)
-                    && car
-                        .body
-                        .position
-                        .as_ref()
-                        .is_some_and(|p| p.frame == frame && p.value[2] < 150.0)
+                    && car.body.position.as_ref().is_some_and(|p| {
+                        p.frame == frame && (p.value[2] < 150.0 || state.is_on_ground())
+                    })
                     && car
                         .inputs
                         .jump_active_raw
@@ -981,12 +979,16 @@ impl<'a> Simulator<'a, '_> {
                 // the car's dodge or the dodge counter rose with it (a jump-and-dodge whose takeoff the updates
                 // show late): the dodge waits for the car to be airborne, and without this press the takeoff came
                 // from the update alone.
-                if !(state.is_on_ground() || landing) || velocity.value[2] <= 150.0 {
+                // The rise along the car's up axis, so that a jump off a wall or the ceiling counts as one off
+                // the floor does: the impulse (291.7 UU/s) and the hold force (1,458.3 UU/s^2) push along it,
+                // gravity's share depends on the surface.
+                let up = state.phys.rot_mat.z_axis;
+                let rise = glam::Vec3A::from(velocity.value).dot(up);
+                if !(state.is_on_ground() || landing) || rise <= 150.0 {
                     continue;
                 }
-                let since = ((velocity.value[2] - 291.667) / 808.333 * 120.0)
-                    .round()
-                    .clamp(1.0, 23.0) as u64;
+                let accel = 1458.333 - 650.0 * up.z;
+                let since = ((rise - 291.667) / accel * 120.0).round().clamp(1.0, 23.0) as u64;
                 (EarlyKind::Jump, update.saturating_sub(since))
             } else {
                 continue;
