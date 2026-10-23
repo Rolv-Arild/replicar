@@ -1,8 +1,10 @@
 //! A RocketSim state restored from a file row (`replicar_format::read_states`). The rotation comes back from
 //! a unit quaternion (within 1e-6 per matrix element of the simulated one, RESULTS.md, "v2: the file format"),
 //! the wheels only as touching or not (a touching wheel gets placeholder ray-hit fields), and nothing of
-//! RocketSim's hidden wheel and contact-solver state: a restored state is a snapshot to inspect or to start a new simulation from, not an exact
-//! continuation. For exact states, resimulate (`Converter::resimulate`).
+//! RocketSim's hidden wheel and contact-solver state: a restored state is a snapshot to inspect or to start a new
+//! simulation from, not an exact continuation. For exact states, resimulate (`Converter::resimulate`). Put a car
+//! into an arena with `Arena::set_car_state_full` (`set_car_state` clears the contacts); in an arena that has run
+//! before, `Arena::reset_car_transient_contacts` first drops the wheel state its own past left behind.
 
 use glam::{Mat3A, Quat, Vec3A};
 use replicar_format::header::Header;

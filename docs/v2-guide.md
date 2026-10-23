@@ -35,7 +35,11 @@ update ages count from the update ticks, and its seconds since update are null. 
 
 ## Statistics and events
 
-`events` holds what the replay reports: goals (with the `scorer` and `assister`), demolitions and flip resets.
+`events` holds what the replay reports: goals (with the `scorer` and `assister`), demolitions and flip resets (only
+replays that send the car's `DodgesRefreshedCounter`, about 2% of a recent corpus). The car flags also take the flip
+resets the simulation infers: a double jump or dodge the replay's counters show for a car whose flip RocketSim says
+is used up (its wheels touched the ball, but fewer than the three RocketSim needs) gets the reset first; the header's
+diagnostics count them (`flip_resets_inferred`), and they are not events.
 `stat_events` holds each player's match counters going up, in the frame the replay updates them: goals, assists,
 saves, shots and demolitions, and in replays from the builds of September 2026 on also epic saves, clears, centers,
 aerial hits, first touches, crossbar, bicycle and juggle hits, flip resets and times demolished. They are the game's
@@ -152,8 +156,9 @@ bindings have no `psyclops` hitbox: `arena(..., hitboxes={"psyclops": "OCTANE"})
 
 Fields whose meaning differs between the port and the bindings (measured by stepping both, 2026-10-08): `jump_time`
 (set from `car_jump_ticks` while the car has jumped, else 0; after the jump the port counts from its end, the
-bindings from its start), `flip_time` (the port's stops at the end of the flip, the bindings' keeps counting while
-airborne), `supersonic_time` (the port's grace timer counts time below 2,200 UU/s, the bindings' time since the car
+bindings from its start), `flip_time` (since RocketSim 0.2.12 the port's counts from the end of the flip's torque
+and on the ground too, and keeps the pitch locked while below 0.3 s; files simulated with 0.2.11 or older stop it at
+the end of the flip; the bindings' keeps counting while airborne), `supersonic_time` (the port's grace timer counts time below 2,200 UU/s, the bindings' time since the car
 became supersonic) and `time_since_boosted` (not in the bindings' `CarState`). A model that sees both should not rely
 on these. **Air throttle while boosting:** in the game and in the port an airborne car that boosts accelerates as if
 throttle were 1, whatever the throttle (LAN truth: 1,057.7 UU/s^2 at throttle 0 and 1); the bindings add the throttle

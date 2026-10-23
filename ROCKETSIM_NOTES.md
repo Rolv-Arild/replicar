@@ -1,6 +1,6 @@
 # RocketSim observations for its developers
 
-This project does **not** modify RocketSim. Since 2026-10-09 it accepts any compatible crates.io `rocketsim` release from 0.2.9 (`rocketsim = "0.2.9"`; the newest is assumed best, and every file records the release that simulated it); it depended on exactly 0.2.7 (identical to `v3-rust` `dc5d60e`, 2026-10-06) from 2026-10-07; it was pinned to `9910c58` (2026-10-01, 0.2.4) until then, to `0b02051` (2026-09-28, 0.2.1) until 2026-10-04 and to `79f4d22f` (2026-08-26) until 2026-09-29, and entries below say what changed between those. **Re-check at 0.2.7 (2026-10-07):** every reproduction gives the same numbers as at `9910c58` to the printed precision apart from last digits (RESULTS.md, "RocketSim `9910c58` to crates.io 0.2.7"); no status changes, and the flipping car still reports |w| 7.45 rad/s. **Re-check at `9910c58` (2026-10-04):** the reproductions of every entry (`simulate_hit_probe` with scale 1 and 3, `simulate_flip_profile`, `diagnose_contact_model` with and without the impulse, `diagnose_contact_fit`, `diagnose_contacts`, `audit_tick_integrality`, `audit_car_tick_integrality`, `rlbot_onestep`) give the same numbers as at `0b02051` to the printed precision, apart from the last digit of a few tails, so no status changes; the flipping car still reports |w| 7.45 rad/s against the replay's 5.50. Where a difference from the game matters, the converter works around it in its own code. This file records apparent inaccuracies, with the evidence, the RocketSim source location, the workaround used here, and how sure we are, as hints for the RocketSim developers.
+This project does **not** modify RocketSim. Since 2026-10-23 it accepts any compatible crates.io `rocketsim` release from 0.3.2 (`rocketsim = "0.3.2"`; the newest is assumed best, and every file records the release that simulated it); from 2026-10-09 any 0.2 release from 0.2.9; it depended on exactly 0.2.7 (identical to `v3-rust` `dc5d60e`, 2026-10-06) from 2026-10-07; it was pinned to `9910c58` (2026-10-01, 0.2.4) until then, to `0b02051` (2026-09-28, 0.2.1) until 2026-10-04 and to `79f4d22f` (2026-08-26) until 2026-09-29, and entries below say what changed between those. **Re-check at 0.2.7 (2026-10-07):** every reproduction gives the same numbers as at `9910c58` to the printed precision apart from last digits (RESULTS.md, "RocketSim `9910c58` to crates.io 0.2.7"); no status changes, and the flipping car still reports |w| 7.45 rad/s. **Re-check at `9910c58` (2026-10-04):** the reproductions of every entry (`simulate_hit_probe` with scale 1 and 3, `simulate_flip_profile`, `diagnose_contact_model` with and without the impulse, `diagnose_contact_fit`, `diagnose_contacts`, `audit_tick_integrality`, `audit_car_tick_integrality`, `rlbot_onestep`) give the same numbers as at `0b02051` to the printed precision, apart from the last digit of a few tails, so no status changes; the flipping car still reports |w| 7.45 rad/s against the replay's 5.50. Where a difference from the game matters, the converter works around it in its own code. This file records apparent inaccuracies, with the evidence, the RocketSim source location, the workaround used here, and how sure we are, as hints for the RocketSim developers.
 
 **How to read the evidence.** Replay packets are exact 120 Hz server states (`RESULTS.md`, "Replay packets are exact server ticks"): where RocketSim, started from one packet, disagrees with a later packet at that packet's exact tick, and the cause is not an unobserved player input, the discrepancy points at RocketSim. Sparse packets and missing inputs (pitch, roll, hold lengths) limit how much can be attributed. All measurements use the 60 `replays/train` replays unless noted; `replays/test` is untouched.
 
@@ -99,3 +99,37 @@ From `9910c58` to 0.2.7 (= `v3-rust` `dc5d60e`; RESULTS.md, "RocketSim `9910c58`
 
 - **Symptom.** RocketSim 0.2.11 added two public fields to `CarState` (`bump_cooldown_victim`, `jump_hold_broken`). replicar built `CarState` with every field listed (`crates/replicar/src/restore.rs`; v1 `src/restoration.rs`), so it no longer compiled: a downstream crate that accepts any compatible 0.2.x release breaks on a patch release. Cargo treats 0.2.x releases as compatible, so a fresh install of replicar 2.0.3 picks 0.2.11 and fails to build.
 - **Workaround.** Those literals end with `..CarState::default()`: fields a later release adds start at their defaults (`clippy::needless_update` allowed there, since with a release that adds none the update is needless). Built and clippy-clean against 0.2.9, 0.2.10 and 0.2.11. A `#[non_exhaustive]` marker or a constructor upstream would make such additions non-breaking for every user.
+
+## 12. 0.3: the car's contact cache is private, and `flip_time` changed in 0.2.12 (verified, 2026-10-23)
+
+- **API (0.3.0).** `CarState`'s `is_on_ground`, `wheels_with_contact`, `world_contact_normal` and `prev_controls` moved
+  into a private cache (`src/sim/car/car_state.rs`, `CarCache`) with getters; `Arena::set_car_state` now takes a
+  `CarCore` and clears the contacts and sets the previous controls to the current ones, and `set_car_state_full`
+  copies a whole `CarState` as `set_car_state` did. Setters exist for the ground flag with the wheels
+  (`set_contact_flags`, placeholder hit fields) and for the previous controls (`set_prev_controls`), **but not for the
+  world-contact normal**, which the car's next tick reads (sticky force, auto-flip, auto-roll), so a state restored
+  from a snapshot cannot carry it. A struct literal cannot fill the private cache either, so a tool must start from
+  `CarState::DEFAULT` and assign fields. **Workaround** in replicar (`crates/replicar/src/restore.rs`, v1
+  `src/restoration.rs`): the normal goes in through the state's serde form (the `serde` feature), which serializes
+  the cache. A `set_world_contact_normal` (or a full-cache setter for replay use) would remove the need.
+- **Hidden state still carries over** (`set_car_state_full`: "Hidden wheel contacts and the sticky gate carry over"),
+  as the downstream project found in the C++ bindings (its feedback item 12: a car restored into an arena another
+  policy drove reproduced episodes up to 140 UU differently from a fresh arena). 0.3 adds
+  `reset_car_transient_contacts` and `refresh_car_contacts` for that; replicar's own simulation keeps contact
+  continuity and calls neither.
+- **`flip_time` (0.2.12).** It now counts from the end of the flip's torque (0.65 s after the flip starts) and on the
+  ground, and the pitch torque is locked whenever it is below 0.3 s (`PITCHLOCK_EXTRA_TIME`), whether or not the car
+  has flipped (`update_air_torque`, `src/sim/car/base.rs` around line 512 at 0.3.2; before, `has_flipped` was
+  required and `flip_time` stopped at the end of the flip). A state built with `flip_time` 0 (the default) is
+  pitch-locked for 0.3 s: replicar's flip reset set it to 0, and the counter path set it to the time since the flip
+  started. Both now follow the new meaning (`simulate/reports.rs`, `simulate/car.rs`); measured neutral on the
+  evaluator. v1's air-model unit test, whose car started with `flip_time` 0, had failed since 0.2.12 unnoticed (CI
+  does not run v1's tests). Whether the game locks the pitch after every flip reset this way is not established.
+- **0.3.2 against 0.2.12** (RESULTS.md, "RocketSim 0.3.2"): every reproduction of this file, the evaluator and the
+  truth comparisons are unchanged to the last digit; conversion about 4% slower.
+- **`Arena::clone` (0.3.2):** still exact (four cars on random controls from a kickoff, 60 windows of 30 ticks: no
+  bit differs between the original and its clone), and now about 36 us per clone (about 13 ticks of a four-car arena;
+  1 ms at 0.2.9). The downstream project found the C++ bindings' `clone` drifting from the first tick once bodies
+  collide (feedback item 16), and their `multi_step` leaking about 1.2 MB per destroyed arena (item 17); neither is
+  the Rust port, and neither was checked here.
+

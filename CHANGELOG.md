@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+RocketSim 0.3 (any compatible release from 0.3.2; 0.2 releases are no longer accepted). Conversion output changes.
+
+- RocketSim 0.3.2 (and glam 0.34, which must match it). Against 0.2.12 the conversions are unchanged to the last digit on every check, about 4% slower. RocketSim 0.3 keeps a car's contact state private: `replicar::restore` builds `CarState`s through its setters; put one into an arena with `Arena::set_car_state_full` (`set_car_state` now takes a `CarCore` and clears the contacts).
+- `flip_time` as RocketSim counts it since 0.2.12 (from the end of the flip, and on the ground; the pitch is locked while it is below 0.3 s): an observed flip reset no longer locks the car's pitch for 0.3 s.
+- Flip resets the simulation misses are inferred (downstream feedback item 18): a double jump or dodge the counters show for a car whose flip RocketSim says is used up gets the reset first, so it flips with its direction. The replay's dodges with a simulated flip: 96.3% -> 97.8% (train), 96.5% -> 97.7% (validation); airborne rows with a flip after the double jump 0.27% -> 0.03%. Counted in the header's simulation diagnostics as `flip_resets_inferred`.
+- The jump of a jump-and-dodge whose dodge a fit plans, or whose dodge counter rises in the takeoff's frame, is pressed: takeoffs without a jump input, kickoff 2.9% -> 1.8%, open play 3.4% -> 2.7% (train).
+- The daily dependency workflow opens an issue when a newer release is outside the requirement (as RocketSim 0.3 was).
+
 ## 2.0.4 (2026-10-14)
 
 Output unchanged for standard replays except through the RocketSim release (0.2.11 in the lock).
