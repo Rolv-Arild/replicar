@@ -771,6 +771,7 @@ impl<'a> Simulator<'a, '_> {
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
+            self.release_before_presses(sim_tick);
             self.infer_flip_resets();
             self.record_tick();
             events.extend(
@@ -782,6 +783,31 @@ impl<'a> Simulator<'a, '_> {
             );
         }
         updates::limit_velocities(&mut self.arena, self.players.len());
+    }
+
+    /// Releases the jump the tick before a planned dodge or double-jump press, so that the press is a press: a
+    /// takeoff jump held to its update (`press_early`) could otherwise run into a fitted dodge's press tick.
+    fn release_before_presses(&mut self, sim_tick: u64) {
+        let next = sim_tick + 1;
+        let slots = self
+            .pending_dodges
+            .iter()
+            .filter(|d| d.start_tick == next)
+            .map(|d| d.player.get())
+            .chain(
+                self.early_presses
+                    .iter()
+                    .filter(|p| p.tick == next && p.kind != EarlyKind::Jump)
+                    .map(|p| p.player.get()),
+            )
+            .collect::<Vec<_>>();
+        for slot in slots {
+            let mut controls = *self.arena.get_car_controls(slot);
+            if controls.jump {
+                controls.jump = false;
+                self.arena.set_car_controls(slot, controls);
+            }
+        }
     }
 
     /// A jump press RocketSim would refuse: an airborne car whose double jump and flip are used up or expired.
@@ -1023,6 +1049,13 @@ impl<'a> Simulator<'a, '_> {
                     }
                     EarlyKind::Dodge { .. } => !state.is_on_ground() && !state.has_flipped,
                 };
+                if ready && press.kind != EarlyKind::Jump && state.prev_controls().jump {
+                    // The jump is still held: release now, press a tick later.
+                    controls.jump = false;
+                    self.arena.set_car_controls(slot, controls);
+                    self.early_presses[i].tick += 1;
+                    continue;
+                }
                 if !ready {
                     // A takeoff jump for a car still landing waits for it to touch down, up to the update.
                     if press.kind == EarlyKind::Jump
@@ -1160,6 +1193,24 @@ impl<'a> Simulator<'a, '_> {
     fn press_dodges(&mut self, sim_tick: u64) {
         let mut deferred = Vec::new();
         let mut pressed = Vec::new();
+        // A press while the jump is still held (a takeoff jump held into the dodge's first tick) would not be a
+        // press: release now and press a tick later.
+        for dodge in &mut self.pending_dodges {
+            if sim_tick == dodge.start_tick
+                && self
+                    .arena
+                    .get_car_state(dodge.player.get())
+                    .prev_controls()
+                    .jump
+                && !self.arena.get_car_state(dodge.player.get()).is_on_ground()
+            {
+                dodge.start_tick += 1;
+                dodge.end_tick = dodge.end_tick.max(dodge.start_tick);
+                let mut controls = *self.arena.get_car_controls(dodge.player.get());
+                controls.jump = false;
+                self.arena.set_car_controls(dodge.player.get(), controls);
+            }
+        }
         for dodge in &self.pending_dodges {
             let slot = dodge.player.get();
             if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground() {
