@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 (2026-10-23)
 
-RocketSim 0.3 (any compatible release from 0.3.2; 0.2 releases are no longer accepted). Conversion output changes.
+RocketSim 0.3 (any compatible release from 0.3.2; 0.2 releases are no longer accepted). Conversion output changes. Rust users: `replicar::restore` and the conversion callback now hand out RocketSim 0.3 types, so code that uses them with RocketSim 0.2 needs updating.
 
 - RocketSim 0.3.2 (and glam 0.34, which must match it). Against 0.2.12 the conversions are unchanged to the last digit on every check, about 4% slower. RocketSim 0.3 keeps a car's contact state private: `replicar::restore` builds `CarState`s through its setters; put one into an arena with `Arena::set_car_state_full` (`set_car_state` now takes a `CarCore` and clears the contacts).
 - `flip_time` as RocketSim counts it since 0.2.12 (from the end of the flip, and on the ground; the pitch is locked while it is below 0.3 s): an observed flip reset no longer locks the car's pitch for 0.3 s.
