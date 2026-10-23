@@ -98,8 +98,7 @@ fn car_state(packet: &(Vec3A, Vec3A, Mat3A, Vec3A), shift: Vec3A) -> CarState {
     state.phys.rot_mat = packet.2;
     state.phys.ang_vel = packet.3;
     let grounded = packet.0.z < 30.0;
-    state.is_on_ground = grounded;
-    state.wheels_with_contact = [grounded.then(rocketsim::RaycastHitInfo::default); 4];
+    state.set_contact_flags(grounded, [grounded; 4]);
     state
 }
 
@@ -373,7 +372,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut parked = BallState::default();
                 parked.phys.pos = Vec3A::new(0.0, 0.0, 1500.0);
                 arena.set_ball_state(parked);
-                arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
+                arena.set_car_state_full(0, car_state(&packet, Vec3A::ZERO));
                 arena.set_car_controls(0, controls);
                 for _ in 0..steps {
                     step_arena_tick(arena);
@@ -404,7 +403,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut parked = BallState::default();
                 parked.phys.pos = Vec3A::new(0.0, 0.0, 1500.0);
                 arena.set_ball_state(parked);
-                arena.set_car_state(0, car_state(&packet, shift));
+                arena.set_car_state_full(0, car_state(&packet, shift));
                 arena.set_car_controls(0, controls);
                 for _ in 0..stale {
                     step_arena_tick(arena);
@@ -450,7 +449,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut parked = BallState::default();
                 parked.phys.pos = Vec3A::new(0.0, 0.0, 1500.0);
                 arena.set_ball_state(parked);
-                arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
+                arena.set_car_state_full(0, car_state(&packet, Vec3A::ZERO));
                 arena.set_car_controls(0, controls);
                 ball_only.set_ball_state(ball_state);
                 let mut min_gap = f32::MAX;
@@ -480,7 +479,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut parked = BallState::default();
                 parked.phys.pos = Vec3A::new(0.0, 0.0, 1500.0);
                 arena.set_ball_state(parked);
-                arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
+                arena.set_car_state_full(0, car_state(&packet, Vec3A::ZERO));
                 arena.set_car_controls(0, controls);
                 let mut hit = false;
                 for s in 1..=(stale + k) {
@@ -492,7 +491,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     let mut state = *arena.get_car_state(0);
                     state.phys.pos += miss / steps as f32;
-                    arena.set_car_state(0, state);
+                    arena.set_car_state_full(0, state);
                 }
                 (hit, (arena.get_ball_state().phys.vel - b.1).length())
             });
@@ -506,7 +505,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut hit = false;
                 if pre >= 0 {
                     arena.set_ball_state(far);
-                    arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
+                    arena.set_car_state_full(0, car_state(&packet, Vec3A::ZERO));
                     arena.set_car_controls(0, controls);
                     for _ in 0..pre {
                         step_arena_tick(arena);
@@ -523,14 +522,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut far_car = car_state(&packet, Vec3A::ZERO);
                     far_car.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
                     far_car.phys.vel = Vec3A::ZERO;
-                    far_car.is_on_ground = false;
-                    far_car.wheels_with_contact = [None; 4];
-                    arena.set_car_state(0, far_car);
+                    far_car.set_contact_flags(false, [false; 4]);
+                    arena.set_car_state_full(0, far_car);
                     arena.set_ball_state(ball_state);
                     for _ in 0..lead {
                         step_arena_tick(arena);
                     }
-                    arena.set_car_state(0, car_state(&packet, Vec3A::ZERO));
+                    arena.set_car_state_full(0, car_state(&packet, Vec3A::ZERO));
                     arena.set_car_controls(0, controls);
                     for _ in 0..(k - lead) {
                         for event in step_arena_tick(arena) {

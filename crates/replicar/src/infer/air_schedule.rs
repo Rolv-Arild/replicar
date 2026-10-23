@@ -95,7 +95,7 @@ pub(super) fn plan(
         now,
         ..
     } = *query;
-    if state.is_on_ground || ((state.is_flipping || press.is_some()) && scratch.is_none()) {
+    if state.is_on_ground() || ((state.is_flipping || press.is_some()) && scratch.is_none()) {
         return None;
     }
     let first_time = f64::from(frames.first().map_or(0.0, |f| f.time));

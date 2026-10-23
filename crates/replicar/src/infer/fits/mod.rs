@@ -142,7 +142,7 @@ fn rebase_tick(tick: Option<u64>, source_tick: u64, target_tick: u64) -> Option<
 pub(super) fn seed_car(scratch: &mut Arena, mut state: CarState, source_tick: u64) {
     state.last_extra_hit_tick =
         rebase_tick(state.last_extra_hit_tick, source_tick, scratch.tick_count());
-    scratch.set_car_state(0, state);
+    scratch.set_car_state_full(0, state);
     scratch.refresh_car_sticky_gate(0);
 }
 

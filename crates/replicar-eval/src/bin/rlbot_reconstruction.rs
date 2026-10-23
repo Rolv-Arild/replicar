@@ -490,7 +490,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         sim.is_flipping,
                         sim.flip_time,
                         sim.has_jumped,
-                        sim.is_on_ground,
+                        sim.is_on_ground(),
                         car.inputs
                             .dodge_active_raw
                             .as_ref()
@@ -510,9 +510,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             t.vel.z,
                             sim.phys.vel.z,
                             sim.has_double_jumped,
-                            sim.is_on_ground,
+                            sim.is_on_ground(),
                             sim.controls.jump,
-                            sim.prev_controls.jump
+                            sim.prev_controls().jump
                         );
                     }
                 }
@@ -523,7 +523,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         e.1 += usize::from(bad);
                     };
                     let truth_ground = t.air_state == 0;
-                    tally("is_on_ground", sim.is_on_ground != truth_ground);
+                    tally("is_on_ground", sim.is_on_ground() != truth_ground);
                     tally("has_jumped", sim.has_jumped != t.has_jumped);
                     tally(
                         "has_double_jumped",
@@ -572,7 +572,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         && !sim.has_double_jumped
                         && !sim.has_flipped
                         && sim.air_time_since_jump < 1.25
-                        && !sim.is_on_ground;
+                        && !sim.is_on_ground();
                     let truth_can_flip = t.has_jumped
                         && !t.has_double_jumped
                         && !t.has_dodged
@@ -690,7 +690,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if t.dodge_timeout >= 0.0
                         && sim.has_jumped
                         && !sim.has_flipped
-                        && !sim.is_on_ground
+                        && !sim.is_on_ground()
                     {
                         timeout_err
                             .push(((1.25 - sim.air_time_since_jump) - t.dodge_timeout).abs());

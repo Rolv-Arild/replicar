@@ -702,7 +702,7 @@ pub fn activation_torque(
 }
 
 fn dodge_impulse_unobserved(car: &observations::Car, frame: usize, state: &CarState) -> bool {
-    let airborne = !state.is_on_ground || state.phys.pos.z > 50.0;
+    let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
     let velocity_fresh = car
         .body
         .linear_velocity
@@ -770,7 +770,7 @@ pub fn rebase_tick(tick: Option<u64>, source_tick: u64, target_tick: u64) -> Opt
 /// rebasing `last_extra_hit_tick` into the scratch arena's own tick counter (`rebase_car_ticks`).
 pub(crate) fn seed_scratch_car(scratch: &mut Arena, state: CarState, source_tick: u64) {
     let target_tick = scratch.tick_count();
-    scratch.set_car_state(0, rebase_car_ticks(state, source_tick, target_tick));
+    scratch.set_car_state_full(0, rebase_car_ticks(state, source_tick, target_tick));
     scratch.refresh_car_sticky_gate(0);
 }
 
@@ -829,7 +829,7 @@ fn limit_reported_velocities(arena: &mut Arena, car_count: usize) {
         if linear.is_some() || angular.is_some() {
             state.phys.vel = linear.unwrap_or(state.phys.vel);
             state.phys.ang_vel = angular.unwrap_or(state.phys.ang_vel);
-            arena.set_car_state(index, state);
+            arena.set_car_state_full(index, state);
         }
     }
     let mut ball = *arena.get_ball_state();
@@ -913,7 +913,7 @@ fn step_ticks(
                 // the direction of the same controls: leave those ticks to the press itself. A held
                 // jump (no new press) is not one, and keeps the solved controls.
                 let state = arena.get_car_state(schedule.slot);
-                if controls.jump && !state.prev_controls.jump && !state.is_on_ground {
+                if controls.jump && !state.prev_controls().jump && !state.is_on_ground() {
                     continue;
                 }
                 controls.pitch = entry.1.pitch;
@@ -1491,7 +1491,8 @@ pub fn convert_observations_with(
                     let Some(&(slot, created)) = actor_slots.get(&car.actor_id) else {
                         continue;
                     };
-                    if created != car.actor_created_frame || !arena.get_car_state(slot).is_on_ground
+                    if created != car.actor_created_frame
+                        || !arena.get_car_state(slot).is_on_ground()
                     {
                         continue;
                     }
@@ -1642,7 +1643,7 @@ pub fn convert_observations_with(
                                 &car.body,
                                 previous,
                                 &car_state.phys,
-                                Some(car_state.is_on_ground),
+                                Some(car_state.is_on_ground()),
                                 &observations.frames,
                             )
                         })
@@ -1838,7 +1839,7 @@ pub fn convert_observations_with(
                                 dodge_jump_control = true;
                                 dodge_pitch_control = pitch;
                                 dodge_yaw_control = yaw;
-                            } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                            } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                                 state.has_flipped = true;
                                 state.is_flipping = true;
                                 state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
@@ -1868,7 +1869,7 @@ pub fn convert_observations_with(
                             dodge_jump_control = true;
                             dodge_pitch_control = 0.0;
                             dodge_yaw_control = 0.0;
-                        } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                        } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                             // A fresh velocity packet at the activation frame already holds the
                             // impulse; only the state flags are missing.
                             state.has_jumped = true;
@@ -1888,13 +1889,13 @@ pub fn convert_observations_with(
                 ];
                 if new_lifetime {
                     ground_counters.remove(&key);
-                } else if state.is_on_ground
+                } else if state.is_on_ground()
                     && let Some(previous) = last_counters.get(&key)
                 {
                     ground_counters.insert(key, *previous);
                 }
                 last_counters.insert(key, current);
-                if !state.is_on_ground
+                if !state.is_on_ground()
                     && let Some(ground) = ground_counters.get(&key)
                 {
                     let jumped = current[0] != ground[0];
@@ -1933,7 +1934,7 @@ pub fn convert_observations_with(
                 }
 
                 if dirty {
-                    arena.set_car_state(slot, state);
+                    arena.set_car_state_full(slot, state);
                     // RocketSim asks for this after teleporting a car mid-drive (`arena/base.rs`).
                     arena.refresh_car_sticky_gate(slot);
                 }
@@ -1952,7 +1953,7 @@ pub fn convert_observations_with(
                 }
                 controls.jump &= gated_jump_active.get(&key).copied().unwrap_or(false);
 
-                let airborne = !state.is_on_ground || (new_lifetime && state.phys.pos.z > 50.0);
+                let airborne = !state.is_on_ground() || (new_lifetime && state.phys.pos.z > 50.0);
                 let min_lookahead_z = 50.0;
                 let mut air_controls_applied = false;
                 if options.infer_air_controls_from_lookahead
@@ -2190,7 +2191,7 @@ pub fn convert_observations_with(
                     );
                     if planned.is_some() {
                         diagnostics.air_bvp_planned += 1;
-                    } else if !current.is_on_ground {
+                    } else if !current.is_on_ground() {
                         diagnostics.air_bvp_refused += 1;
                     }
                     if let Some((schedule, shift)) = planned {
@@ -2206,7 +2207,7 @@ pub fn convert_observations_with(
                                 let mut adjusted = current;
                                 adjusted.flip_time =
                                     (adjusted.flip_time + shift as f32 / 120.0).max(0.0);
-                                arena.set_car_state(slot, adjusted);
+                                arena.set_car_state_full(slot, adjusted);
                             }
                         }
                         // Provenance: the interval this car's air controls were solved for (the span in
@@ -2404,7 +2405,7 @@ pub fn convert_observations_with(
                 if !state.is_demoed || goal_explosion {
                     state.is_demoed = true;
                     state.demo_respawn_timer = 3.0;
-                    arena.set_car_state(slot, state);
+                    arena.set_car_state_full(slot, state);
                     arena.refresh_car_sticky_gate(slot);
                 }
                 if goal_explosion {
@@ -2467,7 +2468,7 @@ pub fn convert_observations_with(
                 state.air_time_since_jump = 0.0;
                 // `set_car_state` overwrites the controls: keep them.
                 let controls = *arena.get_car_controls(slot);
-                arena.set_car_state(slot, state);
+                arena.set_car_state_full(slot, state);
                 arena.set_car_controls(slot, controls);
                 diagnostics.dodge_refreshes_applied += 1;
             }
@@ -3005,12 +3006,12 @@ mod tests {
         };
         let mut sim_state = CarState::default();
         sim_state.phys.pos.z = 17.0;
-        sim_state.is_on_ground = true;
+        sim_state.set_contact_flags(true, sim_state.wheels_with_contact().map(|w| w.is_some()));
 
         assert!(!dodge_impulse_unobserved(&car, 1, &sim_state));
 
         sim_state.phys.pos.z = 200.0;
-        sim_state.is_on_ground = false;
+        sim_state.set_contact_flags(false, sim_state.wheels_with_contact().map(|w| w.is_some()));
         assert!(dodge_impulse_unobserved(&car, 1, &sim_state));
 
         car.body.linear_velocity = Some(Value {
@@ -4257,12 +4258,11 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
         start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
-        start.is_on_ground = true;
-        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+        start.set_contact_flags(true, [true; 4]);
         let mut parked = BallState::default();
         parked.phys.pos = Vec3A::new(0.0, 0.0, 1800.0);
         truth.set_ball_state(parked);
-        truth.set_car_state(0, start);
+        truth.set_car_state_full(0, start);
         let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
         for tick in 1..=16u64 {
             truth.set_car_controls(
@@ -4393,7 +4393,7 @@ mod tests {
         let mut arena = Arena::new_with_config(config);
         arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
         arena.set_ball_state(parked);
-        arena.set_car_state(0, start);
+        arena.set_car_state_full(0, start);
         let (mut pending, mut ground, mut events) = (Vec::new(), vec![schedule], Vec::new());
         let mut air: Vec<AirSchedule> = Vec::new();
         step_ticks(
@@ -4416,7 +4416,7 @@ mod tests {
         let mut coasting = Arena::new_with_config(ArenaConfig::new(GameMode::Soccar));
         coasting.add_car(Team::Blue, CarBodyConfig::OCTANE);
         coasting.set_ball_state(parked);
-        coasting.set_car_state(0, start);
+        coasting.set_car_state_full(0, start);
         for _ in 0..8 {
             coasting.step_tick();
         }
@@ -4438,9 +4438,8 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
         start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
-        start.is_on_ground = true;
-        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
-        truth.set_car_state(0, start);
+        start.set_contact_flags(true, [true; 4]);
+        truth.set_car_state_full(0, start);
         let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
         for tick in 1..=16u64 {
             truth.set_car_controls(
@@ -4575,7 +4574,7 @@ mod tests {
             let mut arena = Arena::new_with_config(config.clone());
             arena.add_car(Team::Blue, CarBodyConfig::OCTANE);
             arena.set_ball_state(parked);
-            arena.set_car_state(0, start);
+            arena.set_car_state_full(0, start);
             let mut pending: Vec<PendingDodge> = Vec::new();
             let mut ground: Vec<GroundSchedule> = schedule.into_iter().collect();
             let mut events: Vec<SimEvent> = Vec::new();
@@ -4629,10 +4628,10 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(0.0, 0.0, 800.0);
         start.phys.vel = Vec3A::new(600.0, 0.0, 200.0);
-        start.is_on_ground = false;
+        start.set_contact_flags(false, start.wheels_with_contact().map(|w| w.is_some()));
         start.has_jumped = true;
         start.air_time_since_jump = 0.05;
-        truth.set_car_state(0, start);
+        truth.set_car_state_full(0, start);
         let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
         for tick in 1..=16u64 {
             let mut controls = CarControls::default();
@@ -4772,7 +4771,7 @@ mod tests {
         let mut car = CarState::default();
         car.phys.pos = Vec3A::new(pad.x, pad.y, 17.0);
         car.boost = 0.0;
-        scratch.set_car_state(0, car);
+        scratch.set_car_state_full(0, car);
         for _ in 0..10 {
             scratch.step_tick();
         }
@@ -4794,10 +4793,10 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(-2000.0, 1000.0, 900.0);
         start.phys.vel = Vec3A::new(600.0, 0.0, 100.0);
-        start.is_on_ground = false;
+        start.set_contact_flags(false, start.wheels_with_contact().map(|w| w.is_some()));
         start.has_jumped = true;
         start.air_time_since_jump = 0.05;
-        truth.set_car_state(0, start);
+        truth.set_car_state_full(0, start);
         let mut states = vec![*truth.get_car_state(0)];
         for tick in 1..=11u64 {
             let mut controls = CarControls::default();
@@ -5005,10 +5004,10 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(0.0, 0.0, 800.0);
         start.phys.vel = Vec3A::new(600.0, 0.0, 200.0);
-        start.is_on_ground = false;
+        start.set_contact_flags(false, start.wheels_with_contact().map(|w| w.is_some()));
         start.has_jumped = true;
         start.air_time_since_jump = 0.05;
-        truth.set_car_state(0, start);
+        truth.set_car_state_full(0, start);
         let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
         for tick in 1..=16u64 {
             let mut controls = CarControls::default();
@@ -5150,9 +5149,8 @@ mod tests {
         let mut start = CarState::default();
         start.phys.pos = Vec3A::new(0.0, 0.0, 17.0);
         start.phys.vel = Vec3A::new(500.0, 0.0, 0.0);
-        start.is_on_ground = true;
-        start.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
-        truth.set_car_state(0, start);
+        start.set_contact_flags(true, [true; 4]);
+        truth.set_car_state_full(0, start);
         let mut packets: Vec<CarState> = vec![*truth.get_car_state(0)];
         for tick in 1..=24u64 {
             let mut controls = CarControls::default();
@@ -5318,10 +5316,12 @@ mod tests {
         state.phys.vel = Vec3A::new(300.0, 100.0, 50.0);
         state.phys.rot_mat = rot;
         state.phys.ang_vel = omega;
-        state.is_on_ground = false;
+        state.set_contact_flags(false, state.wheels_with_contact().map(|w| w.is_some()));
         state.has_jumped = true;
         state.has_double_jumped = true;
-        arena.set_car_state(0, state);
+        // Long after any flip: RocketSim (from 0.2.12) locks the pitch while `flip_time` is below 0.3 s.
+        state.flip_time = 1.0;
+        arena.set_car_state_full(0, state);
         for &(controls, ticks) in segments {
             arena.set_car_controls(
                 0,
@@ -5863,9 +5863,8 @@ mod tests {
         car.phys.pos = Vec3A::new(0.0, -600.0, 17.0);
         car.phys.vel = Vec3A::new(0.0, 1400.0, 0.0);
         car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
-        car.is_on_ground = true;
-        car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
-        arena.set_car_state(0, car);
+        car.set_contact_flags(true, [true; 4]);
+        arena.set_car_state_full(0, car);
         let mut ball = BallState::default();
         ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);
         arena.set_ball_state(ball);

@@ -71,7 +71,7 @@ impl Simulator<'_, '_> {
                 ctx.predictions.push(super::Prediction {
                     car: Some(car.life.actor),
                     phys: simulated.phys,
-                    is_on_ground: Some(simulated.is_on_ground),
+                    is_on_ground: Some(simulated.is_on_ground()),
                 });
             }
         }
@@ -92,7 +92,7 @@ impl Simulator<'_, '_> {
         let (press, changed) = self.actions(ctx, car, &mut state, new_life, player);
         dirty |= changed;
         if dirty {
-            self.arena.set_car_state(slot, state);
+            self.arena.set_car_state_full(slot, state);
             // RocketSim asks for this after teleporting a car mid-drive.
             self.arena.refresh_car_sticky_gate(slot);
         }
@@ -266,7 +266,7 @@ impl Simulator<'_, '_> {
                 } else if state.is_flipping {
                     let mut adjusted = state;
                     adjusted.flip_time = (adjusted.flip_time + shift as f32 / 120.0).max(0.0);
-                    self.arena.set_car_state(player.get(), adjusted);
+                    self.arena.set_car_state_full(player.get(), adjusted);
                 }
             }
             ctx.fitted.push((
@@ -495,7 +495,7 @@ impl Simulator<'_, '_> {
                             pitch,
                             yaw,
                         };
-                    } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                    } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                         state.has_flipped = true;
                         state.is_flipping = true;
                         state.flip_rel_torque = Vec3A::new(tx / 2.60, ty / 2.24, 0.0);
@@ -524,7 +524,7 @@ impl Simulator<'_, '_> {
                         pitch: 0.0,
                         yaw: 0.0,
                     };
-                } else if !state.is_on_ground || state.phys.pos.z > 50.0 {
+                } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                     // The velocity update at the activation already holds the impulse: only the flags.
                     state.has_jumped = true;
                     state.has_double_jumped = true;
@@ -568,13 +568,13 @@ impl Simulator<'_, '_> {
         ];
         if new_life {
             track.ground_counters = None;
-        } else if state.is_on_ground
+        } else if state.is_on_ground()
             && let Some(previous) = track.last_counters
         {
             track.ground_counters = Some(previous);
         }
         track.last_counters = Some(current);
-        if !state.is_on_ground
+        if !state.is_on_ground()
             && let Some(ground) = track.ground_counters
         {
             let (jumped, double_jumped, flipped) = (
@@ -609,8 +609,11 @@ impl Simulator<'_, '_> {
             if flipped && !state.has_flipped && !acting {
                 state.has_flipped = true;
                 state.has_jumped = true;
-                // The time since the flip, so that the pitch lock after it ends on time.
-                state.flip_time = since(&car.inputs.dodge_active_raw).min(1.0);
+                // RocketSim's `flip_time` counts from the end of the flip's torque (0.65 s after its start), and the
+                // pitch stays locked for 0.3 s after that: the time since the flip ended, so that the lock ends on time.
+                state.flip_time = (since(&car.inputs.dodge_active_raw)
+                    - rocketsim::consts::car::flip::TORQUE_TIME)
+                    .clamp(0.0, 1.0);
                 dirty = true;
             }
         }
@@ -642,7 +645,7 @@ impl Simulator<'_, '_> {
                 Some(raw.value % 2 == 1 && (jump_impulse_unseen(car, frame) || track.jump_held));
         }
         controls.jump &= track.jump_gate.unwrap_or(false);
-        let airborne = !state.is_on_ground || (new_life && state.phys.pos.z > 50.0);
+        let airborne = !state.is_on_ground() || (new_life && state.phys.pos.z > 50.0);
         let mut air_controls_applied = None;
         if airborne
             && !press.jump

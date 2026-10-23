@@ -29,9 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         car.phys.vel = Vec3A::new(0.0, speed, 0.0);
         // facing +y: forward axis (x_axis) = +y, right (y_axis) = +x... (RocketSim rot_mat columns: forward, right, up)
         car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
-        car.is_on_ground = true;
-        car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
-        arena.set_car_state(0, car);
+        car.set_contact_flags(true, [true; 4]);
+        arena.set_car_state_full(0, car);
         let mut ball = BallState::default();
         ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);
         arena.set_ball_state(ball);
@@ -63,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "   tick {tick:3}: car speed {:7.1} y {:7.1} on_ground {} | ball speed {:.1}",
                     c.phys.vel.length(),
                     c.phys.pos.y,
-                    c.is_on_ground,
+                    c.is_on_ground(),
                     arena.get_ball_state().phys.vel.length()
                 );
             }

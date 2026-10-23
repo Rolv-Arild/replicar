@@ -29,7 +29,7 @@ pub(in crate::infer) fn fit_dodge_start(
     let ball = &query.ball;
     let frames = ctx.frames;
     let ang0 = car.body.angular_velocity_raw.as_ref()?;
-    if ang0.frame.get() != index || state.is_on_ground {
+    if ang0.frame.get() != index || state.is_on_ground() {
         return None;
     }
     // A car that has not dodged yet has no dodge counter (it gets one at its first dodge).

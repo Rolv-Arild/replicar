@@ -497,9 +497,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.11"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b4e837a1d133645d1dcf283e146a4b9901e390a1c13545f959cfed3a72f24f"
+checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "half"
@@ -935,9 +938,9 @@ dependencies = [
 
 [[package]]
 name = "rocketsim"
-version = "0.2.12"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "065e629057103378bff8c24d889ecbcd5ef85ad3e64ff5fc35fc47b4af1a140b"
+checksum = "ebc839e2723373ad44da8381aa8b12420dba946b64edfe9975ee5e554e0906e8"
 dependencies = [
  "arrayvec",
  "byteorder",
@@ -946,6 +949,7 @@ dependencies = [
  "glam",
  "log",
  "rustc-hash",
+ "serde",
 ]
 
 [[package]]

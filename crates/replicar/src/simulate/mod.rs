@@ -710,7 +710,7 @@ impl<'a> Simulator<'a, '_> {
             // In the air only the steer switches: the air fits solve from the car's update with the other controls
             // as they were (switching boost and throttle there too made the held-out errors worse; RESULTS.md,
             // "Inputs between frames").
-            if !self.arena.get_car_state(player.get()).is_on_ground {
+            if !self.arena.get_car_state(player.get()).is_on_ground() {
                 controls.steer = next.steer;
                 self.arena.set_car_controls(player.get(), controls);
                 continue;
@@ -750,7 +750,7 @@ impl<'a> Simulator<'a, '_> {
                 // A jump press in the air is a double jump or a flip, whose kind RocketSim takes from the
                 // same controls: the press keeps its own. A held jump is no press and flies the schedule.
                 let state = self.arena.get_car_state(slot);
-                if controls.jump && !state.prev_controls.jump && !state.is_on_ground {
+                if controls.jump && !state.prev_controls().jump && !state.is_on_ground() {
                     continue;
                 }
                 controls.pitch = air.pitch;
@@ -791,7 +791,7 @@ impl<'a> Simulator<'a, '_> {
         let tick_of = |x: usize| ((f64::from(frames[x].time) - first_time) * 120.0).round() as i64;
         for i in 0..self.ramp_cars.len() {
             let (slot, car) = self.ramp_cars[i];
-            let airborne = !self.arena.get_car_state(slot).is_on_ground;
+            let airborne = !self.arena.get_car_state(slot).is_on_ground();
             let shift = self.inference.control_shift(car.life).unwrap_or(0);
             let f = self.ramp_frame;
             // (switch tick, half gap, throttle, steer) of this car life's frames around this one.
@@ -890,7 +890,7 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             }
             let state = self.arena.get_car_state(player.get());
-            let airborne = !state.is_on_ground || state.phys.pos.z > 50.0;
+            let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
             let rule = (gap / 2).saturating_sub(2).min(update - 1);
             let kind = if rose(
                 &car.inputs.dodge_active_raw,
@@ -916,7 +916,7 @@ impl<'a> Simulator<'a, '_> {
                 &car.inputs.jump_active_raw,
                 &previous.inputs.jump_active_raw,
             ) && !dodge_planned)
-                || (state.is_on_ground
+                || (state.is_on_ground()
                     && !state.has_jumped
                     && car
                         .body
@@ -932,7 +932,7 @@ impl<'a> Simulator<'a, '_> {
                 // A jump counter that rose in this frame, or a takeoff in this frame's update while the simulated
                 // car is still on the ground (the counters can lead the updates by frames, and an update showing
                 // the car at rest undoes the simulation's own jump): the jump that took off.
-                if !state.is_on_ground || velocity.value[2] <= 150.0 {
+                if !state.is_on_ground() || velocity.value[2] <= 150.0 {
                     continue;
                 }
                 let since = ((velocity.value[2] - 291.667) / 808.333 * 120.0)
@@ -966,11 +966,11 @@ impl<'a> Simulator<'a, '_> {
                 self.arena.set_car_controls(slot, controls);
             } else if sim_tick == press.tick {
                 let ready = match press.kind {
-                    EarlyKind::Jump => state.is_on_ground && !state.has_jumped,
+                    EarlyKind::Jump => state.is_on_ground() && !state.has_jumped,
                     EarlyKind::DoubleJump => {
-                        !state.is_on_ground && !state.has_double_jumped && !state.has_flipped
+                        !state.is_on_ground() && !state.has_double_jumped && !state.has_flipped
                     }
-                    EarlyKind::Dodge { .. } => !state.is_on_ground && !state.has_flipped,
+                    EarlyKind::Dodge { .. } => !state.is_on_ground() && !state.has_flipped,
                 };
                 if !ready {
                     continue;
@@ -1010,11 +1010,11 @@ impl<'a> Simulator<'a, '_> {
         for (i, dodge) in self.deferred_dodges.iter().enumerate() {
             let slot = dodge.player.get();
             let mut state = *self.arena.get_car_state(slot);
-            if state.is_on_ground || state.has_flipped || state.is_demoed {
+            if state.is_on_ground() || state.has_flipped || state.is_demoed {
                 continue;
             }
             let mut controls = *self.arena.get_car_controls(slot);
-            if state.prev_controls.jump {
+            if state.prev_controls().jump {
                 controls.jump = false;
                 self.arena.set_car_controls(slot, controls);
                 continue;
@@ -1022,7 +1022,7 @@ impl<'a> Simulator<'a, '_> {
             if !state.has_jumped {
                 // Airborne without a jump the simulation saw (its update came after the counter): the jump happened.
                 state.has_jumped = true;
-                self.arena.set_car_state(slot, state);
+                self.arena.set_car_state_full(slot, state);
             }
             controls.jump = true;
             controls.pitch = dodge.pitch;
@@ -1099,7 +1099,7 @@ impl<'a> Simulator<'a, '_> {
         let mut deferred = Vec::new();
         for dodge in &self.pending_dodges {
             let slot = dodge.player.get();
-            if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground {
+            if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground() {
                 // The car is not yet airborne (its takeoff can reach the updates after the counters): pressing now
                 // would jump, not dodge. The dodge waits for the car to leave the ground.
                 deferred.push(DeferredDodge {

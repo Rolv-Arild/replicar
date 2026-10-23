@@ -123,7 +123,7 @@ pub(super) fn jump_impulse_unseen(car: &NetworkCar, frame: FrameIndex) -> bool {
 
 /// A dodge's impulse is not yet in the updates: the car is airborne and has no velocity update at `frame`.
 pub(super) fn dodge_impulse_unseen(car: &NetworkCar, frame: FrameIndex, state: &CarState) -> bool {
-    let airborne = !state.is_on_ground || state.phys.pos.z > 50.0;
+    let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
     airborne
         && !car
             .body
@@ -171,7 +171,7 @@ pub(super) fn limit_velocities(arena: &mut Arena, car_count: usize) {
         if linear.is_some() || angular.is_some() {
             state.phys.vel = linear.unwrap_or(state.phys.vel);
             state.phys.ang_vel = angular.unwrap_or(state.phys.ang_vel);
-            arena.set_car_state(index, state);
+            arena.set_car_state_full(index, state);
         }
     }
     let mut ball = *arena.get_ball_state();

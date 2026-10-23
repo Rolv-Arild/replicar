@@ -35,7 +35,7 @@ pub(in crate::infer) fn fit_jump_timing(
     let ball = &query.ball;
     let frames = ctx.frames;
     let ticks = ctx.ticks?;
-    if !ctx.in_play(index) || !state.is_on_ground {
+    if !ctx.in_play(index) || !state.is_on_ground() {
         return None;
     }
     let same_car = same_car(car);

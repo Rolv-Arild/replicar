@@ -22,10 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         let mut state = CarState::default();
         state.phys.pos = Vec3A::new(0.0, 0.0, 900.0);
-        state.is_on_ground = false;
+        state.set_contact_flags(false, state.wheels_with_contact().map(|w| w.is_some()));
         state.has_jumped = true;
         state.air_time_since_jump = 0.05;
-        arena.set_car_state(slot, state);
+        arena.set_car_state_full(slot, state);
         // flip_rel_torque = (tx, ty): pitch = -ty, yaw = -tx per the converter's mapping
         let mut started: Option<usize> = None;
         println!(

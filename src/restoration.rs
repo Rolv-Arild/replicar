@@ -81,46 +81,53 @@ impl BallRecord {
 }
 
 impl CarRecord {
-    // Fields a later RocketSim release adds (any compatible release is accepted) start at their defaults; with a
-    // release that adds none, the update is needless.
-    #[allow(clippy::needless_update)]
+    /// RocketSim keeps the contact cache private: the ground flag and the touching wheels go in through
+    /// `set_contact_flags`, the previous controls through `set_prev_controls`, and the world-contact normal, which
+    /// has no setter, through the state's serde form. Fields the record does not store (and any a later RocketSim
+    /// release adds) keep their defaults.
     fn to_rocketsim(&self) -> CarState {
-        CarState {
-            phys: self.physics.to_rocketsim(),
-            controls: self.controls.to_rocketsim(),
-            prev_controls: self.previous_controls.to_rocketsim(),
-            boost: self.boost,
-            is_boosting: self.is_boosting,
-            boosting_time: self.boosting_time,
-            time_since_boosted: self.time_since_boosted,
-            is_on_ground: self.is_on_ground,
-            wheels_with_contact: self
-                .wheels_with_contact
-                .map(|contact| contact.then(rocketsim::RaycastHitInfo::default)),
-            last_extra_hit_tick: self.last_extra_hit_tick,
-            has_jumped: self.has_jumped,
-            has_double_jumped: self.has_double_jumped,
-            has_flipped: self.has_flipped,
-            flip_rel_torque: vec3(self.flip_relative_torque),
-            jump_ticks: self.jump_ticks,
-            flip_time: self.flip_time,
-            is_flipping: self.is_flipping,
-            is_jumping: self.is_jumping,
-            air_time: self.air_time,
-            air_time_since_jump: self.air_time_since_jump,
-            is_supersonic: self.is_supersonic,
-            supersonic_grace_timer: self.supersonic_grace_timer,
-            handbrake_val: self.handbrake_value,
-            is_auto_flipping: self.is_auto_flipping,
-            auto_flip_timer: self.auto_flip_timer,
-            auto_flip_torque_scale: self.auto_flip_torque_scale,
-            bump_cooldown_timer: self.bump_cooldown_timer,
-            world_contact_normal: self.world_contact_normal.map(vec3),
-            is_demoed: self.is_demoed,
-            demo_respawn_timer: self.demo_respawn_timer,
-            ..CarState::default()
+        let mut state = CarState::DEFAULT;
+        state.phys = self.physics.to_rocketsim();
+        state.controls = self.controls.to_rocketsim();
+        state.boost = self.boost;
+        state.is_boosting = self.is_boosting;
+        state.boosting_time = self.boosting_time;
+        state.time_since_boosted = self.time_since_boosted;
+        state.last_extra_hit_tick = self.last_extra_hit_tick;
+        state.has_jumped = self.has_jumped;
+        state.has_double_jumped = self.has_double_jumped;
+        state.has_flipped = self.has_flipped;
+        state.flip_rel_torque = vec3(self.flip_relative_torque);
+        state.jump_ticks = self.jump_ticks;
+        state.flip_time = self.flip_time;
+        state.is_flipping = self.is_flipping;
+        state.is_jumping = self.is_jumping;
+        state.air_time = self.air_time;
+        state.air_time_since_jump = self.air_time_since_jump;
+        state.is_supersonic = self.is_supersonic;
+        state.supersonic_grace_timer = self.supersonic_grace_timer;
+        state.handbrake_val = self.handbrake_value;
+        state.is_auto_flipping = self.is_auto_flipping;
+        state.auto_flip_timer = self.auto_flip_timer;
+        state.auto_flip_torque_scale = self.auto_flip_torque_scale;
+        state.bump_cooldown_timer = self.bump_cooldown_timer;
+        state.is_demoed = self.is_demoed;
+        state.demo_respawn_timer = self.demo_respawn_timer;
+        state.set_contact_flags(self.is_on_ground, self.wheels_with_contact);
+        state.set_prev_controls(self.previous_controls.to_rocketsim());
+        match self.world_contact_normal {
+            Some(normal) => with_world_contact_normal(state, normal),
+            None => state,
         }
     }
+}
+
+/// `state` with the world-contact normal set, through serde (the only way in while RocketSim's contact cache is
+/// private).
+fn with_world_contact_normal(state: CarState, normal: [f32; 3]) -> CarState {
+    let mut value = serde_json::to_value(state).expect("a car state serializes");
+    value["cache"]["world_contact_normal"] = serde_json::json!(normal);
+    serde_json::from_value(value).expect("a car state deserializes")
 }
 
 fn hitbox(name: &str) -> Result<CarBodyConfig, RestoreError> {
@@ -292,7 +299,7 @@ pub fn apply_soccar_state_to_arena(
         crate::conversion::rebase_tick(ball.ds_info.last_damage_tick, source_tick, arena_tick);
     arena.set_ball_state(ball);
     for (index, (_, car)) in snapshot.cars.iter().enumerate() {
-        arena.set_car_state(
+        arena.set_car_state_full(
             index,
             crate::conversion::rebase_car_ticks(*car, source_tick, arena_tick),
         );
@@ -340,12 +347,17 @@ mod tests {
         original.cars[0].1.phys.ang_vel = Vec3A::new(0.2, -0.3, 1.0);
         original.cars[0].1.controls.pitch = -0.5;
         original.cars[0].1.controls.boost = true;
-        original.cars[0].1.prev_controls.jump = true;
+        original.cars[0]
+            .1
+            .set_prev_controls(rocketsim::CarControls {
+                jump: true,
+                ..Default::default()
+            });
         original.cars[0].1.boost = 42.0;
         original.cars[0].1.has_flipped = true;
         original.cars[0].1.flip_rel_torque = Vec3A::new(0.1, 0.2, 0.3);
         original.cars[0].1.jump_ticks = 17;
-        original.cars[0].1.world_contact_normal = Some(Vec3A::Z);
+        original.cars[0].1 = with_world_contact_normal(original.cars[0].1, [0.0, 0.0, 1.0]);
         original.boost_pads[0].1.cooldown = 2.0;
         let slots = vec![
             CarSlot {
@@ -417,10 +429,9 @@ mod tests {
             car.phys.pos = Vec3A::new(0.0, -600.0, 17.0);
             car.phys.vel = Vec3A::new(0.0, 1000.0, 0.0);
             car.phys.rot_mat = Mat3A::from_cols(Vec3A::Y, -Vec3A::X, Vec3A::Z);
-            car.is_on_ground = true;
-            car.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+            car.set_contact_flags(true, [true; 4]);
             car.controls.throttle = 1.0;
-            source.set_car_state(0, car);
+            source.set_car_state_full(0, car);
             let mut ball = BallState::default();
             ball.phys.pos = Vec3A::new(0.0, 0.0, 93.15);
             source.set_ball_state(ball);

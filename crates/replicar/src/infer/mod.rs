@@ -342,7 +342,7 @@ impl Inference for FittedInference<'_> {
         });
         if planned.is_some() {
             self.diagnostics.air_schedules_planned += 1;
-        } else if !query.state.is_on_ground {
+        } else if !query.state.is_on_ground() {
             self.diagnostics.air_schedules_refused += 1;
         }
         planned

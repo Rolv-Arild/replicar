@@ -132,8 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if pre_state.phys.pos.z > 25.0 {
                     continue;
                 }
-                pre_state.is_on_ground = true;
-                pre_state.wheels_with_contact = [Some(rocketsim::RaycastHitInfo::default()); 4];
+                pre_state.set_contact_flags(true, [true; 4]);
                 let post: Vec<Packet> = (index..=(index + 12).min(frames.len() - 1))
                     .filter_map(|f| packet_at(f).map(|(p, _, _)| p))
                     .collect();
@@ -164,7 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut table: Vec<((usize, usize), Vec<f64>)> = Vec::new();
                 for start in 1..=horizon.min(30) {
                     for hold in 1..=24usize {
-                        arena.set_car_state(slot, pre_state);
+                        arena.set_car_state_full(slot, pre_state);
                         let mut errors = vec![f64::NAN; post.len()];
                         for tick in 1..=horizon {
                             let mut controls = base;

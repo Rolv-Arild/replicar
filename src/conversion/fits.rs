@@ -68,7 +68,7 @@ pub(super) fn fit_ground_control_timing(
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
     // On any surface (floor, wall, ramp or ceiling); the counters rule out a jump or dodge in the span.
-    if !active(index) || !state.is_on_ground {
+    if !active(index) || !state.is_on_ground() {
         return None;
     }
     let same_car = |c: &&observations::Car| {
@@ -316,7 +316,7 @@ pub(super) fn fit_jump_timing(
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
     // On any surface (floor, wall, ramp or ceiling): a jump leaves it along the surface normal.
-    if !active(index) || !state.is_on_ground {
+    if !active(index) || !state.is_on_ground() {
         return None;
     }
     let same_car = |c: &&observations::Car| {
@@ -532,7 +532,7 @@ pub(super) fn fit_ground_flip_timing(
             .as_ref()
             .is_some_and(|w| w.get(frame).copied().unwrap_or(false))
     };
-    if !active(index) || !state.is_on_ground {
+    if !active(index) || !state.is_on_ground() {
         return None;
     }
     let same_car = |c: &&observations::Car| {
@@ -1110,7 +1110,7 @@ pub(super) fn fit_dodge_start(
 ) -> Option<DodgePlan> {
     let frames = &observations.frames;
     let ang0 = car.body.angular_velocity_replay_units.as_ref()?;
-    if ang0.frame != index || state.is_on_ground {
+    if ang0.frame != index || state.is_on_ground() {
         return None;
     }
     // A car that has not dodged yet has no dodge counter (it is created with one at its first dodge).

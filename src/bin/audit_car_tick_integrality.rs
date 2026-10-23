@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 state.phys.vel = Vec3A::from_array(v.value);
                 state.phys.ang_vel = Vec3A::from_array(w.value) * 0.01;
                 state.phys.rot_mat = Mat3A::from_quat(quat.normalize());
-                state.is_on_ground = false;
+                state.set_contact_flags(false, state.wheels_with_contact().map(|w| w.is_some()));
                 let raw = |x: &Option<observations::Value<u8>>| x.as_ref().map(|v| v.value);
                 lifetimes
                     .entry((car.actor_id, car.actor_created_frame))
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 {
                     continue;
                 }
-                arena.set_car_state(slot, a.state);
+                arena.set_car_state_full(slot, a.state);
                 let mut best: Option<(usize, f32)> = None;
                 let mut trace = Vec::new();
                 for k in 0..=24usize {

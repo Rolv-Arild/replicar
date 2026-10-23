@@ -227,15 +227,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             car_state.phys.vel = packet.1;
             car_state.phys.rot_mat = packet.2;
             car_state.phys.ang_vel = packet.3;
-            car_state.is_on_ground = packet.0.z < 30.0;
-            car_state.wheels_with_contact =
-                [(packet.0.z < 30.0).then(rocketsim::RaycastHitInfo::default); 4];
+            car_state.set_contact_flags(packet.0.z < 30.0, [(packet.0.z < 30.0); 4]);
             // A car packet one tick before the ball packet first advances alone (ball parked
             // far away), so both are at the ball packet's tick when they start interacting.
             let mut parked = BallState::default();
             parked.phys.pos = Vec3A::new(0.0, 0.0, 1500.0);
             arena.set_ball_state(parked);
-            arena.set_car_state(0, car_state);
+            arena.set_car_state_full(0, car_state);
             arena.set_car_controls(
                 0,
                 CarControls {

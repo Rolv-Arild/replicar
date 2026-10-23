@@ -46,6 +46,38 @@ jobs:
           name: cargo-lock
           path: Cargo.lock
 
+  incompatible:
+    # A release outside the requirement in Cargo.toml (RocketSim 0.3 against "0.2.9") needs a change here: the update
+    # above never reaches it, so it opens an issue (once per release) instead.
+    name: newer incompatible releases
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for crate in rocketsim boxcars; do
+            required=$(sed -n "s/^$crate = \(\"\|{ version = \"\)\([0-9.]*\)\".*/\2/p" Cargo.toml)
+            newest=$(curl -sf -A "replicar dependency check (github.com/${{ github.repository }})" \
+              "https://crates.io/api/v1/crates/$crate" | jq -r .crate.max_stable_version)
+            echo "$crate: required $required, newest $newest"
+            # Compatible (Cargo's caret rule): the same leftmost non-zero component.
+            key() { awk -F. '{ if ($1 != "0") print $1; else if ($2 != "0") print "0." $2; else print "0.0." $3 }' <<< "$1"; }
+            if [ -z "$required" ] || [ -z "$newest" ] || [ "$newest" = null ]; then
+              echo "::warning::could not compare $crate (required '$required', newest '$newest')"
+            elif [ "$(key "$required")" != "$(key "$newest")" ]; then
+              title="$crate $newest is out (outside the requirement \"$required\")"
+              if [ -z "$(gh issue list --state all --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+                gh issue create --title "$title" --body "The daily dependency check found $crate $newest on crates.io. Cargo.toml requires a release compatible with $required, so the automatic update does not reach it: port replicar to it, measure it (RESULTS.md, \"RocketSim 0.2.8 and 0.2.9\"), and raise the requirement."
+              fi
+            fi
+          done
+
   test:
     name: test (${{ matrix.os }})
     needs: check

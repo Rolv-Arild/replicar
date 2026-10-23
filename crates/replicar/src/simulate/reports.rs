@@ -53,7 +53,7 @@ impl Simulator<'_, '_> {
             if !state.is_demoed || goal_explosion {
                 state.is_demoed = true;
                 state.demo_respawn_timer = 3.0;
-                self.arena.set_car_state(slot, state);
+                self.arena.set_car_state_full(slot, state);
                 self.arena.refresh_car_sticky_gate(slot);
             }
             if goal_explosion {
@@ -124,13 +124,17 @@ impl Simulator<'_, '_> {
             state.has_jumped = false;
             state.has_double_jumped = false;
             state.has_flipped = false;
+            // RocketSim's `flip_time` is the time since the flip activity last changed and keeps the pitch locked
+            // below 0.3 s: touching restarts it only for a car still flipping (as landing does).
+            if state.is_flipping {
+                state.flip_time = 0.0;
+            }
             state.is_flipping = false;
             state.is_jumping = false;
-            state.flip_time = 0.0;
             state.air_time = 0.0;
             state.air_time_since_jump = 0.0;
             let controls = *self.arena.get_car_controls(slot);
-            self.arena.set_car_state(slot, state);
+            self.arena.set_car_state_full(slot, state);
             self.arena.set_car_controls(slot, controls);
             self.diagnostics.flip_resets_applied += 1;
             // A reset refreshes the car as touching the ground does: the action counters it has now are its new

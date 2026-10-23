@@ -42,8 +42,8 @@ fn phys(worst: &mut Worst, a: &PhysState, b: &PhysState) {
 fn rest(car: &CarState) -> String {
     let mut car = *car;
     car.phys = CarState::default().phys;
-    let wheels = car.wheels_with_contact.map(|w| w.is_some());
-    car.wheels_with_contact = [None; 4];
+    let wheels = car.wheels_with_contact().map(|w| w.is_some());
+    car.set_contact_flags(car.is_on_ground(), [false; 4]);
     format!("{car:?} {wheels:?}")
 }
 

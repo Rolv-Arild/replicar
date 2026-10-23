@@ -340,13 +340,13 @@ impl From<&CarState> for TraceSimCar {
             ],
             linear_velocity: state.phys.vel.to_array(),
             angular_velocity: state.phys.ang_vel.to_array(),
-            is_on_ground: state.is_on_ground,
+            is_on_ground: state.is_on_ground(),
             wheel_contact_count: state
-                .wheels_with_contact
+                .wheels_with_contact()
                 .iter()
                 .filter(|v| v.is_some())
                 .count(),
-            world_contact: state.world_contact_normal.is_some(),
+            world_contact: state.world_contact_normal().is_some(),
             is_jumping: state.is_jumping,
             is_flipping: state.is_flipping,
             controls_for_next_interval: state.controls.into(),
@@ -690,7 +690,7 @@ fn outlier_record(
         observed_velocity: car.body.linear_velocity.as_ref().map(|v| v.value),
         previous_sim_position: previous_car.map(|state| state.phys.pos.to_array()),
         previous_sim_velocity: previous_car.map(|state| state.phys.vel.to_array()),
-        previous_sim_on_ground: previous_car.map(|state| state.is_on_ground),
+        previous_sim_on_ground: previous_car.map(|state| state.is_on_ground()),
         previous_sim_demoed: previous_car.map(|state| state.is_demoed),
         boost_active_raw: car.inputs.boost_active_raw.as_ref().map(|v| v.value),
         jump_active_raw: car.inputs.jump_active_raw.as_ref().map(|v| v.value),

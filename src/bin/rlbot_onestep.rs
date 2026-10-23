@@ -151,8 +151,7 @@ fn car_state(pl: &Player, jump_ticks: u32, handbrake_val: f32, boosting_time: f3
     s.phys.ang_vel = pl.ang;
     s.boost = pl.boost;
     let on_ground = pl.air_state == 0 || pl.air_state == 1;
-    s.is_on_ground = on_ground;
-    s.wheels_with_contact = [on_ground.then(rocketsim::RaycastHitInfo::default); 4];
+    s.set_contact_flags(on_ground, [on_ground; 4]);
     s.has_jumped = pl.has_jumped;
     s.has_double_jumped = pl.has_double_jumped;
     s.has_flipped = pl.has_dodged;
@@ -291,7 +290,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         },
                     );
                     state.is_demoed = pl.demolished;
-                    arena.set_car_state(k, state);
+                    arena.set_car_state_full(k, state);
                 }
                 let mut ball = BallState::default();
                 ball.phys.pos = start.ball_pos;
@@ -313,7 +312,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             car.phys.pos = q(car.phys.pos, 0.01);
                             car.phys.vel = q(car.phys.vel, 0.001);
                             car.phys.ang_vel = q(car.phys.ang_vel, 0.00001);
-                            arena.set_car_state(k, car);
+                            arena.set_car_state_full(k, car);
                         }
                     }
                 }
@@ -390,8 +389,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 a.pos.z,
                                 got.phys.pos.z,
                                 b.pos.z,
-                                got.is_on_ground,
-                                got.wheels_with_contact.iter().flatten().count()
+                                got.is_on_ground(),
+                                got.wheels_with_contact().iter().flatten().count()
                             );
                         }
                     }

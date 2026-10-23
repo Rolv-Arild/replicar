@@ -690,7 +690,7 @@ pub(super) fn plan_air_bvp(
         .iter()
         .find(|d| d.slot == slot && d.start_tick > now_tick)
         .copied();
-    if state.is_on_ground || ((state.is_flipping || press.is_some()) && scratch.is_none()) {
+    if state.is_on_ground() || ((state.is_flipping || press.is_some()) && scratch.is_none()) {
         return None;
     }
     let frames = &observations.frames;
