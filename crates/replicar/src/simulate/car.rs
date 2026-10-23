@@ -690,6 +690,7 @@ impl Simulator<'_, '_> {
             }
         }
         if press.jump {
+            self.action_presses.insert(player.get());
             controls.jump = true;
             controls.pitch = press.pitch;
             controls.yaw = press.yaw;

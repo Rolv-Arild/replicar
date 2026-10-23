@@ -345,6 +345,8 @@ struct Simulator<'a, 'i> {
     pub(super) early_presses: Vec<EarlyPress>,
     /// The players whose flip reset was inferred since their last frame (`infer_flip_resets`).
     inferred_resets: BTreeSet<usize>,
+    /// The players pressing a double jump or a dodge in the coming step (`infer_flip_resets`).
+    action_presses: BTreeSet<usize>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
     pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
@@ -401,6 +403,7 @@ pub fn simulate(
         pending_dodges: Vec::new(),
         early_presses: Vec::new(),
         inferred_resets: BTreeSet::new(),
+        action_presses: BTreeSet::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
@@ -785,9 +788,12 @@ impl<'a> Simulator<'a, '_> {
     /// Every press in the air comes from the replay's action counters (or a fit of them), so the car did double
     /// jump or dodge in the game, which it can only after a flip reset the simulation missed: its wheels touched
     /// the ball, but in the simulation fewer of them than the three RocketSim needs. The reset is applied before
-    /// the press, as an observed one is, so that the press double jumps or flips (with its direction).
+    /// the press, as an observed one is, so that the press double jumps or flips (with its direction). Only the
+    /// presses of a double jump or dodge count (`action_presses`): the game counts those on their own counters, and
+    /// never after a flip reset on the jump counter, whose presses in the air are first jumps the simulation has
+    /// not landed for yet.
     fn infer_flip_resets(&mut self) {
-        for slot in 0..self.players.len() {
+        for slot in std::mem::take(&mut self.action_presses) {
             let state = self.arena.get_car_state(slot);
             let pressed = state.controls.jump && !state.prev_controls().jump;
             if !pressed
@@ -1028,6 +1034,9 @@ impl<'a> Simulator<'a, '_> {
                 self.arena.set_car_controls(slot, controls);
                 sources(&mut self.control_sources, slot).0 = AirControlSource::Press;
                 self.early_presses[i].applied = true;
+                if press.kind != EarlyKind::Jump {
+                    self.action_presses.insert(slot);
+                }
             } else if press.applied
                 && press.kind == EarlyKind::Jump
                 && sim_tick > press.tick
@@ -1071,6 +1080,7 @@ impl<'a> Simulator<'a, '_> {
             controls.roll = 0.0;
             self.arena.set_car_controls(slot, controls);
             sources(&mut self.control_sources, slot).0 = AirControlSource::Press;
+            self.action_presses.insert(slot);
             done.push(i);
         }
         for i in done.into_iter().rev() {
@@ -1137,6 +1147,7 @@ impl<'a> Simulator<'a, '_> {
     /// controls except on the press tick.
     fn press_dodges(&mut self, sim_tick: u64) {
         let mut deferred = Vec::new();
+        let mut pressed = Vec::new();
         for dodge in &self.pending_dodges {
             let slot = dodge.player.get();
             if sim_tick == dodge.start_tick && self.arena.get_car_state(slot).is_on_ground() {
@@ -1181,6 +1192,7 @@ impl<'a> Simulator<'a, '_> {
                 // The dodge direction is (-pitch, yaw + roll): a roll left in `base` would turn it.
                 controls.roll = 0.0;
                 self.arena.set_car_controls(slot, controls);
+                pressed.push(slot);
                 *sources(&mut self.control_sources, slot) =
                     (AirControlSource::Dodge, GroundControlSource::Dodge);
             } else {
@@ -1192,6 +1204,7 @@ impl<'a> Simulator<'a, '_> {
             }
         }
         self.deferred_dodges.extend(deferred);
+        self.action_presses.extend(pressed);
     }
 
     fn update_ball(&mut self, ctx: &mut FrameContext, body: &crate::decode::NetworkBody) {
