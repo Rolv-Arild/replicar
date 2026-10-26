@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-Conversion output changes (inputs in the air); the evaluator's held-out results do not (each timing reads the update the interval ends at, so it is off where the air lookahead or the in-sample fits are).
+Conversion output changes (inputs in the air, and on the ground through the jump and ground timing fits). The air timings read the update the interval ends at, so they are off where the air lookahead or the in-sample fits are and do not change the evaluator's held-out results; the two fit changes run there too and change them slightly (better).
 
 - The boost of an airborne car switches at the tick the update's velocity shows (it switched at the update): air boost press error 2.76 -> 1.46 ticks on a host replay's bots. Counted as `air_boost_switches`; `SimulationOptions::air_boost_timing` turns these timings off.
 - A held jump in the air is released at the tick the update's velocity along the car's up axis shows (`jump_releases_timed`); a double jump or dodge the update already shows is pressed at the step its position shows (`air_presses_timed`).
 - The dodge start fit also matches the first update after the dodge: flip start error on a bot match 4.0 -> 1.7 ticks, on client replays about 0.5 ticks lower; the replay's dodges with a simulated flip 98.7 -> 98.9% (train).
+- Near the ball or another car the air timings above still run unless the car can touch it in the interval (a copy of the arena stepped through it); they were off within 400 UU of the ball and 300 UU of a car. Air boost press error on a human `.rlpr` match 1.82 -> 0.38 ticks.
+- An airborne car's throttle switches at the tick the update's velocity shows, when it is not boosting (`air_throttle_switches`).
+- The jump timing fit also tries moving the controls of the jump's frame with the jump (bots press throttle, steer and handbrake with it): ground throttle change error on a host replay's bots 0.57 -> 0.15 ticks, handbrake press 1.82 -> 1.25. This one changes the evaluator's held-out results too (slightly better).
+- The ground timing fit no longer misses a control change whose previous frame lies outside its window (more of a client replay's changes are fitted).
 
 ## 2.1.1 (2026-10-26)
 
