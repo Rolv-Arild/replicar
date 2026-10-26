@@ -266,6 +266,7 @@ pub struct SimDiagnostics {
     pub flip_resets_inferred: usize,
     pub kickoffs_from_release: usize,
     pub air_boost_switches: usize,
+    pub jump_releases_timed: usize,
     pub sleeping_car_updates: usize,
     pub cars_started_from_spawn_pose: usize,
     pub goal_explosion_demolitions: usize,
@@ -360,6 +361,8 @@ struct Simulator<'a, 'i> {
     action_presses: BTreeSet<usize>,
     /// The current interval's boost switches in the air (`plan_air_boost`): sim tick, player slot, boost.
     air_boost: Vec<(u64, usize, bool)>,
+    /// The current interval's jump releases (`plan_jump_release`): sim tick, player slot.
+    jump_releases: Vec<(u64, usize)>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
     pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
@@ -418,6 +421,7 @@ pub fn simulate(
         inferred_resets: BTreeSet::new(),
         action_presses: BTreeSet::new(),
         air_boost: Vec::new(),
+        jump_releases: Vec::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
@@ -552,10 +556,12 @@ impl<'a> Simulator<'a, '_> {
         }
         self.early_presses.clear();
         self.air_boost.clear();
+        self.jump_releases.clear();
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
             if self.options.air_boost_timing {
                 self.plan_air_boost(&frame_cars, f, span, gap);
+                self.plan_jump_release(&frame_cars, f, span, gap);
             }
         }
         let mut events = Vec::new();
@@ -892,6 +898,7 @@ impl<'a> Simulator<'a, '_> {
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
+            self.release_jumps(sim_tick);
             self.release_before_presses(sim_tick);
             self.infer_flip_resets();
             self.record_tick();
@@ -1231,6 +1238,90 @@ impl<'a> Simulator<'a, '_> {
             }
             self.air_boost.push((start + switch + 1, slot, boost));
             self.diagnostics.air_boost_switches += 1;
+        }
+    }
+
+    /// When an airborne car's held jump was released in this interval. The jump counter turns even when the jump
+    /// ends (released, or at RocketSim's 24-tick limit), and the release was applied at the car's update; the
+    /// update's velocity shows how many of the interval's ticks the jump force (1,458.3 UU/s^2 along the car's up
+    /// axis) still pushed: the velocity along that axis (the mean of the car's at the interval's start and at the
+    /// update) changes by it beside gravity; boost and air throttle push along the forward axis, across it. A
+    /// release at the limit, or one the evidence puts at the update, is left as it was.
+    fn plan_jump_release(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+        const HOLD: f32 = 4375.0 / 3.0;
+        const MIN_TICKS: u32 = 3;
+        const MAX_TICKS: u32 = 24;
+        let start = self.arena.tick_count();
+        let frame = FrameIndex(f as u32);
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            if created != car.life.created {
+                continue;
+            }
+            let slot = player.get();
+            let state = *self.arena.get_car_state(slot);
+            let controls = *self.arena.get_car_controls(slot);
+            let released = car
+                .inputs
+                .jump_active_raw
+                .as_ref()
+                .is_some_and(|v| v.frame == frame && v.value % 2 == 0);
+            let (Some(velocity), Some(rotation)) = (
+                car.body
+                    .linear_velocity
+                    .as_ref()
+                    .filter(|v| v.frame == frame),
+                car.body.rotation.as_ref().filter(|v| v.frame == frame),
+            ) else {
+                continue;
+            };
+            if !released
+                || !controls.jump
+                || !state.is_jumping
+                || state.is_on_ground()
+                || state.wheels_with_contact().iter().any(Option::is_some)
+                || state.is_demoed
+            {
+                continue;
+            }
+            let update = span - self.car_ticks(car, f, true, gap).min(span);
+            // The ticks the jump can still push before RocketSim's limit, and the ones it must.
+            let left = u64::from(MAX_TICKS.saturating_sub(state.jump_ticks));
+            let least = u64::from(MIN_TICKS.saturating_sub(state.jump_ticks));
+            if update < 1 || left == 0 {
+                continue;
+            }
+            let [x, y, z, w] = rotation.value;
+            let end_up =
+                glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize()).z_axis;
+            let up = (state.phys.rot_mat.z_axis + end_up).normalize_or_zero();
+            let n = update as f32;
+            let change = (glam::Vec3A::from(velocity.value) - state.phys.vel).dot(up);
+            // Along `up`: change (UU/s) = (k * HOLD - n * 650 * up.z) / 120.
+            let k = ((change * 120.0 + n * 650.0 * up.z) / HOLD)
+                .round()
+                .clamp(least as f32, n) as u64;
+            if k >= update || k >= left {
+                continue;
+            }
+            self.jump_releases.push((start + k + 1, slot));
+            self.diagnostics.jump_releases_timed += 1;
+        }
+    }
+
+    /// Releases the jumps due at `sim_tick` (`plan_jump_release`).
+    fn release_jumps(&mut self, sim_tick: u64) {
+        for i in 0..self.jump_releases.len() {
+            let (tick, slot) = self.jump_releases[i];
+            if sim_tick == tick {
+                let mut controls = *self.arena.get_car_controls(slot);
+                if controls.jump {
+                    controls.jump = false;
+                    self.arena.set_car_controls(slot, controls);
+                }
+            }
         }
     }
 
