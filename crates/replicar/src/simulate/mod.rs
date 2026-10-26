@@ -1311,13 +1311,14 @@ impl<'a> Simulator<'a, '_> {
         }
     }
 
-    /// Releases the jumps due at `sim_tick` (`plan_jump_release`).
+    /// Releases the jumps due at `sim_tick` (`plan_jump_release`), unless the jump was already released: a jump
+    /// down now is then a new press (a dodge's).
     fn release_jumps(&mut self, sim_tick: u64) {
         for i in 0..self.jump_releases.len() {
             let (tick, slot) = self.jump_releases[i];
             if sim_tick == tick {
                 let mut controls = *self.arena.get_car_controls(slot);
-                if controls.jump {
+                if controls.jump && self.arena.get_car_state(slot).prev_controls().jump {
                     controls.jump = false;
                     self.arena.set_car_controls(slot, controls);
                 }
