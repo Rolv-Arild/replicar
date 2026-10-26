@@ -116,6 +116,9 @@ struct Variant {
     /// replicar's controls, and worse by as much.
     clearly_better: f32,
     clearly_worse: f32,
+    /// The same at the replay's precision: at least 0.05 UU and 20%.
+    finely_better: f32,
+    finely_worse: f32,
 }
 
 #[derive(Serialize)]
@@ -355,13 +358,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     for ((h, situation), samples) in &groups {
         let ours = &samples.errors[0];
         let n = ours.len();
-        let better = |a: &[[f32; 4]], b: &[[f32; 4]]| {
+        let better_by = |a: &[[f32; 4]], b: &[[f32; 4]], margin: f32| {
             a.iter()
                 .zip(b)
-                .filter(|(x, y)| x[0] + 1.0 < y[0] && x[0] < 0.8 * y[0])
+                .filter(|(x, y)| x[0] + margin < y[0] && x[0] < 0.8 * y[0])
                 .count() as f32
                 / n.max(1) as f32
         };
+        let better = |a: &[[f32; 4]], b: &[[f32; 4]]| better_by(a, b, 1.0);
         let variants = VARIANTS
             .iter()
             .zip(&samples.errors)
@@ -372,6 +376,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         quantiles: quantiles(e),
                         clearly_better: better(e, ours),
                         clearly_worse: better(ours, e),
+                        finely_better: better_by(e, ours, 0.05),
+                        finely_worse: better_by(ours, e, 0.05),
                     },
                 )
             })
