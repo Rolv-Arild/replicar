@@ -1169,10 +1169,17 @@ impl<'a> Simulator<'a, '_> {
     /// the dodge's along the ground plane) on top of forces that are steady over the interval (gravity, a boost that
     /// does not switch): with RocketSim's integration (velocity, then position), an impulse in step `k` of `n`
     /// leaves the position `dt * J * ((n - 1) / 2 - k)` past `dt * ((n - 1) * v0 + (n + 1) * v1) / 2`, the path of
-    /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse is the velocity change less gravity and boost. Not for a car with a
-    /// wheel on a surface or near the ball or another car, still holding its jump (whose force ends in the
-    /// interval), whose boost switches in it, near the speed limit, or whose evidence does not fit one impulse.
-    fn impulse_tick(&self, car: &NetworkCar, f: usize, kind: EarlyKind, update: u64) -> Option<u64> {
+    /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse
+    /// is the velocity change less gravity and boost. Not for a car with a wheel on a surface or near the ball or
+    /// another car, still holding its jump (whose force ends in the interval), whose boost switches in it, near the
+    /// speed limit, or whose evidence does not fit one impulse.
+    fn impulse_tick(
+        &self,
+        car: &NetworkCar,
+        f: usize,
+        kind: EarlyKind,
+        update: u64,
+    ) -> Option<u64> {
         const BOOST: f32 = 2975.0 / 3.0;
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
         const DOUBLE_JUMP: f32 = 875.0 / 3.0;
@@ -1182,7 +1189,8 @@ impl<'a> Simulator<'a, '_> {
         let state = *self.arena.get_car_state(slot);
         let controls = *self.arena.get_car_controls(slot);
         let fresh = |v: Option<&crate::decode::NetworkValue<[f32; 3]>>| {
-            v.filter(|v| v.frame == frame).map(|v| glam::Vec3A::from(v.value))
+            v.filter(|v| v.frame == frame)
+                .map(|v| glam::Vec3A::from(v.value))
         };
         let p1 = fresh(car.body.position.as_ref())?;
         let v1 = fresh(car.body.linear_velocity.as_ref())?;
@@ -1236,7 +1244,8 @@ impl<'a> Simulator<'a, '_> {
         if impulse.length() < 250.0 {
             return None;
         }
-        let offset = (p1 - state.phys.pos) * 120.0 - ((n - 1.0) * state.phys.vel + (n + 1.0) * v1) / 2.0;
+        let offset =
+            (p1 - state.phys.pos) * 120.0 - ((n - 1.0) * state.phys.vel + (n + 1.0) * v1) / 2.0;
         let steps = offset.dot(impulse) / impulse.length_squared();
         let k = (n - 1.0) / 2.0 - steps;
         // The part of the offset one impulse does not explain (UU/s, one tick of the impulse is |J|).
