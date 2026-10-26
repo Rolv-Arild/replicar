@@ -146,6 +146,12 @@ def main() -> None:
         rows, idx = rows[ok], idx[ok]
         tv = values[idx]
         ground = a["car_is_on_ground"][rows, p] == 1
+        # Near the ball (400 UU) or another car (300 UU), as in `replicar-eval identifiability`.
+        here = a["car_position"][rows, p]
+        others = [q["index"] for q in f.players if q["index"] != p]
+        near = np.linalg.norm(here - a["ball_position"][rows], axis=1) < 400
+        for q in others:
+            near |= np.nan_to_num(np.linalg.norm(here - a["car_position"][rows, q], axis=1), nan=np.inf) < 300
         for k, name_k in ((3, "throttle"), (4, "steer")):
             err = np.abs(a[f"car_controls_{name_k}"][rows, p] - tv[:, k])
             g[f"{name_k} |error|"].extend(err.tolist())
@@ -176,6 +182,8 @@ def main() -> None:
                     j = same[np.argmin(np.abs(same - t))]
                     g[f"{name_k} change error {where}"].append(int(j - t))
                     g[f"{name_k} change missed {where}"].append(0)
+                    if near[s0 + t]:
+                        g[f"{name_k} change error {where} near"].append(int(j - t))
         # Flips: each true flip start (flipping turns on) against the nearest simulated one within 15 ticks.
         if tv.shape[1] > 13:
             sim_flip = a["car_is_flipping"][rows, p] == 1
@@ -226,6 +234,8 @@ def main() -> None:
                             g[f"{name_k} {kind} error"].append(int(cp[j] - t))
                             if not ground[s0 + t]:
                                 g[f"{name_k} {kind} error air"].append(int(cp[j] - t))
+                            if near[s0 + t]:
+                                g[f"{name_k} {kind} error {'ground' if ground[s0 + t] else 'air'} near"].append(int(cp[j] - t))
                             g[f"{name_k} {kind} missed"].append(0)
                         else:
                             g[f"{name_k} {kind} missed"].append(1)

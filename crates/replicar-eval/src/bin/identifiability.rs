@@ -206,6 +206,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut seen = 0usize;
     // (horizon frame, situation) -> samples
     let mut groups: BTreeMap<(usize, &'static str), Samples> = BTreeMap::new();
+    // With IDENT_DUMP=<path>: one line per scored update (frame, slot, horizon, situation, then the position error
+    // of each variant), for inspecting windows.
+    let mut dump: Vec<String> = Vec::new();
+    let dumping = std::env::var_os("IDENT_DUMP").is_some();
     let mut evaluate = |frames: &VecDeque<SimulatedFrame>| {
         let start = &frames[0];
         if frames.iter().skip(1).any(|f| f.ticks.is_empty()) {
@@ -335,6 +339,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         (car.phys.ang_vel - Vec3A::from(v.value) * 0.01).length()
                     });
             }
+            if dumping {
+                let errors: Vec<String> = errors.iter().map(|e| format!("{:.4}", e[0])).collect();
+                dump.push(format!(
+                    "{},{slot},{h},{},{}",
+                    frame.get(),
+                    situation(slot),
+                    errors.join(",")
+                ));
+            }
             for key in [(h, situation(slot)), (h, "all")] {
                 let group = groups.entry(key).or_default();
                 group.errors.resize(VARIANTS.len(), Vec::new());
@@ -391,6 +404,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     fs::write(&args[4], serde_json::to_string_pretty(&out)?)?;
+    if let Some(path) = std::env::var_os("IDENT_DUMP") {
+        fs::write(path, dump.join("\n") + "\n")?;
+    }
     for (k, r) in &out {
         print!("{k:28} n {:6} pos p90 /better/worse:", r.samples);
         for (name, v) in &r.variants {
