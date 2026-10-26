@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+Conversion output changes (inputs in the air); the evaluator's held-out results do not (each timing reads the update the interval ends at, so it is off where the air lookahead or the in-sample fits are).
+
+- The boost of an airborne car switches at the tick the update's velocity shows (it switched at the update): air boost press error 2.76 -> 1.46 ticks on a host replay's bots. Counted as `air_boost_switches`; `SimulationOptions::air_boost_timing` turns these timings off.
+- A held jump in the air is released at the tick the update's velocity along the car's up axis shows (`jump_releases_timed`); a double jump or dodge the update already shows is pressed at the step its position shows (`air_presses_timed`).
+- The dodge start fit also matches the first update after the dodge: flip start error on a bot match 4.0 -> 1.7 ticks, on client replays about 0.5 ticks lower; the replay's dodges with a simulated flip 98.7 -> 98.9% (train).
+
 ## 2.1.1 (2026-10-26)
 
 - A kickoff's segment starts at the cars' release: its first row is every car at rest on its spawn with the controls it starts with (clock phase `kickoff`), simulated to the first frame in play from the release tick that best reproduces the cars' first updates. It was the first frame in play, the cars already 1-3 ticks into the drive. Counted as `kickoffs_from_release` in the simulation diagnostics.
