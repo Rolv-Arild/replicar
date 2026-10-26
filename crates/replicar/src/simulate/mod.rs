@@ -267,6 +267,7 @@ pub struct SimDiagnostics {
     pub kickoffs_from_release: usize,
     pub air_boost_switches: usize,
     pub jump_releases_timed: usize,
+    pub air_presses_timed: usize,
     pub sleeping_car_updates: usize,
     pub cars_started_from_spawn_pose: usize,
     pub goal_explosion_demolitions: usize,
@@ -1107,7 +1108,15 @@ impl<'a> Simulator<'a, '_> {
                 None
             };
             let kind = if let Some(kind) = air_press {
-                (kind, rule)
+                let timed = self
+                    .options
+                    .air_boost_timing
+                    .then(|| self.impulse_tick(car, f, kind, update))
+                    .flatten();
+                if timed.is_some() {
+                    self.diagnostics.air_presses_timed += 1;
+                }
+                (kind, timed.unwrap_or(rule))
             } else if (rose(
                 &car.inputs.jump_active_raw,
                 &previous.inputs.jump_active_raw,
@@ -1153,6 +1162,89 @@ impl<'a> Simulator<'a, '_> {
                 applied: false,
             });
         }
+    }
+
+    /// The step (from the interval's start) at which a double jump or dodge the frame's update shows was pressed,
+    /// from where the update puts the car. Both are a velocity impulse `J` (291.7 UU/s along the car's up axis, or
+    /// the dodge's along the ground plane) on top of forces that are steady over the interval (gravity, a boost that
+    /// does not switch): with RocketSim's integration (velocity, then position), an impulse in step `k` of `n`
+    /// leaves the position `dt * J * ((n - 1) / 2 - k)` past `dt * ((n - 1) * v0 + (n + 1) * v1) / 2`, the path of
+    /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse is the velocity change less gravity and boost. Not for a car with a
+    /// wheel on a surface or near the ball or another car, still holding its jump (whose force ends in the
+    /// interval), whose boost switches in it, near the speed limit, or whose evidence does not fit one impulse.
+    fn impulse_tick(&self, car: &NetworkCar, f: usize, kind: EarlyKind, update: u64) -> Option<u64> {
+        const BOOST: f32 = 2975.0 / 3.0;
+        const AIR_THROTTLE: f32 = 200.0 / 3.0;
+        const DOUBLE_JUMP: f32 = 875.0 / 3.0;
+        let frame = FrameIndex(f as u32);
+        let (player, _) = *self.players.by_actor.get(&car.life.actor)?;
+        let slot = player.get();
+        let state = *self.arena.get_car_state(slot);
+        let controls = *self.arena.get_car_controls(slot);
+        let fresh = |v: Option<&crate::decode::NetworkValue<[f32; 3]>>| {
+            v.filter(|v| v.frame == frame).map(|v| glam::Vec3A::from(v.value))
+        };
+        let p1 = fresh(car.body.position.as_ref())?;
+        let v1 = fresh(car.body.linear_velocity.as_ref())?;
+        let rotation = car.body.rotation.as_ref().filter(|v| v.frame == frame)?;
+        let boost_switches = car
+            .inputs
+            .boost_active_raw
+            .as_ref()
+            .is_some_and(|v| v.frame == frame && (v.value % 2 == 1) != controls.boost);
+        let ball = self.arena.get_ball_state().phys.pos;
+        let near = (state.phys.pos - ball).length() < 400.0
+            || (0..self.players.len()).any(|other| {
+                other != slot
+                    && (self.arena.get_car_state(other).phys.pos - state.phys.pos).length() < 300.0
+            });
+        if update < 2
+            || state.is_on_ground()
+            || state.wheels_with_contact().iter().any(Option::is_some)
+            || state.is_demoed
+            || state.is_jumping
+            || boost_switches
+            || near
+            || state.phys.vel.length() > 2100.0
+            || v1.length() > 2100.0
+        {
+            return None;
+        }
+        let [x, y, z, w] = rotation.value;
+        let end = glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize());
+        let n = update as f32;
+        let seconds = n / 120.0;
+        let change = v1 - state.phys.vel;
+        let impulse = match kind {
+            EarlyKind::DoubleJump => {
+                DOUBLE_JUMP * (state.phys.rot_mat.z_axis + end.z_axis).normalize_or_zero()
+            }
+            EarlyKind::Dodge { .. } => {
+                let forward = (state.phys.rot_mat.x_axis + end.x_axis).normalize_or_zero();
+                let throttle = if controls.boost {
+                    BOOST + AIR_THROTTLE
+                } else {
+                    controls.throttle.clamp(-1.0, 1.0) * AIR_THROTTLE
+                };
+                let steady = glam::Vec3A::new(0.0, 0.0, -650.0) + throttle * forward;
+                // The dodge impulse lies in the ground plane.
+                (change - steady * seconds).with_z(0.0)
+            }
+            EarlyKind::Jump => return None,
+        };
+        // A dodge without a direction has no impulse.
+        if impulse.length() < 250.0 {
+            return None;
+        }
+        let offset = (p1 - state.phys.pos) * 120.0 - ((n - 1.0) * state.phys.vel + (n + 1.0) * v1) / 2.0;
+        let steps = offset.dot(impulse) / impulse.length_squared();
+        let k = (n - 1.0) / 2.0 - steps;
+        // The part of the offset one impulse does not explain (UU/s, one tick of the impulse is |J|).
+        let rest = (offset - steps * impulse).length();
+        if !(-0.6..=n - 0.4).contains(&k) || rest > 0.5 * impulse.length() {
+            return None;
+        }
+        Some((k.round().max(0.0) as u64).min(update - 1))
     }
 
     /// When an airborne car's boost started or stopped in this interval. The network boost switches in the air only
