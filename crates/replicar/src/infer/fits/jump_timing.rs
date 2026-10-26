@@ -16,7 +16,9 @@ pub(super) const SHIFTS: std::ops::RangeInclusive<i64> = -8..=16;
 /// in the rest. For a car on a surface with an update at `index` and an even jump counter that turns odd
 /// before the second next update, one shift of the counter's switches (press and release together) is chosen
 /// by simulating the span to that update (position error plus 0.1 x velocity error); the interval to the next
-/// update is driven with it, the other controls on the midpoint rule. Refused without chained update ticks for
+/// update is driven with it. The other controls stay on the midpoint rule, or those of the frame whose counter
+/// switches move with it (a press of the jump with throttle, steer or handbrake, as bots do), whichever fits
+/// better. Refused without chained update ticks for
 /// both later updates, for spans over 30 ticks, a withheld or inactive frame, or a change of the double-jump,
 /// dodge or flip counter. The ball is simulated from its state at this update's tick; other cars are not.
 pub(in crate::infer) fn fit_jump_timing(
@@ -110,13 +112,19 @@ pub(in crate::infer) fn fit_jump_timing(
     }
     let own = network_controls(car);
     let own_entry = (own.throttle, own.steer, own.handbrake, own.boost);
-    let controls_at = |shift: i64, tau: i64| controls_at(&entries, own_entry, shift, tau);
-    let mut costs: Vec<(i64, f32)> = Vec::new();
-    for shift in SHIFTS {
+    let mut costs: Vec<((i64, bool), f32)> = Vec::new();
+    for (shift, together) in SHIFTS.flat_map(|s| [(s, false), (s, true)]) {
+        let moved = |tau: i64| controls_with(&entries, own_entry, shift, tau, together);
+        // Moving the other controls changes nothing in the span: the same simulation as without.
+        if together
+            && (t_a + 1..=t_c).all(|tau| moved(tau) == controls_at(&entries, own_entry, shift, tau))
+        {
+            continue;
+        }
         scratch.set_ball_state(*ball);
         seed_car(scratch, *state, now_tick);
         for tau in t_a + 1..=t_c {
-            let c = controls_at(shift, tau);
+            let c = moved(tau);
             scratch.set_car_controls(
                 0,
                 CarControls {
@@ -133,21 +141,21 @@ pub(in crate::infer) fn fit_jump_timing(
         let end = scratch.get_car_state(0);
         let cost =
             (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
-        costs.push((shift, cost));
+        costs.push(((shift, together), cost));
     }
-    // The midpoint rule (shift 0) unless another shift is strictly better.
-    let mut best = costs.iter().position(|(shift, _)| *shift == 0)?;
+    // The midpoint rule (shift 0, the other controls on the rule) unless another choice is strictly better.
+    let mut best = costs.iter().position(|(key, _)| *key == (0, false))?;
     for (i, (_, cost)) in costs.iter().enumerate() {
         if *cost < costs[best].1 - 1e-4 {
             best = i;
         }
     }
-    let shift = costs[best].0;
+    let (shift, together) = costs[best].0;
     // The schedule for the interval to the next update, in sim ticks.
     let mut schedule = Vec::new();
     let mut previous = None;
     for step in 1..=ticks_ab {
-        let c = controls_at(shift, t_a + step);
+        let c = controls_with(&entries, own_entry, shift, t_a + step, together);
         if previous != Some(c) {
             schedule.push((now_tick + step as u64, c.0, c.1, c.2, c.3, Some(c.4)));
             previous = Some(c);
@@ -207,13 +215,26 @@ pub(super) fn controls_at(
     shift: i64,
     tau: i64,
 ) -> (f32, f32, bool, bool, bool) {
-    let i = entries.partition_point(|e| e.1 <= tau);
-    let base = if i == 0 {
-        own
-    } else {
-        let e = entries[i - 1];
-        (e.2, e.3, e.4, e.5)
-    };
+    controls_with(entries, own, shift, tau, false)
+}
+
+/// As `controls_at`; with `together`, the other controls of a frame whose jump counter switches move with the
+/// counter (the latest frame in effect sets them).
+fn controls_with(
+    entries: &[JumpEntry],
+    own: (f32, f32, bool, bool),
+    shift: i64,
+    tau: i64,
+    together: bool,
+) -> (f32, f32, bool, bool, bool) {
+    let switches = |i: usize| together && entries[i].6 != (i > 0 && entries[i - 1].6);
+    let base = (0..entries.len())
+        .rev()
+        .find(|&i| entries[i].1 + if switches(i) { shift } else { 0 } <= tau)
+        .map_or(own, |i| {
+            let e = entries[i];
+            (e.2, e.3, e.4, e.5)
+        });
     let j = entries.partition_point(|e| e.1 + shift <= tau);
     let jump = j > 0 && entries[j - 1].6;
     (base.0, base.1, base.2, base.3, jump)
