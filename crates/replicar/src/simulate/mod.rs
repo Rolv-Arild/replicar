@@ -42,6 +42,14 @@ pub struct SimulationOptions {
     /// Frames whose updates a masked evaluation hides; their demolitions and wreck holds are not applied.
     #[serde(skip)]
     pub withheld: Option<Vec<bool>>,
+    /// Time an airborne car's boost switches by the velocity of its next update (`plan_air_boost`; offline: it
+    /// reads the update the interval ends at).
+    #[serde(default = "enabled")]
+    pub air_boost_timing: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 impl Default for SimulationOptions {
@@ -52,6 +60,7 @@ impl Default for SimulationOptions {
             simulated_pad_pickups: false,
             simulated_demolitions: false,
             withheld: None,
+            air_boost_timing: true,
         }
     }
 }
@@ -545,7 +554,9 @@ impl<'a> Simulator<'a, '_> {
         self.air_boost.clear();
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
-            self.plan_air_boost(&frame_cars, f, span, gap);
+            if self.options.air_boost_timing {
+                self.plan_air_boost(&frame_cars, f, span, gap);
+            }
         }
         let mut events = Vec::new();
         if !self.options.simulated_pad_pickups {

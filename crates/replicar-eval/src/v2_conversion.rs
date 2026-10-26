@@ -356,6 +356,8 @@ pub fn convert_network(
         simulated_pad_pickups: !options.block_sim_pad_pickups,
         simulated_demolitions: !options.disable_simulated_demolitions,
         withheld: withheld_frames.clone(),
+        // It reads the update the interval ends at, as the air lookahead does: held out with it.
+        air_boost_timing: options.infer_air_controls_from_lookahead,
     };
     let meshes = replicar::Meshes::load(&options.collision_meshes)?;
     let inferred = options.infer_packet_lag && !options.zero_packet_lag;
