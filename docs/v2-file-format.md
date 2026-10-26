@@ -10,7 +10,11 @@ sections after it). `scripts/check_file_format_doc.py` checks that every column 
 By default one row per simulated tick **in a play segment** (from the kickoff to the frame that reports the goal, or
 to the last frame in play): the replay frames' own ticks (`frame_row` true) and the ticks RocketSim stepped between
 them (glossary, "Tick row"). `--tick-step N` keeps the ticks whose `sim_tick` is a multiple of N; `--rows frames`
-keeps only the frame rows. `--all-frames` adds the frames outside play, with a null `segment` (they have no ticks).
+keeps only the frame rows. A kickoff's segment starts at the cars' release, not at its first frame: its first row is
+the tick before the cars move, each car at rest on its spawn with the controls it starts with (clock phase
+`kickoff`; kept with `--tick-step` too, but not with `--rows frames`; glossary, "Kickoff release"). `--all-frames`
+adds the frames outside play, with a null `segment` (they have no ticks; the last countdown frame shares its
+`sim_tick` with the release row).
 Rows are in tick order; `frame` is the replay frame a row belongs to (a tick row: the frame that ends its interval),
 so gaps show where pauses were left out. The header's `rows` and `tick_step` say which. A record (event, stat event,
 ball contact, boost pickup) and an update flag of a row left out pass to the next written row of its segment.

@@ -80,6 +80,16 @@ replay). Within play segments only `kickoff`, `running`, `expired` and `decided`
 cars can move **[verify]** until play stops. The interval that ends at a goal frame (state `PostGoalScored`) is
 simulated too: the ball crossed the line in it.
 
+**Kickoff release.** The tick at which a kickoff's countdown ends and the cars can move. The replay does not mark
+it: its first frame in play comes 1-13 ticks later (train: 1 or 3 in nearly all kickoffs). replicar simulates the
+interval to that frame from the release, every car at rest on its spawn (the pose of its countdown updates, at
+RocketSim's rest height) with the inputs it holds (the first frame in play's throttle, steer, handbrake and boost;
+the boost counter only turns on at the release), and takes the release tick that best reproduces the speeds of the
+cars' first updates (all cars are released together). That tick is the segment's first row: the spawn and the
+action taken there. Against the server's truth (the RLBot LAN recordings, `scripts/check_kickoffs.py`) it is the
+last tick at rest in most kickoffs and one tick early in the rest. Counted in the header's simulation diagnostics
+(`kickoffs_from_release`). Inferred, not observed.
+
 **Play segment** (`segment`, 0..n). A stretch of play from a kickoff to the frame that reports the goal, or to
 the last frame in play when no goal follows (regulation ending, before overtime). The overtime kickoff starts a
 new segment. Countdowns, goal celebrations, goal replays and everything before the first kickoff or after the

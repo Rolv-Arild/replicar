@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A kickoff's segment starts at the cars' release: its first row is every car at rest on its spawn with the controls it starts with (clock phase `kickoff`), simulated to the first frame in play from the release tick that best reproduces the cars' first updates. It was the first frame in play, the cars already 1-3 ticks into the drive. Counted as `kickoffs_from_release` in the simulation diagnostics.
+
 ## 2.1.0 (2026-10-23)
 
 RocketSim 0.3 (any compatible release from 0.3.2; 0.2 releases are no longer accepted). Conversion output changes. Rust users: `replicar::restore` and the conversion callback now hand out RocketSim 0.3 types, so code that uses them with RocketSim 0.2 needs updating.
