@@ -266,6 +266,7 @@ pub struct SimDiagnostics {
     pub flip_resets_inferred: usize,
     pub kickoffs_from_release: usize,
     pub air_boost_switches: usize,
+    pub air_throttle_switches: usize,
     pub jump_releases_timed: usize,
     pub air_presses_timed: usize,
     pub sleeping_car_updates: usize,
@@ -362,6 +363,8 @@ struct Simulator<'a, 'i> {
     action_presses: BTreeSet<usize>,
     /// The current interval's boost switches in the air (`plan_air_boost`): sim tick, player slot, boost.
     air_boost: Vec<(u64, usize, bool)>,
+    /// The current interval's throttle switches in the air (`plan_air_throttle`): sim tick, player slot, throttle.
+    air_throttle: Vec<(u64, usize, f32)>,
     /// The current interval's jump releases (`plan_jump_release`): sim tick, player slot.
     jump_releases: Vec<(u64, usize)>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
@@ -422,6 +425,7 @@ pub fn simulate(
         inferred_resets: BTreeSet::new(),
         action_presses: BTreeSet::new(),
         air_boost: Vec::new(),
+        air_throttle: Vec::new(),
         jump_releases: Vec::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
@@ -557,11 +561,13 @@ impl<'a> Simulator<'a, '_> {
         }
         self.early_presses.clear();
         self.air_boost.clear();
+        self.air_throttle.clear();
         self.jump_releases.clear();
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
             if self.options.air_boost_timing {
                 self.plan_air_boost(&frame_cars, f, span, gap);
+                self.plan_air_throttle(&frame_cars, f, span, gap);
                 self.plan_jump_release(&frame_cars, f, span, gap);
             }
         }
@@ -896,6 +902,7 @@ impl<'a> Simulator<'a, '_> {
             self.drive_ramps(sim_tick);
             self.drive_ground_schedules(sim_tick);
             self.switch_air_boost(sim_tick);
+            self.switch_air_throttle(sim_tick);
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
@@ -1170,9 +1177,9 @@ impl<'a> Simulator<'a, '_> {
     /// does not switch): with RocketSim's integration (velocity, then position), an impulse in step `k` of `n`
     /// leaves the position `dt * J * ((n - 1) / 2 - k)` past `dt * ((n - 1) * v0 + (n + 1) * v1) / 2`, the path of
     /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse
-    /// is the velocity change less gravity and boost. Not for a car with a wheel on a surface or near the ball or
-    /// another car, still holding its jump (whose force ends in the interval), whose boost switches in it, near the
-    /// speed limit, or whose evidence does not fit one impulse.
+    /// is the velocity change less gravity and boost. Not for a car with a wheel on a surface or that can touch the
+    /// ball or another car in the interval (`may_touch`), still holding its jump (whose force ends in the interval),
+    /// whose boost switches in it, near the speed limit, or whose evidence does not fit one impulse.
     fn impulse_tick(
         &self,
         car: &NetworkCar,
@@ -1200,21 +1207,15 @@ impl<'a> Simulator<'a, '_> {
             .boost_active_raw
             .as_ref()
             .is_some_and(|v| v.frame == frame && (v.value % 2 == 1) != controls.boost);
-        let ball = self.arena.get_ball_state().phys.pos;
-        let near = (state.phys.pos - ball).length() < 400.0
-            || (0..self.players.len()).any(|other| {
-                other != slot
-                    && (self.arena.get_car_state(other).phys.pos - state.phys.pos).length() < 300.0
-            });
         if update < 2
             || state.is_on_ground()
             || state.wheels_with_contact().iter().any(Option::is_some)
             || state.is_demoed
             || state.is_jumping
             || boost_switches
-            || near
             || state.phys.vel.length() > 2100.0
             || v1.length() > 2100.0
+            || self.may_touch(slot, v1, update)
         {
             return None;
         }
@@ -1256,18 +1257,71 @@ impl<'a> Simulator<'a, '_> {
         Some((k.round().max(0.0) as u64).min(update - 1))
     }
 
+    /// Whether the car in `slot` can touch the ball or another car in the next `ticks`: unless the distance at the
+    /// start less how far each can move (its speed at the start, and the car's at the update `v1`, plus gravity on
+    /// the ball and boost on another car) keeps them apart by their bounding spheres (the hitbox's half diagonal plus
+    /// its offset, the ball's radius), a copy of the arena is stepped with the controls held, and the car may touch
+    /// if on any tick its hitbox comes within 15 UU of the ball or its bounding sphere within 10 UU of another car's.
+    fn may_touch(&self, slot: usize, v1: glam::Vec3A, ticks: u64) -> bool {
+        const BALL_RADIUS: f32 = 91.25;
+        const MARGIN: f32 = 10.0;
+        let seconds = ticks as f32 / 120.0;
+        let radius = |slot: usize| {
+            let config = &self.arena.get_car_info(slot).config;
+            config.hitbox_size.length() * 0.5 + config.hitbox_pos_offset.length()
+        };
+        let state = self.arena.get_car_state(slot);
+        let reach = radius(slot) + state.phys.vel.length().max(v1.length()) * seconds + MARGIN;
+        let others: Vec<usize> = (0..self.players.len())
+            .filter(|&other| {
+                let o = self.arena.get_car_state(other);
+                other != slot
+                    && !o.is_demoed
+                    && (o.phys.pos - state.phys.pos).length()
+                        < reach + radius(other) + (o.phys.vel.length() + 1100.0 * seconds) * seconds
+            })
+            .collect();
+        let ball = self.arena.get_ball_state().phys;
+        let ball_reach = BALL_RADIUS + (ball.vel.length() + 650.0 * seconds) * seconds;
+        let near_ball = (state.phys.pos - ball.pos).length() < reach + ball_reach;
+        if others.is_empty() && !near_ball {
+            return false;
+        }
+        let config = self.arena.get_car_info(slot).config;
+        let touches = |arena: &Arena| {
+            let car = arena.get_car_state(slot).phys;
+            let local = car.rot_mat.transpose() * (arena.get_ball_state().phys.pos - car.pos)
+                - config.hitbox_pos_offset;
+            let q = local.abs() - config.hitbox_size * 0.5;
+            let ball_gap =
+                q.max(glam::Vec3A::ZERO).length() + q.max_element().min(0.0) - BALL_RADIUS;
+            (near_ball && ball_gap < 15.0)
+                || others.iter().any(|&other| {
+                    (arena.get_car_state(other).phys.pos - car.pos).length()
+                        < radius(slot) + radius(other) + MARGIN
+                })
+        };
+        let mut copy = self.arena.clone();
+        for _ in 0..ticks {
+            if touches(&copy) {
+                return true;
+            }
+            copy.step_tick();
+        }
+        touches(&copy)
+    }
+
     /// When an airborne car's boost started or stopped in this interval. The network boost switches in the air only
     /// at the car's update; the update's velocity shows when it did: from the interval's start to the update, the
     /// forward velocity changes by the boost (991.7 UU/s^2, with the air throttle at 1, 66.7) on the boosting ticks
     /// and by the air throttle on the others, beside gravity. The forward direction is the mean of the car's at the
-    /// start and at the update. Not for a car with a wheel on a surface or near the ball or another car, near the
-    /// speed limit, or without boost.
+    /// start and at the update. Not for a car with a wheel on a surface or that can touch the ball or another car in
+    /// the interval (`may_touch`), near the speed limit, or without boost.
     fn plan_air_boost(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
         const BOOST: f32 = 2975.0 / 3.0;
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
         let start = self.arena.tick_count();
         let frame = FrameIndex(f as u32);
-        let ball = self.arena.get_ball_state().phys.pos;
         for &car in cars {
             let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
                 continue;
@@ -1296,26 +1350,19 @@ impl<'a> Simulator<'a, '_> {
             ) else {
                 continue;
             };
-            let near = (state.phys.pos - ball).length() < 400.0
-                || (0..self.players.len()).any(|other| {
-                    other != slot
-                        && (self.arena.get_car_state(other).phys.pos - state.phys.pos).length()
-                            < 300.0
-                });
             let v1 = glam::Vec3A::from(velocity.value);
             if boost == controls.boost
                 || state.is_on_ground()
                 || state.wheels_with_contact().iter().any(Option::is_some)
                 || state.is_demoed
                 || state.boost <= 1.0
-                || near
                 || state.phys.vel.length() > 2200.0
                 || v1.length() > 2200.0
             {
                 continue;
             }
             let update = span - self.car_ticks(car, f, true, gap).min(span);
-            if update < 2 {
+            if update < 2 || self.may_touch(slot, v1, update) {
                 continue;
             }
             let [x, y, z, w] = rotation.value;
@@ -1339,6 +1386,75 @@ impl<'a> Simulator<'a, '_> {
             }
             self.air_boost.push((start + switch + 1, slot, boost));
             self.diagnostics.air_boost_switches += 1;
+        }
+    }
+
+    /// When an airborne car's throttle changed in this interval. In the air the throttle switches only at the car's
+    /// update; without boost the throttle pushes the car forward by 66.7 UU/s^2 times its value, so the forward
+    /// velocity change to the update, beside gravity, shows how many ticks had the old value. As for the boost (`plan_air_boost`): not for a car with a wheel on a surface or that can touch the
+    /// ball or another car in the interval, near the speed limit, boosting or switching its boost, with a planned
+    /// press, flipping, or for a change of less than 0.5.
+    fn plan_air_throttle(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+        const AIR_THROTTLE: f32 = 200.0 / 3.0;
+        let start = self.arena.tick_count();
+        let frame = FrameIndex(f as u32);
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            if created != car.life.created {
+                continue;
+            }
+            let slot = player.get();
+            let state = *self.arena.get_car_state(slot);
+            let controls = *self.arena.get_car_controls(slot);
+            let (Some(velocity), Some(rotation)) = (
+                car.body
+                    .linear_velocity
+                    .as_ref()
+                    .filter(|v| v.frame == frame),
+                car.body.rotation.as_ref().filter(|v| v.frame == frame),
+            ) else {
+                continue;
+            };
+            let next = updates::network_controls(car);
+            let old = controls.throttle.clamp(-1.0, 1.0);
+            let new = next.throttle.clamp(-1.0, 1.0);
+            let v1 = glam::Vec3A::from(velocity.value);
+            if (new - old).abs() < 0.5
+                || next.boost
+                || controls.boost
+                || state.is_boosting
+                || state.is_flipping
+                || state.is_on_ground()
+                || state.wheels_with_contact().iter().any(Option::is_some)
+                || state.is_demoed
+                || state.phys.vel.length() > 2200.0
+                || v1.length() > 2200.0
+                || self.early_presses.iter().any(|p| p.player == player)
+                || self.air_boost.iter().any(|b| b.1 == slot)
+            {
+                continue;
+            }
+            let update = span - self.car_ticks(car, f, true, gap).min(span);
+            if update < 2 || self.may_touch(slot, v1, update) {
+                continue;
+            }
+            let [x, y, z, w] = rotation.value;
+            let end_forward =
+                glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize()).x_axis;
+            let forward = (state.phys.rot_mat.x_axis + end_forward).normalize_or_zero();
+            let n = update as f32;
+            let change = v1 - state.phys.vel - glam::Vec3A::new(0.0, 0.0, -650.0) * n / 120.0;
+            // Forward change (UU/s) = (k * old + (n - k) * new) * AIR_THROTTLE / 120.
+            let k = ((change.dot(forward) * 120.0 / AIR_THROTTLE - n * new) / (old - new))
+                .round()
+                .clamp(0.0, n) as u64;
+            if k >= update {
+                continue;
+            }
+            self.air_throttle.push((start + k + 1, slot, next.throttle));
+            self.diagnostics.air_throttle_switches += 1;
         }
     }
 
@@ -1423,6 +1539,18 @@ impl<'a> Simulator<'a, '_> {
                     controls.jump = false;
                     self.arena.set_car_controls(slot, controls);
                 }
+            }
+        }
+    }
+
+    /// Applies the throttle switches in the air due at `sim_tick` (`plan_air_throttle`).
+    fn switch_air_throttle(&mut self, sim_tick: u64) {
+        for i in 0..self.air_throttle.len() {
+            let (tick, slot, throttle) = self.air_throttle[i];
+            if tick == sim_tick && !self.arena.get_car_state(slot).is_on_ground() {
+                let mut controls = *self.arena.get_car_controls(slot);
+                controls.throttle = throttle;
+                self.arena.set_car_controls(slot, controls);
             }
         }
     }
