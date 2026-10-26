@@ -179,6 +179,7 @@ def main() -> None:
         # Flips: each true flip start (flipping turns on) against the nearest simulated one within 15 ticks.
         if tv.shape[1] > 13:
             sim_flip = a["car_is_flipping"][rows, p] == 1
+            air_source = np.array(f.table.column(f"car_{p}_air_controls_source").to_pylist(), dtype=object)
             for s0, e0 in zip(starts, ends):
                 if e0 - s0 < 5:
                     continue
@@ -194,7 +195,11 @@ def main() -> None:
                               f"sim on_ground {a['car_is_on_ground'][r, p]} has_flipped {a['car_has_flipped'][r, p]} z {a['car_position'][r, p, 2]:.0f}; "
                               f"src {f.table.column(f'car_{p}_air_controls_source')[r].as_py()}")
                     if hit:
-                        g["flip start error"].append(int(sf[np.argmin(np.abs(sf - t))] - t))
+                        j = sf[np.argmin(np.abs(sf - t))]
+                        g["flip start error"].append(int(j - t))
+                        # By what set the controls of the simulated flip's press (the row before it starts).
+                        src = air_source[rows[s0 + max(j - 1, 0)]]
+                        g[f"flip start error by {src}"].append(int(j - t))
         for k, name_k in ((5, "boost"), (6, "jump"), (7, "handbrake")):
             conv = a[f"car_controls_{name_k}"][rows, p] == 1
             g[f"{name_k} disagree"].extend((conv != tv[:, k].astype(bool)).tolist())
