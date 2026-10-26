@@ -1198,9 +1198,7 @@ pub(super) fn fit_dodge_start(
             let lag = if fresh.is_empty() {
                 chain
                     .or(lags.cars[g])
-                    .map_or((timeline(g) - timeline(g - 1)).max(0) as f32 / 2.0, |lag| {
-                        lag
-                    })
+                    .unwrap_or((timeline(g) - timeline(g - 1)).max(0) as f32 / 2.0)
             } else {
                 let Some(lag) = chain else {
                     continue;

@@ -490,7 +490,13 @@ impl<'a> Rows<'a> {
         let Some((first, between)) = simulated.ticks.split_first() else {
             return;
         };
-        if let Some(previous) = self.frames.last_mut()
+        // An interval that starts a segment (a kickoff, simulated from the cars' release): its first tick is no
+        // earlier row's but the segment's first, the cars on their spawns and the action taken there. Its game
+        // values are the countdown's with the cars released.
+        let starts_segment =
+            segment.is_some() && self.frames.last().is_none_or(|p| p.segment != segment);
+        if !starts_segment
+            && let Some(previous) = self.frames.last_mut()
             && previous.sim_tick == first.sim_tick
         {
             set_controls(&mut previous.state, first);
@@ -507,7 +513,10 @@ impl<'a> Rows<'a> {
             RowRate::Frames => false,
         };
         // An update applied at a tick without a row is on the next row (a later kept tick, else the frame row).
-        for record in between.iter().filter(|r| keep(r.sim_tick)) {
+        let records = std::iter::once(first)
+            .filter(|_| starts_segment && !matches!(self.rate, RowRate::Frames))
+            .chain(between.iter().filter(|r| keep(r.sim_tick)));
+        for record in records {
             let to_frame = frame_tick.saturating_sub(record.sim_tick);
             let replay_tick = simulated.replay_tick.saturating_sub(to_frame);
             let tick = u32::try_from(replay_tick).unwrap_or(u32::MAX);
@@ -562,6 +571,9 @@ impl<'a> Rows<'a> {
             game.stat_events.clear();
             game.ball_contacts.clear();
             game.boost_pickups.clear();
+            if starts_segment && game.clock_phase == replicar_format::ClockPhase::Countdown {
+                game.clock_phase = replicar_format::ClockPhase::Kickoff;
+            }
             let mut state = tick_state(record, frame_state);
             if let Some(cooldowns) = &previous_cooldowns {
                 state.pad_cooldowns = cooldowns.iter().map(|c| (c - elapsed).max(0.0)).collect();

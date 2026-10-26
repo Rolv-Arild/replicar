@@ -255,6 +255,7 @@ pub struct SimDiagnostics {
     pub flip_resets_observed: usize,
     pub flip_resets_applied: usize,
     pub flip_resets_inferred: usize,
+    pub kickoffs_from_release: usize,
     pub sleeping_car_updates: usize,
     pub cars_started_from_spawn_pose: usize,
     pub goal_explosion_demolitions: usize,
@@ -438,7 +439,7 @@ impl<'a> Simulator<'a, '_> {
         let replay_tick = (((f64::from(frame.time) - f64::from(self.first_time)) * 120.0).round()
             as u64)
             .max(self.previous_tick);
-        let gap = replay_tick - self.previous_tick;
+        let mut gap = replay_tick - self.previous_tick;
         let state = frame.game_state.as_ref().map(|s| &s.value);
         let active = state == Some(&GameState::Active);
         // The frame that reports a goal ends the play before it: the ball crossed the line in its interval, so the
@@ -446,16 +447,19 @@ impl<'a> Simulator<'a, '_> {
         let goal_frame =
             !active && self.previous_in_play && state == Some(&GameState::PostGoalScored);
         let in_play = active || goal_frame;
-        let simulated = in_play && self.previous_in_play && gap > 0 && gap <= MAX_GAP_TICKS;
+        // The first frame of play after the countdown: its interval runs from the cars' release.
+        let kickoff = active
+            && !self.previous_in_play
+            && gap > 0
+            && gap <= MAX_GAP_TICKS
+            && f > 0
+            && self.network.frames[f - 1]
+                .game_state
+                .as_ref()
+                .is_some_and(|s| s.value == GameState::Countdown);
+        let mut simulated = in_play && self.previous_in_play && gap > 0 && gap <= MAX_GAP_TICKS;
         self.previous_tick = replay_tick;
         self.previous_in_play = active;
-        if !simulated {
-            self.diagnostics.skipped_replay_ticks += gap;
-        }
-        if let (Some(ticks), true) = (self.ticks, simulated) {
-            self.diagnostics.ball_tick_frames += usize::from(ticks.ball[f].is_some());
-            self.diagnostics.car_tick_frames += usize::from(ticks.car_median[f].is_some());
-        }
         let current = frame.current_cars();
         self.diagnostics.shadowed_car_frames +=
             frame.cars.iter().filter(|car| car.player.is_some()).count() - current.len();
@@ -468,6 +472,23 @@ impl<'a> Simulator<'a, '_> {
             .withheld
             .as_ref()
             .is_some_and(|w| w.get(f).copied().unwrap_or(false));
+        // A kickoff is simulated from the release: the cars at rest on their spawns with the inputs they hold, so
+        // that the segment's first tick is the spawn and the action taken there (`release_kickoff`).
+        let from_release = kickoff && !withheld;
+        if from_release {
+            let release = self.release_kickoff(&frame_cars, f, gap);
+            self.diagnostics.skipped_replay_ticks += gap - release;
+            self.diagnostics.kickoffs_from_release += 1;
+            gap = release;
+            simulated = true;
+        }
+        if !simulated {
+            self.diagnostics.skipped_replay_ticks += gap;
+        }
+        if let (Some(ticks), true) = (self.ticks, simulated) {
+            self.diagnostics.ball_tick_frames += usize::from(ticks.ball[f].is_some());
+            self.diagnostics.car_tick_frames += usize::from(ticks.car_median[f].is_some());
+        }
         let mut ctx = FrameContext {
             index: frame.index,
             replay_tick,
@@ -496,11 +517,16 @@ impl<'a> Simulator<'a, '_> {
         let mut interval = Interval {
             span,
             remaining: span,
-            switches: self.switches(&frame_cars, f, replay_tick, span, gap, withheld),
+            switches: if from_release {
+                // The inputs this frame reports are those held at the release.
+                frame_cars.iter().map(|&car| (0, car)).collect()
+            } else {
+                self.switches(&frame_cars, f, replay_tick, span, gap, withheld)
+            },
             next_switch: 0,
         };
         self.ramp_cars.clear();
-        if simulated && !withheld && self.ticks.is_some() {
+        if simulated && !withheld && !from_release && self.ticks.is_some() {
             self.ramp_frame = f;
             self.ramp_offset = replay_tick as i64 - (self.arena.tick_count() + span) as i64;
             for &car in &frame_cars {
@@ -552,6 +578,83 @@ impl<'a> Simulator<'a, '_> {
             events.retain(|e| !matches!(e.event, ArenaEvent::CarPickupBoost(_)));
         }
         Ok(self.output(frame, ctx, replay_tick, events, applied_ticks))
+    }
+
+    /// Puts every car of a kickoff at rest on its spawn (the pose of its countdown updates, at RocketSim's rest
+    /// height) with the inputs it holds at the release, those this first frame of play reports (the boost and jump
+    /// counters only turn on at the release; a held jump is left to the presses), and returns the release's ticks
+    /// before this frame: the one at which RocketSim, from rest with those inputs, best reproduces the speeds of
+    /// the cars' first updates where the interval places them (all cars are released together); half the frame
+    /// gap when no car moves. Within 1..=`gap`, after the last countdown frame.
+    fn release_kickoff(&mut self, cars: &[&'a NetworkCar], f: usize, gap: u64) -> u64 {
+        let mut released = Vec::new();
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            let slot = player.get();
+            let mut state = *self.arena.get_car_state(slot);
+            if created != car.life.created || state.is_demoed {
+                continue;
+            }
+            state.phys.vel = glam::Vec3A::ZERO;
+            state.phys.ang_vel = glam::Vec3A::ZERO;
+            let rest = rocketsim::consts::car::spawn::REST_Z;
+            if (state.phys.pos.z - rest).abs() < 5.0 {
+                state.phys.pos.z = rest;
+            }
+            state.controls = updates::network_controls(car);
+            state.controls.jump = false;
+            self.arena.set_car_state_full(slot, state);
+            self.arena.refresh_car_contacts(slot);
+            released.push((slot, car));
+        }
+        let mut probe = self.arena.clone();
+        let mut speeds = vec![Vec::with_capacity(gap as usize); released.len()];
+        for _ in 0..gap {
+            probe.step_tick();
+            for (i, &(slot, _)) in released.iter().enumerate() {
+                speeds[i].push(probe.get_car_state(slot).phys.vel.length());
+            }
+        }
+        let frame = FrameIndex(f as u32);
+        let moving: Vec<(&NetworkCar, &Vec<f32>, f32)> = released
+            .iter()
+            .zip(&speeds)
+            .filter_map(|(&(_, car), speeds)| {
+                let velocity = car
+                    .body
+                    .linear_velocity
+                    .as_ref()
+                    .filter(|v| v.frame == frame)?;
+                let speed = glam::Vec3A::from(velocity.value).length();
+                (speed >= 5.0).then_some((car, speeds, speed))
+            })
+            .collect();
+        if moving.is_empty() {
+            return (gap / 2).clamp(1, gap);
+        }
+        // Each candidate release with the update ticks the interval would then use (a car without its own takes
+        // half the interval), so that the chosen one reproduces the speeds where the updates land.
+        (1..=gap)
+            .min_by(|&a, &b| {
+                let cost = |release: u64| -> f32 {
+                    moving
+                        .iter()
+                        .map(|&(car, speeds, speed)| {
+                            let since = release - self.car_ticks(car, f, true, release);
+                            let simulated = if since == 0 {
+                                0.0
+                            } else {
+                                speeds[since as usize - 1]
+                            };
+                            (simulated - speed).abs()
+                        })
+                        .sum()
+                };
+                cost(a).total_cmp(&cost(b))
+            })
+            .unwrap_or(1)
     }
 
     /// The ball's update ticks before its frame: its chain's, else half the window.

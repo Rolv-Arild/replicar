@@ -66,7 +66,7 @@ fn magnitude_bin(value: f32) -> usize {
     MAGNITUDE_EDGES
         .iter()
         .rposition(|&edge| value >= edge)
-        .map_or(0, |bin| bin)
+        .unwrap_or(0)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

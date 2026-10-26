@@ -2756,7 +2756,7 @@ pub fn convert_observations_with(
             };
             // The trigger radius plus half a car (the game tests the hitbox, RocketSim the centre).
             let radius = if is_big == Some(true) { 208.0 } else { 144.0 } + 60.0;
-            let own = car_slot.and_then(&closest);
+            let own = car_slot.and_then(closest);
             let verified = own.is_some_and(|(d, _)| d <= radius);
             let mut suggested = None;
             if !verified && pad_pos.is_some() {
