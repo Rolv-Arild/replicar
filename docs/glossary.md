@@ -51,7 +51,9 @@ goes backwards.
 
 **Sim tick** (`sim_tick`). RocketSim's own tick count for the arena. It advances only while the match is
 simulated (continuous active play), so it falls behind the replay tick at every pause. Use the replay tick to
-line frames up; the sim tick only relates a state to RocketSim's internal timers.
+line frames up; the sim tick only relates a state to RocketSim's internal timers. Nothing is simulated between two
+play segments, so a segment's first row has the sim tick of the previous segment's last row: the sim tick is unique
+within a segment, `(segment, sim_tick)` within a file.
 
 **Update** (also *body update*). A new rigid-body value (position, rotation, and usually velocities) for the ball
 or one car in a frame. Most frames carry an update for most bodies, but not all, and an update can omit a
