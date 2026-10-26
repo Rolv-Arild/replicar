@@ -256,6 +256,7 @@ pub struct SimDiagnostics {
     pub flip_resets_applied: usize,
     pub flip_resets_inferred: usize,
     pub kickoffs_from_release: usize,
+    pub air_boost_switches: usize,
     pub sleeping_car_updates: usize,
     pub cars_started_from_spawn_pose: usize,
     pub goal_explosion_demolitions: usize,
@@ -348,6 +349,8 @@ struct Simulator<'a, 'i> {
     inferred_resets: BTreeSet<usize>,
     /// The players pressing a double jump or a dodge in the coming step (`infer_flip_resets`).
     action_presses: BTreeSet<usize>,
+    /// The current interval's boost switches in the air (`plan_air_boost`): sim tick, player slot, boost.
+    air_boost: Vec<(u64, usize, bool)>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
     pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
@@ -405,6 +408,7 @@ pub fn simulate(
         early_presses: Vec::new(),
         inferred_resets: BTreeSet::new(),
         action_presses: BTreeSet::new(),
+        air_boost: Vec::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
@@ -538,8 +542,10 @@ impl<'a> Simulator<'a, '_> {
             }
         }
         self.early_presses.clear();
+        self.air_boost.clear();
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
+            self.plan_air_boost(&frame_cars, f, span, gap);
         }
         let mut events = Vec::new();
         if !self.options.simulated_pad_pickups {
@@ -871,6 +877,7 @@ impl<'a> Simulator<'a, '_> {
             }
             self.drive_ramps(sim_tick);
             self.drive_ground_schedules(sim_tick);
+            self.switch_air_boost(sim_tick);
             self.press_dodges(sim_tick);
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
@@ -1127,6 +1134,104 @@ impl<'a> Simulator<'a, '_> {
                 update_tick: start + update,
                 applied: false,
             });
+        }
+    }
+
+    /// When an airborne car's boost started or stopped in this interval. The network boost switches in the air only
+    /// at the car's update; the update's velocity shows when it did: from the interval's start to the update, the
+    /// forward velocity changes by the boost (991.7 UU/s^2, with the air throttle at 1, 66.7) on the boosting ticks
+    /// and by the air throttle on the others, beside gravity. The forward direction is the mean of the car's at the
+    /// start and at the update. Not for a car with a wheel on a surface or near the ball or another car, near the
+    /// speed limit, or without boost.
+    fn plan_air_boost(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+        const BOOST: f32 = 2975.0 / 3.0;
+        const AIR_THROTTLE: f32 = 200.0 / 3.0;
+        let start = self.arena.tick_count();
+        let frame = FrameIndex(f as u32);
+        let ball = self.arena.get_ball_state().phys.pos;
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            if created != car.life.created {
+                continue;
+            }
+            let slot = player.get();
+            let state = *self.arena.get_car_state(slot);
+            let controls = *self.arena.get_car_controls(slot);
+            let Some(counter) = car
+                .inputs
+                .boost_active_raw
+                .as_ref()
+                .filter(|v| v.frame == frame)
+            else {
+                continue;
+            };
+            let boost = counter.value % 2 == 1;
+            let (Some(velocity), Some(rotation)) = (
+                car.body
+                    .linear_velocity
+                    .as_ref()
+                    .filter(|v| v.frame == frame),
+                car.body.rotation.as_ref().filter(|v| v.frame == frame),
+            ) else {
+                continue;
+            };
+            let near = (state.phys.pos - ball).length() < 400.0
+                || (0..self.players.len()).any(|other| {
+                    other != slot
+                        && (self.arena.get_car_state(other).phys.pos - state.phys.pos).length()
+                            < 300.0
+                });
+            let v1 = glam::Vec3A::from(velocity.value);
+            if boost == controls.boost
+                || state.is_on_ground()
+                || state.wheels_with_contact().iter().any(Option::is_some)
+                || state.is_demoed
+                || state.boost <= 1.0
+                || near
+                || state.phys.vel.length() > 2200.0
+                || v1.length() > 2200.0
+            {
+                continue;
+            }
+            let update = span - self.car_ticks(car, f, true, gap).min(span);
+            if update < 2 {
+                continue;
+            }
+            let [x, y, z, w] = rotation.value;
+            let end_forward =
+                glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize()).x_axis;
+            let forward = (state.phys.rot_mat.x_axis + end_forward).normalize_or_zero();
+            let n = update as f32;
+            let seconds = n / 120.0;
+            let change = v1 - state.phys.vel - glam::Vec3A::new(0.0, 0.0, -650.0) * seconds;
+            let throttle = controls.throttle.clamp(-1.0, 1.0);
+            // Forward change (UU/s) = (k * (BOOST + AIR_THROTTLE) + (n - k) * throttle * AIR_THROTTLE) / 120.
+            let per_tick = BOOST + AIR_THROTTLE - throttle * AIR_THROTTLE;
+            let k = ((change.dot(forward) * 120.0 - n * throttle * AIR_THROTTLE) / per_tick)
+                .round()
+                .clamp(0.0, n) as u64;
+            // Boost on for the last `k` ticks before the update, or off after the first `k` (at least RocketSim's
+            // 0.1 s once begun, which it enforces itself).
+            let switch = if boost { update - k } else { k };
+            if switch >= update {
+                continue;
+            }
+            self.air_boost.push((start + switch + 1, slot, boost));
+            self.diagnostics.air_boost_switches += 1;
+        }
+    }
+
+    /// Applies the boost switches in the air due at `sim_tick` (`plan_air_boost`).
+    fn switch_air_boost(&mut self, sim_tick: u64) {
+        for i in 0..self.air_boost.len() {
+            let (tick, slot, boost) = self.air_boost[i];
+            if tick == sim_tick && !self.arena.get_car_state(slot).is_on_ground() {
+                let mut controls = *self.arena.get_car_controls(slot);
+                controls.boost = boost;
+                self.arena.set_car_controls(slot, controls);
+            }
         }
     }
 
