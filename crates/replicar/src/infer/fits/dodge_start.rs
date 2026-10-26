@@ -205,9 +205,39 @@ pub(in crate::infer) fn fit_dodge_start(
             })
             .sum()
     };
+    // The ticks the first update after the activation can lie at (see `first_update` below).
+    let frame_tick = ctx.timeline(first_frame) - origin_tick;
+    let gap = (ctx.timeline(first_frame) - ctx.timeline(first_frame.saturating_sub(1))).max(4);
+    let (lo, hi) = (
+        (frame_tick - gap).max(1),
+        frame_tick.min(second.0 as i64 - 1),
+    );
+    // The error of the first update at its best tick in that range on a path (`after`: from `dodge_tick`).
+    let first_error = |after: &[CarState], dodge_tick: u64| -> Option<(u64, f32)> {
+        let target = &first_fresh_state;
+        let mut best_tick: Option<(u64, f32)> = None;
+        for tb in lo.max(1) as u64..=hi.max(0) as u64 {
+            let st = if tb < dodge_tick {
+                &path[tb as usize]
+            } else {
+                &after[(tb - dodge_tick) as usize]
+            };
+            let error = (st.phys.pos - target.0).length() + 0.1 * (st.phys.vel - target.1).length();
+            if best_tick.is_none_or(|(_, e)| error < e - 1e-4) {
+                best_tick = Some((tb, error));
+            }
+        }
+        best_tick
+    };
+    // In sample (`fit_on_next_update`), the start fits the first update too, at its best tick.
+    let both = ctx.fit_on_next_update && ctx.dodge_first_update_tick && lo <= hi;
     let mut best: Option<(u64, f32)> = None;
     for dodge_tick in 1..=horizon {
-        let error = position_velocity_error(&run(scratch, dodge_tick, 0.0));
+        let mut error = position_velocity_error(&run(scratch, dodge_tick, 0.0));
+        if both {
+            let after = run_all(scratch, dodge_tick, 0.0);
+            error += first_error(&after, dodge_tick).map_or(0.0, |(_, e)| e);
+        }
         if best.is_none_or(|(_, e)| error < e - 1e-4) {
             best = Some((dodge_tick, error));
         }
@@ -237,33 +267,11 @@ pub(in crate::infer) fn fit_dodge_start(
     // fitted on the second update, the tick in that range at which the fitted path reproduces this update
     // (position and velocity) is its tick. The gap is floored at 4 ticks (30 frames per second).
     let mut first_update = None;
-    if ctx.dodge_first_update_tick {
-        let frame_tick = ctx.timeline(first_frame) - origin_tick;
-        let gap = (ctx.timeline(first_frame) - ctx.timeline(first_frame.saturating_sub(1))).max(4);
-        let (lo, hi) = (
-            (frame_tick - gap).max(1),
-            frame_tick.min(second.0 as i64 - 1),
-        );
-        if lo <= hi {
-            let after = run_all(scratch, dodge_tick, cancel);
-            let target = &first_fresh_state;
-            let mut best_tick: Option<(u64, f32)> = None;
-            for tb in lo as u64..=hi as u64 {
-                let st = if tb < dodge_tick {
-                    &path[tb as usize]
-                } else {
-                    &after[(tb - dodge_tick) as usize]
-                };
-                let error =
-                    (st.phys.pos - target.0).length() + 0.1 * (st.phys.vel - target.1).length();
-                if best_tick.is_none_or(|(_, e)| error < e - 1e-4) {
-                    best_tick = Some((tb, error));
-                }
-            }
-            if let Some((tb, _)) = best_tick {
-                first_update = Some((first_frame, (frame_tick - tb as i64).max(0) as u64, tb));
-                deferred = dodge_tick > tb;
-            }
+    if ctx.dodge_first_update_tick && lo <= hi {
+        let after = run_all(scratch, dodge_tick, cancel);
+        if let Some((tb, _)) = first_error(&after, dodge_tick) {
+            first_update = Some((first_frame, (frame_tick - tb as i64).max(0) as u64, tb));
+            deferred = dodge_tick > tb;
         }
     }
     Some(DodgePlan {
