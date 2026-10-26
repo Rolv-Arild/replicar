@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.1 (2026-10-26)
 
 - A kickoff's segment starts at the cars' release: its first row is every car at rest on its spawn with the controls it starts with (clock phase `kickoff`), simulated to the first frame in play from the release tick that best reproduces the cars' first updates. It was the first frame in play, the cars already 1-3 ticks into the drive. Counted as `kickoffs_from_release` in the simulation diagnostics.
 
