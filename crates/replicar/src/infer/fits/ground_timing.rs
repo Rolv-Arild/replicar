@@ -119,14 +119,12 @@ pub(in crate::infer) fn fit_ground_timing(
     }
     let own = network_controls(car);
     let own_entry = (t_a, own.throttle, own.steer, own.handbrake, own.boost);
-    let changes = entries
-        .iter()
-        .filter(|e| e.0 >= t_a - 16 && e.0 <= t_c + 16)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|w| {
-            (w[0].1 - w[1].1).abs() > 0.1 || (w[0].2 - w[1].2).abs() > 0.1 || w[0].3 != w[1].3
-        });
+    // A switch near the span: a frame there whose controls differ from the frame before it.
+    let changes = entries.windows(2).any(|w| {
+        w[1].0 >= t_a - 16
+            && w[1].0 <= t_c + 16
+            && ((w[0].1 - w[1].1).abs() > 0.1 || (w[0].2 - w[1].2).abs() > 0.1 || w[0].3 != w[1].3)
+    });
     if !changes {
         return None;
     }
