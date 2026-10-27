@@ -8,8 +8,10 @@ use super::{FitContext, GroundSchedule, network_controls, same_car, seed_car, ve
 use crate::decode::NetworkCar;
 use crate::infer::FitQuery;
 
-/// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
-const SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
+/// Shifts, in ticks later than the midpoint rule, tried for the observed control changes. A client's replay
+/// shows another car's control changes up to 40 ticks before their effect and some 24 after it (RESULTS.md,
+/// "Client replays: the ground timing fit's shifts").
+const SHIFTS: std::ops::RangeInclusive<i64> = -24..=40;
 
 /// The longest boost, in midpoint-rule ticks from the frame that shows it on to the one that shows it off, whose
 /// release may lie before the network's: RocketSim, like the game, keeps boosting for 0.1 s (12 ticks) after a
@@ -32,7 +34,7 @@ const LATCH_TICKS: i64 = 12;
 /// the chosen shift an earlier release in the span is taken when it fits strictly better (bots release the boost
 /// with a throttle change). Refused without chained update ticks for
 /// both later updates, with a withheld or inactive frame, an action counter change, an action in progress, or no
-/// control change near the span.
+/// control change that a shift moves into the span.
 pub(in crate::infer) fn fit_ground_timing(
     ctx: FitContext,
     query: &FitQuery,
@@ -131,10 +133,10 @@ pub(in crate::infer) fn fit_ground_timing(
     }
     let own = network_controls(car);
     let own_entry = (t_a, own.throttle, own.steer, own.handbrake, own.boost);
-    // A switch near the span: a frame there whose controls differ from the frame before it.
+    // A switch that a shift moves into the span: a frame whose controls differ from the frame before it.
     let changes = entries.windows(2).any(|w| {
-        w[1].0 >= t_a - 16
-            && w[1].0 <= t_c + 16
+        w[1].0 + SHIFTS.end() >= t_a
+            && w[1].0 + SHIFTS.start() <= t_c
             && ((w[0].1 - w[1].1).abs() > 0.1 || (w[0].2 - w[1].2).abs() > 0.1 || w[0].3 != w[1].3)
     });
     if !changes {

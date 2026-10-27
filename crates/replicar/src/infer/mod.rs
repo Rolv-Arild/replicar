@@ -24,6 +24,11 @@ use fits::{FitContext, ScratchArenas};
 /// Below this height (UU) a car's updates do not count as airborne for its air controls.
 const AIR_MIN_Z: f32 = 50.0;
 
+/// The earliest ground timing shift that counts towards a car's median shift (`control_shift`): a client's
+/// late-shown changes fit earlier ones, and in the median they moved the intervals without a fit on the bot
+/// match (RESULTS.md, "Client replays: the ground timing fit's shifts").
+const MEDIAN_MIN_SHIFT: i64 = -8;
+
 /// A pending dodge press, as the simulator holds it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PressInFlight {
@@ -356,7 +361,10 @@ impl Inference for FittedInference<'_> {
         let life = query.car.life;
         let timing = fits::fit_ground_timing(ctx, query, self.scratch.ground(query.hitbox));
         if let Some(shift) = timing.as_ref().and_then(|s| s.shift) {
-            self.shifts.entry(life).or_default().push(shift);
+            self.shifts
+                .entry(life)
+                .or_default()
+                .push(shift.max(MEDIAN_MIN_SHIFT));
         }
         if let Some(schedule) = timing {
             return Some(GroundChoice {
