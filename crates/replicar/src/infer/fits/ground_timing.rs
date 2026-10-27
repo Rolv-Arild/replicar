@@ -11,6 +11,14 @@ use crate::infer::FitQuery;
 /// Shifts, in ticks later than the midpoint rule, tried for the observed control changes.
 const SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
 
+/// The longest boost, in midpoint-rule ticks from the frame that shows it on to the one that shows it off, whose
+/// release may lie before the network's: RocketSim, like the game, keeps boosting for 0.1 s (12 ticks) after a
+/// press however short, and the network's boost is that latched state; four ticks for the frames' quantization.
+const LATCH_SPAN: i64 = 16;
+
+/// RocketSim's boost latch, 0.1 s.
+const LATCH_TICKS: i64 = 12;
+
 /// A control change is first seen in the frame after it happened, and each frame's state is 0-4 ticks older
 /// than its time, so the change tick is uncertain by several ticks per event. For a car on a surface (floor,
 /// wall, ramp or ceiling) with an update at `index`, one shift of every control switch (relative to the
@@ -18,7 +26,11 @@ const SHIFTS: std::ops::RangeInclusive<i64> = -8..=40;
 /// angular velocity (per 0.3 rad/s) and velocity (per 50 UU/s) with it; the schedule covers the interval to
 /// the next update. The scratch arena has the simulation's ball at this update, so a touch near it is simulated
 /// (refusing within 400 UU of the ball, as before, left a third of the changes of a bot match to the rule;
-/// RESULTS.md, "Inputs between frames"); other cars are not modelled. Refused without chained update ticks for
+/// RESULTS.md, "Inputs between frames"); other cars are not modelled. A boost the frames show for no longer than
+/// RocketSim's 0.1 s latch (`LATCH_SPAN`) may have been released at any tick of it: the release only changes the
+/// simulation through the throttle (RocketSim drives at full throttle while the boost control is down), so with
+/// the chosen shift an earlier release in the span is taken when it fits strictly better (bots release the boost
+/// with a throttle change). Refused without chained update ticks for
 /// both later updates, with a withheld or inactive frame, an action counter change, an action in progress, or no
 /// control change near the span.
 pub(in crate::infer) fn fit_ground_timing(
@@ -134,6 +146,28 @@ pub(in crate::infer) fn fit_ground_timing(
     };
     // The scratch arena holds this car and the ball as the simulation has it; other cars are not modelled.
     let scratch_ball = ball;
+    // The span simulated with the switches moved by `shift`, the boost up from `release.0` to `release.1`.
+    let mut simulate = |shift: i64, release: Option<(i64, i64)>| {
+        scratch.set_ball_state(scratch_ball);
+        seed_car(scratch, *state, now_tick);
+        for tau in t_a + 1..=t_c {
+            let e = controls_at(shift, tau);
+            let released = release.is_some_and(|(from, to)| tau >= from && tau < to);
+            scratch.set_car_controls(
+                0,
+                CarControls {
+                    throttle: e.1,
+                    steer: e.2,
+                    handbrake: e.3,
+                    boost: e.4 && !released,
+                    ..CarControls::default()
+                },
+            );
+            scratch.step_tick();
+        }
+        let end = scratch.get_car_state(0);
+        (end.phys.ang_vel - target_ang).length() / 0.3 + (end.phys.vel - target_vel).length() / 50.0
+    };
     // Shifts whose switches fall on the same ticks of the span give the same simulation: one cost each.
     let mut costs: Vec<(i64, f32)> = Vec::new();
     let mut simulated: Vec<(Vec<u32>, f32)> = Vec::new();
@@ -145,25 +179,7 @@ pub(in crate::infer) fn fit_ground_timing(
             costs.push((shift, *cost));
             continue;
         }
-        scratch.set_ball_state(scratch_ball);
-        seed_car(scratch, *state, now_tick);
-        for tau in t_a + 1..=t_c {
-            let e = controls_at(shift, tau);
-            scratch.set_car_controls(
-                0,
-                CarControls {
-                    throttle: e.1,
-                    steer: e.2,
-                    handbrake: e.3,
-                    boost: e.4,
-                    ..CarControls::default()
-                },
-            );
-            scratch.step_tick();
-        }
-        let end = scratch.get_car_state(0);
-        let cost = (end.phys.ang_vel - target_ang).length() / 0.3
-            + (end.phys.vel - target_vel).length() / 50.0;
+        let cost = simulate(shift, None);
         simulated.push((key, cost));
         costs.push((shift, cost));
     }
@@ -175,6 +191,28 @@ pub(in crate::infer) fn fit_ground_timing(
         }
     }
     let shift = costs[best].0;
+    // An earlier release of a boost no longer than the latch: (release tick, the network's), both replay ticks.
+    let mut release: Option<(i64, i64)> = None;
+    let mut release_cost = costs[best].1;
+    for i in 1..entries.len() {
+        if !entries[i].4 || entries[i - 1].4 {
+            continue;
+        }
+        // Until the frame that shows it off, or, before any does, the latch's end: the earliest it can.
+        let to = match (i + 1..entries.len()).find(|&j| !entries[j].4) {
+            Some(off) if entries[off].0 - entries[i].0 > LATCH_SPAN => continue,
+            Some(off) => entries[off].0 + shift,
+            None => entries[i].0 + shift + LATCH_TICKS,
+        };
+        let from = entries[i].0 + shift + 1;
+        for tau in from.max(t_a + 1)..to.min(t_c + 1) {
+            let cost = simulate(shift, Some((tau, to)));
+            if cost < release_cost - 1e-6 {
+                release = Some((tau, to));
+                release_cost = cost;
+            }
+        }
+    }
     // The schedule for the interval to the next update, in sim ticks.
     let mut schedule = vec![(
         now_tick,
@@ -191,6 +229,32 @@ pub(in crate::infer) fn fit_ground_timing(
         } else {
             // A switch at or before the update replaces the starting controls.
             schedule[0] = (now_tick, e.1, e.2, e.3, e.4, None);
+        }
+    }
+    if let Some((from, to)) = release {
+        let (from, to) = (
+            (now_tick as i64 + from - t_a) as u64,
+            (now_tick as i64 + to - t_a) as u64,
+        );
+        // The controls in effect at the release, with the boost released, and those at its end (the network's
+        // switch off, or the latch's end before the frames show one: the boost the network holds comes back).
+        let at = |tick: u64| schedule.iter().rev().find(|e| e.0 <= tick).copied();
+        let (released, end) = (at(from), at(to));
+        if let Some(e) = released {
+            schedule.push((from, e.1, e.2, e.3, false, None));
+        }
+        if let Some(e) = end {
+            schedule.push((to, e.1, e.2, e.3, e.4, None));
+        }
+        schedule.sort_by_key(|e| e.0);
+        schedule.dedup_by(|later, earlier| later.0 == earlier.0 && {
+            *earlier = *later;
+            true
+        });
+        for e in &mut schedule {
+            if e.0 >= from && e.0 < to {
+                e.4 = false;
+            }
         }
     }
     let zero_cost = costs.iter().find(|(s, _)| *s == 0).map(|c| c.1);

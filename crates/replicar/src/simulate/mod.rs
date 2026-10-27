@@ -969,6 +969,7 @@ impl<'a> Simulator<'a, '_> {
             self.press_deferred(sim_tick);
             self.release_jumps(sim_tick);
             self.release_before_presses(sim_tick);
+            self.hold_boost_releases();
             self.infer_flip_resets();
             self.record_tick();
             events.extend(
@@ -986,6 +987,25 @@ impl<'a> Simulator<'a, '_> {
     fn plans_dodge(&self, player: PlayerIndex) -> bool {
         self.pending_dodges.iter().any(|d| d.player == player)
             || self.deferred_dodges.iter().any(|d| d.player == player)
+    }
+
+    /// Keeps a car's boost released on the ground while RocketSim's 0.1 s latch still boosts after the release (a
+    /// release the ground timing fit put before the network's): the network's boost is the latched state, so its
+    /// boost up until the latch ends is no new press.
+    fn hold_boost_releases(&mut self) {
+        for slot in 0..self.players.len() {
+            let state = self.arena.get_car_state(slot);
+            let mut controls = *self.arena.get_car_controls(slot);
+            if controls.boost
+                && state.is_on_ground()
+                && state.is_boosting
+                && !state.prev_controls().boost
+                && state.boosting_time < rocketsim::consts::car::boost::MIN_TIME
+            {
+                controls.boost = false;
+                self.arena.set_car_controls(slot, controls);
+            }
+        }
     }
 
     /// Releases the jump the tick before a planned dodge or double-jump press, so that the press is a press: a
