@@ -15,6 +15,7 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - No spurious ground jump press from a jump counter re-sent with its even value (on curved walls) or a jump the simulation already flew before a dodge and a landing. This one changes the evaluator's held-out results (slightly better).
 - On the ground a boost the replay shows for no longer than RocketSim's 0.1 s latch may be released earlier inside it, where the ground timing fit finds that fits better (RocketSim drives at full throttle while the boost control is down); the network's boost presses it again as before, so a feathered boost keeps its re-presses; held-out results move too.
 - Near the ball or another car, the air boost switch, the double-jump and dodge press and the air jump release are timed by simulating the interval with the ball and the other cars (they fell back to the rule): air near the ball four frames ahead 1.75 -> 1.07 UU p90 on a host replay.
+- The ground timing fit tries control shifts from -24 to +40 ticks (from -8) and fits an interval whenever a shift can move a change into it: a client's replay shows other cars' control changes up to 40 ticks before their effect. On the client recordings ground steer and throttle labels are closer to the true inputs; about 5% slower conversions.
 
 ## 2.1.1 (2026-10-26)
 
