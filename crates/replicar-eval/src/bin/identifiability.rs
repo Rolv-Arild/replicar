@@ -86,7 +86,7 @@ fn arena_from(state: &ArenaState) -> Arena {
     arena.set_ball_state(state.ball);
     for (i, (_, pad)) in state.boost_pads.iter().enumerate() {
         if i < arena.num_boost_pads() {
-            arena.set_boost_pad_state(i, *pad);
+            arena.set_boost_pad_state(i, pad.clone());
         }
     }
     arena

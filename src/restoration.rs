@@ -232,6 +232,7 @@ pub fn restore_soccar_state(
             },
             BoostPadState {
                 cooldown: pad.cooldown,
+                ..BoostPadState::default()
             },
         ));
     }
@@ -307,7 +308,7 @@ pub fn apply_soccar_state_to_arena(
     }
     let mut max_pad_error = 0.0f32;
     for (index, (_, pad)) in snapshot.boost_pads.iter().enumerate() {
-        arena.set_boost_pad_state(index, *pad);
+        arena.set_boost_pad_state(index, pad.clone());
         max_pad_error =
             max_pad_error.max((arena.get_boost_pad_state(index).cooldown - pad.cooldown).abs());
     }

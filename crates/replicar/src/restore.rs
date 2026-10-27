@@ -138,6 +138,7 @@ pub fn arena_state(header: &Header, row: &replicar_format::StateRow) -> Result<A
             },
             BoostPadState {
                 cooldown: *cooldown,
+                ..BoostPadState::default()
             },
         ));
     }

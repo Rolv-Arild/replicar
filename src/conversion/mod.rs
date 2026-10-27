@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 
 use glam::Quat;
 use rocketsim::{
-    Arena, ArenaConfig, ArenaEvent, ArenaState, BoostPadState, CarBodyConfig, CarControls,
-    CarState, DemoMode, GameMode, Mat3A, PhysState, Team, Vec3A,
+    Arena, ArenaConfig, ArenaEvent, ArenaState, CarBodyConfig, CarControls, CarState, DemoMode,
+    GameMode, Mat3A, PhysState, Team, Vec3A,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -813,6 +813,13 @@ fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
 
 /// RocketSim limits speeds at the start of each tick, so a state read after stepping can exceed
 /// the limits that recorded server states obey. Apply them to the reported state.
+/// Sets a pad's cooldown and keeps the rest of its state (since RocketSim 0.3.3 the cars touching it).
+fn set_pad_cooldown(arena: &mut Arena, idx: usize, cooldown: f32) {
+    let mut state = arena.get_boost_pad_state(idx);
+    state.cooldown = cooldown;
+    arena.set_boost_pad_state(idx, state);
+}
+
 fn limit_reported_velocities(arena: &mut Arena, car_count: usize) {
     const CAR_MAX_SPEED: f32 = 2300.0;
     const CAR_MAX_ANGULAR_SPEED: f32 = 5.5;
@@ -1526,7 +1533,7 @@ pub fn convert_observations_with(
             // ticks before the last lag phase would otherwise let a car pick up an available pad
             // that the replay has not reported.
             for idx in 0..arena.num_boost_pads() {
-                arena.set_boost_pad_state(idx, BoostPadState { cooldown: 20.0 });
+                set_pad_cooldown(&mut arena, idx, 20.0);
             }
         }
         for lag in phase_lags {
@@ -2537,7 +2544,7 @@ pub fn convert_observations_with(
 
             if changed && let Some(idx) = pad_idx {
                 if pickup.picked_up == 255 {
-                    arena.set_boost_pad_state(idx, BoostPadState { cooldown: 0.0 });
+                    set_pad_cooldown(&mut arena, idx, 0.0);
                     pad_cooldowns[idx] = 0.0;
                 } else if pickup.picked_up % 2 == 1 {
                     let max_cooldown = if arena.get_boost_pad_config(idx).is_big {
@@ -2545,12 +2552,7 @@ pub fn convert_observations_with(
                     } else {
                         4.0
                     };
-                    arena.set_boost_pad_state(
-                        idx,
-                        BoostPadState {
-                            cooldown: max_cooldown,
-                        },
-                    );
+                    set_pad_cooldown(&mut arena, idx, max_cooldown);
                     pad_cooldowns[idx] = max_cooldown;
                 }
             }
@@ -2560,12 +2562,7 @@ pub fn convert_observations_with(
             // Write the true pad cooldowns (decayed at the start of this frame, then updated by this
             // frame's pickups) back into the arena for the export.
             for (idx, cooldown) in pad_cooldowns.iter().enumerate() {
-                arena.set_boost_pad_state(
-                    idx,
-                    BoostPadState {
-                        cooldown: *cooldown,
-                    },
-                );
+                set_pad_cooldown(&mut arena, idx, *cooldown);
             }
         }
         let timeline_offset = timeline_tick as i64 - arena.tick_count() as i64;
@@ -4061,7 +4058,7 @@ mod tests {
         };
 
         let output = convert_observations(replay, &options).unwrap();
-        let pad_state = output.frames[0].state.boost_pads[0].1;
+        let pad_state = &output.frames[0].state.boost_pads[0].1;
         assert_eq!(pad_state.cooldown, 4.0);
         assert_eq!(output.frames[1].state.boost_pads[0].1.cooldown, 0.0);
     }

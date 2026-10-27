@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use glam::Vec3A;
-use rocketsim::{Arena, BoostPadState};
+use rocketsim::Arena;
 
 use super::Players;
 use crate::decode::{ActorId, NetworkFrame, PadRecord};
@@ -119,7 +119,7 @@ impl Pads {
                 continue;
             };
             if record.picked_up_raw == 255 {
-                arena.set_boost_pad_state(index, BoostPadState { cooldown: 0.0 });
+                set_cooldown(arena, index, 0.0);
                 self.cooldowns[index] = 0.0;
             } else if record.picked_up_raw % 2 == 1 {
                 let full = if arena.get_boost_pad_config(index).is_big {
@@ -127,7 +127,7 @@ impl Pads {
                 } else {
                     4.0
                 };
-                arena.set_boost_pad_state(index, BoostPadState { cooldown: full });
+                set_cooldown(arena, index, full);
                 self.cooldowns[index] = full;
             }
         }
@@ -180,12 +180,7 @@ impl Pads {
     /// Holds every pad of the arena on cooldown (from the first tick of an interval).
     pub(super) fn hold(arena: &mut Arena) {
         for index in 0..arena.num_boost_pads() {
-            arena.set_boost_pad_state(
-                index,
-                BoostPadState {
-                    cooldown: HELD_COOLDOWN,
-                },
-            );
+            set_cooldown(arena, index, HELD_COOLDOWN);
         }
     }
 
@@ -199,7 +194,15 @@ impl Pads {
     /// Writes the true cooldowns into the arena, for the exported state.
     pub(super) fn write(&self, arena: &mut Arena) {
         for (index, &cooldown) in self.cooldowns.iter().enumerate() {
-            arena.set_boost_pad_state(index, BoostPadState { cooldown });
+            set_cooldown(arena, index, cooldown);
         }
     }
+}
+
+/// Sets a pad's cooldown and keeps the rest of its state (since RocketSim 0.3.3 the cars touching it, which decide
+/// who picks it up next).
+fn set_cooldown(arena: &mut Arena, index: usize, cooldown: f32) {
+    let mut state = arena.get_boost_pad_state(index);
+    state.cooldown = cooldown;
+    arena.set_boost_pad_state(index, state);
 }
