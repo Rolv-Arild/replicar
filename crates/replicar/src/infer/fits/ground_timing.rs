@@ -247,9 +247,11 @@ pub(in crate::infer) fn fit_ground_timing(
             schedule.push((to, e.1, e.2, e.3, e.4, None));
         }
         schedule.sort_by_key(|e| e.0);
-        schedule.dedup_by(|later, earlier| later.0 == earlier.0 && {
-            *earlier = *later;
-            true
+        schedule.dedup_by(|later, earlier| {
+            later.0 == earlier.0 && {
+                *earlier = *later;
+                true
+            }
         });
         for e in &mut schedule {
             if e.0 >= from && e.0 < to {

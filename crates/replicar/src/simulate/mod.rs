@@ -337,7 +337,12 @@ fn sources(list: &mut Vec<ControlSources>, slot: usize) -> &mut ControlSources {
 /// a curved wall, where the velocity has a share along the car's up axis) does not count, nor a jump after which
 /// the double-jump or dodge counter changed while the simulated car was airborne since (`airborne`, the last frame
 /// whose update found it so): that jump flew in the simulation, and the car has landed.
-fn recent_jump(frames: &[NetworkFrame], f: usize, car: &NetworkCar, airborne: Option<usize>) -> bool {
+fn recent_jump(
+    frames: &[NetworkFrame],
+    f: usize,
+    car: &NetworkCar,
+    airborne: Option<usize>,
+) -> bool {
     let counters = |g: usize| {
         frames[g].cars.iter().find(|c| c.life == car.life).map(|c| {
             (
@@ -1464,7 +1469,8 @@ impl<'a> Simulator<'a, '_> {
             }
             if self.may_touch(slot, v1, update) {
                 // A press planned for the car would be missing from the simulation.
-                if self.plans_dodge(player) || self.early_presses.iter().any(|p| p.player == player) {
+                if self.plans_dodge(player) || self.early_presses.iter().any(|p| p.player == player)
+                {
                     continue;
                 }
                 let Some(position) = car.body.position.as_ref().filter(|p| p.frame == frame) else {
@@ -1472,8 +1478,11 @@ impl<'a> Simulator<'a, '_> {
                 };
                 let position = glam::Vec3A::from(position.value);
                 let target = UpdateTarget::new(update, position, v1, car, switches);
-                let switched = |c: &mut CarControls, step: u64, k: u64| c.boost = boost == (step > k);
-                if let Some(k) = self.switch_by_simulation(slot, &target, 0..update, update, switched) {
+                let switched =
+                    |c: &mut CarControls, step: u64, k: u64| c.boost = boost == (step > k);
+                if let Some(k) =
+                    self.switch_by_simulation(slot, &target, 0..update, update, switched)
+                {
                     self.air_boost.push((start + k + 1, slot, boost));
                     self.diagnostics.air_boost_switches += 1;
                 }
@@ -1649,7 +1658,8 @@ impl<'a> Simulator<'a, '_> {
                 let target = UpdateTarget::new(update, position, v1, car, switches);
                 let last = update.min(left);
                 let held = |c: &mut CarControls, step: u64, k: u64| c.jump = step <= k;
-                if let Some(k) = self.switch_by_simulation(slot, &target, least..last, update, held) {
+                if let Some(k) = self.switch_by_simulation(slot, &target, least..last, update, held)
+                {
                     self.jump_releases.push((start + k + 1, slot));
                     self.diagnostics.jump_releases_timed += 1;
                 }
