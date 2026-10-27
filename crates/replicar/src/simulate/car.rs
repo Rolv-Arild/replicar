@@ -30,6 +30,8 @@ pub(super) struct CarTrack {
     /// ground.
     pub(super) last_counters: Option<[u8; 3]>,
     pub(super) ground_counters: Option<[u8; 3]>,
+    /// The last frame whose update found the simulated car airborne.
+    pub(super) airborne_frame: Option<usize>,
 }
 
 /// The input a counter says began on this frame, for the car's controls.
@@ -479,6 +481,9 @@ impl Simulator<'_, '_> {
         // A flip reset inferred since the last frame (`infer_flip_resets`), or below.
         let mut inferred_reset = self.inferred_resets.remove(&player.get());
         let track = self.cars.entry(car.life).or_default();
+        if !state.is_on_ground() {
+            track.airborne_frame = Some(frame.get());
+        }
         if let Some(raw) = fresh(&car.inputs.dodge_active_raw) {
             let activated = rising(track.last_dodge_raw.replace(raw), raw);
             let torque = dodge_torque(&self.network.frames, frame.get(), car);

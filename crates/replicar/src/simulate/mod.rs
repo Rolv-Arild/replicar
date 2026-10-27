@@ -11,7 +11,7 @@ mod updates;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use replicar_format::{AirControlSource, FrameIndex, GroundControlSource, PlayerIndex};
-use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, DemoMode, GameMode};
+use rocketsim::{Arena, ArenaConfig, ArenaEvent, ArenaState, CarControls, DemoMode, GameMode};
 
 pub use players::SimPlayer;
 pub(crate) use updates::{dodge_torque, network_controls};
@@ -332,6 +332,67 @@ fn sources(list: &mut Vec<ControlSources>, slot: usize) -> &mut ControlSources {
     &mut list[slot]
 }
 
+/// The car's jump counter was odd (a jump) or changed (a jump pressed and released between two frames) in one of
+/// the last 10 frames up to `f`: a jump that may not have taken off yet. A counter re-sent with its even value (on
+/// a curved wall, where the velocity has a share along the car's up axis) does not count, nor a jump after which
+/// the double-jump or dodge counter changed while the simulated car was airborne since (`airborne`, the last frame
+/// whose update found it so): that jump flew in the simulation, and the car has landed.
+fn recent_jump(frames: &[NetworkFrame], f: usize, car: &NetworkCar, airborne: Option<usize>) -> bool {
+    let counters = |g: usize| {
+        frames[g].cars.iter().find(|c| c.life == car.life).map(|c| {
+            (
+                c.inputs.jump_active_raw.as_ref().map(|v| v.value),
+                c.inputs.double_jump_active_raw.as_ref().map(|v| v.value),
+                c.inputs.dodge_active_raw.as_ref().map(|v| v.value),
+            )
+        })
+    };
+    let Some(now) = counters(f) else {
+        return false;
+    };
+    (f.saturating_sub(10).max(1)..=f).rev().any(|g| {
+        counters(g).is_some_and(|c| {
+            // An absent counter is 0, as in the counter rule.
+            let jump = c.0.unwrap_or(0);
+            let changed = counters(g - 1).is_some_and(|before| before.0.unwrap_or(0) != jump);
+            (jump % 2 == 1 || changed)
+                && ((c.1, c.2) == (now.1, now.2) || airborne.is_none_or(|a| a < g))
+        })
+    })
+}
+
+/// A car's update at the end of a simulated interval, for `switch_by_simulation`.
+struct UpdateTarget {
+    /// Ticks from the interval's start to the update.
+    update: u64,
+    position: glam::Vec3A,
+    velocity: glam::Vec3A,
+    /// The car's network switches in the interval: (ticks after the start, the controls).
+    switches: Vec<(u64, CarControls)>,
+}
+
+impl UpdateTarget {
+    fn new(
+        update: u64,
+        position: glam::Vec3A,
+        velocity: glam::Vec3A,
+        car: &NetworkCar,
+        switches: &[(u64, &NetworkCar)],
+    ) -> Self {
+        let switches = switches
+            .iter()
+            .filter(|(_, c)| c.life == car.life)
+            .map(|&(at, c)| (at, updates::network_controls(c)))
+            .collect();
+        Self {
+            update,
+            position,
+            velocity,
+            switches,
+        }
+    }
+}
+
 /// The ticks of one frame's interval and the control switches due in it.
 struct Interval<'a> {
     span: u64,
@@ -568,7 +629,7 @@ impl<'a> Simulator<'a, '_> {
             if self.options.air_boost_timing {
                 self.plan_air_boost(&frame_cars, f, span, gap);
                 self.plan_air_throttle(&frame_cars, f, span, gap);
-                self.plan_jump_release(&frame_cars, f, span, gap);
+                self.plan_jump_release(&frame_cars, f, span, gap, &interval.switches);
             }
         }
         let mut events = Vec::new();
@@ -921,6 +982,12 @@ impl<'a> Simulator<'a, '_> {
         updates::limit_velocities(&mut self.arena, self.players.len());
     }
 
+    /// A fitted or deferred dodge is planned for the player.
+    fn plans_dodge(&self, player: PlayerIndex) -> bool {
+        self.pending_dodges.iter().any(|d| d.player == player)
+            || self.deferred_dodges.iter().any(|d| d.player == player)
+    }
+
     /// Releases the jump the tick before a planned dodge or double-jump press, so that the press is a press: a
     /// takeoff jump held to its update (`press_early`) could otherwise run into a fitted dodge's press tick.
     fn release_before_presses(&mut self, sim_tick: u64) {
@@ -1134,11 +1201,12 @@ impl<'a> Simulator<'a, '_> {
                     && car.body.position.as_ref().is_some_and(|p| {
                         p.frame == frame && (p.value[2] < 150.0 || state.is_on_ground())
                     })
-                    && car
-                        .inputs
-                        .jump_active_raw
-                        .as_ref()
-                        .is_some_and(|v| v.frame.get() + 10 >= f))
+                    && recent_jump(
+                        frames,
+                        f,
+                        car,
+                        self.cars.get(&car.life).and_then(|t| t.airborne_frame),
+                    ))
             {
                 // A jump counter that rose in this frame, or a takeoff in this frame's update while the simulated
                 // car is still on the ground (the counters can lead the updates by frames, and an update showing
@@ -1462,9 +1530,18 @@ impl<'a> Simulator<'a, '_> {
     /// ends (released, or at RocketSim's 24-tick limit), and the release was applied at the car's update; the
     /// update's velocity shows how many of the interval's ticks the jump force (1,458.3 UU/s^2 along the car's up
     /// axis) still pushed: the velocity along that axis (the mean of the car's at the interval's start and at the
-    /// update) changes by it beside gravity; boost and air throttle push along the forward axis, across it. A
-    /// release at the limit, or one the evidence puts at the update, is left as it was.
-    fn plan_jump_release(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+    /// update) changes by it beside gravity; boost and air throttle push along the forward axis, across it. A car
+    /// with a wheel on a surface at the start (a jump a few ticks old, whose suspension still pushes) is timed by
+    /// simulation instead (`switch_by_simulation`). A release at the limit, or one the evidence puts at the update,
+    /// is left as it was.
+    fn plan_jump_release(
+        &mut self,
+        cars: &[&'a NetworkCar],
+        f: usize,
+        span: u64,
+        gap: u64,
+        switches: &[(u64, &'a NetworkCar)],
+    ) {
         const HOLD: f32 = 4375.0 / 3.0;
         const MIN_TICKS: u32 = 3;
         const MAX_TICKS: u32 = 24;
@@ -1494,13 +1571,7 @@ impl<'a> Simulator<'a, '_> {
             ) else {
                 continue;
             };
-            if !released
-                || !controls.jump
-                || !state.is_jumping
-                || state.is_on_ground()
-                || state.wheels_with_contact().iter().any(Option::is_some)
-                || state.is_demoed
-            {
+            if !released || !controls.jump || !state.is_jumping || state.is_demoed {
                 continue;
             }
             let update = span - self.car_ticks(car, f, true, gap).min(span);
@@ -1508,6 +1579,30 @@ impl<'a> Simulator<'a, '_> {
             let left = u64::from(MAX_TICKS.saturating_sub(state.jump_ticks));
             let least = u64::from(MIN_TICKS.saturating_sub(state.jump_ticks));
             if update < 1 || left == 0 {
+                continue;
+            }
+            let v1 = glam::Vec3A::from(velocity.value);
+            if state.is_on_ground() || state.wheels_with_contact().iter().any(Option::is_some) {
+                // A fit's schedule drives the jump itself; a press or boost switch planned for the car would be
+                // missing from the simulation.
+                if self.ground_schedules.iter().any(|(p, _)| *p == player)
+                    || self.plans_dodge(player)
+                    || self.early_presses.iter().any(|p| p.player == player)
+                    || self.air_boost.iter().any(|b| b.1 == slot)
+                {
+                    continue;
+                }
+                let Some(position) = car.body.position.as_ref().filter(|p| p.frame == frame) else {
+                    continue;
+                };
+                let position = glam::Vec3A::from(position.value);
+                let target = UpdateTarget::new(update, position, v1, car, switches);
+                let last = update.min(left);
+                let held = |c: &mut CarControls, step: u64, k: u64| c.jump = step <= k;
+                if let Some(k) = self.switch_by_simulation(slot, &target, least..last, update, held) {
+                    self.jump_releases.push((start + k + 1, slot));
+                    self.diagnostics.jump_releases_timed += 1;
+                }
                 continue;
             }
             let [x, y, z, w] = rotation.value;
@@ -1526,6 +1621,67 @@ impl<'a> Simulator<'a, '_> {
             self.jump_releases.push((start + k + 1, slot));
             self.diagnostics.jump_releases_timed += 1;
         }
+    }
+
+    /// The step `k` of `candidates` (a control's change after step `k`, or a press on step `k + 1`) whose
+    /// simulation to the car's update comes closest to it (position error plus 0.1 x velocity error), when it is
+    /// closer than `default`'s and below 10. `set(controls, step, k)` sets the control on each step. Steps an arena
+    /// copy, the car's controls held as at the start but for its network switches (in the air only the steer, as in
+    /// `advance_to`) and its air schedule's pitch, yaw and roll; the other cars hold theirs.
+    fn switch_by_simulation(
+        &self,
+        slot: usize,
+        target: &UpdateTarget,
+        candidates: std::ops::Range<u64>,
+        default: u64,
+        set: impl Fn(&mut CarControls, u64, u64),
+    ) -> Option<u64> {
+        let start = self.arena.tick_count();
+        let update = target.update;
+        // The last schedule wins, as in `step`.
+        let schedule = self
+            .air_schedules
+            .iter()
+            .rev()
+            .find(|s| s.player.get() == slot && s.end_tick > start);
+        let cost = |k: u64| {
+            let mut copy = self.arena.clone();
+            for step in 1..=update {
+                let mut controls = *copy.get_car_controls(slot);
+                for &(_, next) in target.switches.iter().filter(|(at, _)| step == at + 1) {
+                    controls.steer = next.steer;
+                    if copy.get_car_state(slot).is_on_ground() {
+                        controls.throttle = next.throttle;
+                        controls.handbrake = next.handbrake;
+                        controls.boost = next.boost;
+                    }
+                }
+                if let Some(schedule) = schedule
+                    && schedule.end_tick >= start + step
+                    && let Some(&(_, air)) =
+                        schedule.entries.iter().rev().find(|e| e.0 <= start + step)
+                {
+                    controls.pitch = air.pitch;
+                    controls.yaw = air.yaw;
+                    controls.roll = air.roll;
+                }
+                set(&mut controls, step, k);
+                copy.set_car_controls(slot, controls);
+                copy.step_tick();
+            }
+            let phys = copy.get_car_state(slot).phys;
+            (phys.pos - target.position).length() + 0.1 * (phys.vel - target.velocity).length()
+        };
+        let mut best = (default, cost(default));
+        for k in candidates.filter(|&k| k != default) {
+            let c = cost(k);
+            if c < best.1 - 1e-4 {
+                best = (k, c);
+            }
+        }
+        // A best change that still misses the update by 10 or more (an update that puts the car back at rest on
+        // the ground, say) is no evidence of when it happened.
+        (best.0 != default && best.1 < 10.0).then_some(best.0)
     }
 
     /// Releases the jumps due at `sim_tick` (`plan_jump_release`), unless the jump was already released: a jump
