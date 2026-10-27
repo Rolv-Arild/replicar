@@ -941,6 +941,18 @@ impl<'a> Simulator<'a, '_> {
                 if self.leads(car.life) {
                     controls.throttle = next.throttle;
                     controls.boost = next.boost;
+                    // Air controls from the steer (no solved ones): the shifted steer too.
+                    if self
+                        .control_sources
+                        .get(player.get())
+                        .is_some_and(|s| s.0 == AirControlSource::Steer)
+                    {
+                        if next.handbrake {
+                            controls.roll = next.steer;
+                        } else {
+                            controls.yaw = next.steer;
+                        }
+                    }
                 }
                 self.arena.set_car_controls(player.get(), controls);
                 continue;
