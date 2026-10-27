@@ -46,6 +46,9 @@ pub struct GroundSchedule {
     pub entries: Vec<(u64, f32, f32, bool, bool, Option<bool>)>,
     /// The timing shift the ground timing fit chose, when it was strictly better than the midpoint rule.
     pub shift: Option<i64>,
+    /// Sets only the jump: the other controls stay on the network rule (the car's fitted control shift and the
+    /// ramps).
+    pub jump_only: bool,
 }
 
 /// A ground jump followed by a dodge, fitted together.

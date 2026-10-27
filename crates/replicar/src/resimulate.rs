@@ -142,17 +142,19 @@ pub fn to_group(ticks: Option<&UpdateTicks>, recording: &Recording) -> Resimulat
                         .schedule
                         .entries
                         .iter()
-                        .map(
-                            |&(tick, throttle, steer, handbrake, boost, jump)| ScheduleEntry {
+                        .map(|&(tick, throttle, steer, handbrake, boost, jump)| {
+                            // A jump-only schedule stores the jump alone.
+                            let other = !choice.schedule.jump_only;
+                            ScheduleEntry {
                                 tick,
-                                throttle: Some(throttle),
-                                steer: Some(steer),
-                                handbrake: Some(handbrake),
-                                boost: Some(boost),
+                                throttle: other.then_some(throttle),
+                                steer: other.then_some(steer),
+                                handbrake: other.then_some(handbrake),
+                                boost: other.then_some(boost),
                                 jump,
                                 ..ScheduleEntry::default()
-                            },
-                        )
+                            }
+                        })
                         .collect();
                 }
                 Choice::TicksOverride(t) => stored.integer = Some(*t as i64),
@@ -249,23 +251,38 @@ pub fn from_group(
                 i32::try_from(integer()?).map_err(|_| invalid("shift"))?,
             ),
             Question::GroundSchedule => Choice::GroundSchedule(GroundChoice {
-                schedule: GroundSchedule {
-                    end_tick: stored.end_tick.ok_or_else(|| invalid("end tick"))?,
-                    entries: stored
-                        .entries
-                        .iter()
-                        .map(|e| {
-                            Ok((
-                                e.tick,
-                                e.throttle.ok_or_else(|| invalid("throttle"))?,
-                                e.steer.ok_or_else(|| invalid("steer"))?,
-                                e.handbrake.ok_or_else(|| invalid("handbrake"))?,
-                                e.boost.ok_or_else(|| invalid("boost"))?,
-                                e.jump,
-                            ))
-                        })
-                        .collect::<Result<_, Error>>()?,
-                    shift: stored.integer,
+                schedule: {
+                    // A schedule whose entries hold the jump alone is jump-only.
+                    let jump_only = !stored.entries.is_empty()
+                        && stored.entries.iter().all(|e| {
+                            e.jump.is_some()
+                                && e.throttle.is_none()
+                                && e.steer.is_none()
+                                && e.handbrake.is_none()
+                                && e.boost.is_none()
+                        });
+                    GroundSchedule {
+                        end_tick: stored.end_tick.ok_or_else(|| invalid("end tick"))?,
+                        entries: stored
+                            .entries
+                            .iter()
+                            .map(|e| {
+                                if jump_only {
+                                    return Ok((e.tick, 0.0, 0.0, false, false, e.jump));
+                                }
+                                Ok((
+                                    e.tick,
+                                    e.throttle.ok_or_else(|| invalid("throttle"))?,
+                                    e.steer.ok_or_else(|| invalid("steer"))?,
+                                    e.handbrake.ok_or_else(|| invalid("handbrake"))?,
+                                    e.boost.ok_or_else(|| invalid("boost"))?,
+                                    e.jump,
+                                ))
+                            })
+                            .collect::<Result<_, Error>>()?,
+                        shift: stored.integer,
+                        jump_only,
+                    }
                 },
                 dodge: stored.dodge.as_ref().map(plan),
             }),

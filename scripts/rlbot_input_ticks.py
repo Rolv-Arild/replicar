@@ -198,8 +198,8 @@ def main() -> None:
                     g["flip missed"].append(0 if hit else 1)
                     if not hit and os.environ.get("DEBUG_FLIPS"):
                         r = rows[s0 + t]
-                        near = (sf - t)[np.abs(sf - t) <= 60].tolist() if len(sf) else []
-                        print(f"   missed flip: player {p} row {r} frame {a['frame'][r] if 'frame' in a else ''} sim flips within 60 ticks at {near}; "
+                        around = (sf - t)[np.abs(sf - t) <= 60].tolist() if len(sf) else []
+                        print(f"   missed flip: player {p} row {r} frame {a['frame'][r] if 'frame' in a else ''} sim flips within 60 ticks at {around}; "
                               f"sim on_ground {a['car_is_on_ground'][r, p]} has_flipped {a['car_has_flipped'][r, p]} z {a['car_position'][r, p, 2]:.0f}; "
                               f"src {f.table.column(f'car_{p}_air_controls_source')[r].as_py()}")
                     if hit:

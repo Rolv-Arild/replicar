@@ -13,14 +13,17 @@ pub(super) const SHIFTS: std::ops::RangeInclusive<i64> = -8..=16;
 
 /// The jump counter turns odd in the frame after the press, and each frame's state is 0-4 ticks older than its
 /// time; the fitted start is 0-3 ticks after the midpoint rule in two thirds of the events and up to 12 later
-/// in the rest. For a car on a surface with an update at `index` and an even jump counter that turns odd
-/// before the second next update, one shift of the counter's switches (press and release together) is chosen
-/// by simulating the span to that update (position error plus 0.1 x velocity error); the interval to the next
-/// update is driven with it. The other controls stay on the midpoint rule, or those of the frame whose counter
-/// switches move with it (a press of the jump with throttle, steer or handbrake, as bots do), whichever fits
-/// better. Refused without chained update ticks for
-/// both later updates, for spans over 30 ticks, a withheld or inactive frame, or a change of the double-jump,
-/// dodge or flip counter. The ball is simulated from its state at this update's tick; other cars are not.
+/// in the rest. For a car on a surface with an update at `index` and a jump counter that turns odd (or rises by
+/// an even step) no later than the frame of the update fitted to, one shift of the counter's switches (press and
+/// release together) is chosen by simulating the span to that update (position error plus 0.1 x velocity
+/// error); the interval to the next update is driven with it. A client's replay shows another car's counter in
+/// the frame of the update with the takeoff or later, so a counter already odd at `index` is fitted too while
+/// the simulated car has not jumped. The other controls stay on the midpoint rule, or those of the frame whose
+/// counter switches move with it (a press of the jump with throttle, steer or handbrake, as bots do), whichever
+/// fits better; on the rule, the schedule sets the jump only (`GroundSchedule::jump_only`). Refused without
+/// chained update ticks for both later updates, for spans over 30 ticks, a withheld or inactive frame, or a
+/// change of the double-jump, dodge or flip counter. The ball is simulated from its state at this update's
+/// tick; other cars are not.
 pub(in crate::infer) fn fit_jump_timing(
     ctx: FitContext,
     query: &FitQuery,
@@ -55,10 +58,29 @@ pub(in crate::infer) fn fit_jump_timing(
             .as_ref()
             .is_some_and(|v| v.value % 2 == 1)
     };
-    if a_others.iter().flatten().any(|c| c % 2 == 1) || jump_odd(car) {
+    if a_others.iter().flatten().any(|c| c % 2 == 1) {
         return None;
     }
     let t_a = ctx.timeline(index) - ticks_before as i64;
+    // A counter already odd at this update: a client's replay can show it in the frame of an update that still
+    // has the car on the ground. Fitted when the simulated car has not jumped and the counter turned odd in a
+    // frame no older than the update's tick.
+    if jump_odd(car) {
+        let mut g0 = index;
+        while g0 > 0
+            && ctx.in_play(g0 - 1)
+            && frames[g0 - 1]
+                .cars
+                .iter()
+                .find(&same_car)
+                .is_some_and(jump_odd)
+        {
+            g0 -= 1;
+        }
+        if state.has_jumped || state.is_jumping || ctx.timeline(g0) <= t_a - 4 {
+            return None;
+        }
+    }
     let mut found: Vec<(usize, i64, Vec3A, Vec3A)> = Vec::new();
     for g in index + 1..=(index + 12).min(frames.len() - 1) {
         if !ctx.in_play(g) || ctx.withheld(g) {
@@ -102,11 +124,12 @@ pub(in crate::infer) fn fit_jump_timing(
     if ticks_ab < 1 || (ticks_ac <= ticks_ab && !ctx.fit_on_next_update) || ticks_ac > 30 {
         return None;
     }
-    let entries = control_entries(ctx, index, last_frame, car);
-    // The counter must turn odd after a and no later than the second next update.
+    let entries = control_entries(ctx, index, last_frame, car, true);
+    // The counter must turn odd after a and no later than the frame of the update fitted to.
+    let latest = (t_c + 4).max(ctx.timeline(last_frame));
     if !entries
         .iter()
-        .any(|e| e.6 && e.0 > t_a - 4 && e.0 <= t_c + 4)
+        .any(|e| e.6 && e.0 > t_a - 4 && e.0 <= latest)
     {
         return None;
     }
@@ -123,8 +146,16 @@ pub(in crate::infer) fn fit_jump_timing(
         }
         scratch.set_ball_state(*ball);
         seed_car(scratch, *state, now_tick);
+        // A press with the car off the ground would be a dodge or double jump, not this jump's takeoff.
+        let mut previous_jump = moved(t_a).4;
+        let mut airborne_press = false;
         for tau in t_a + 1..=t_c {
             let c = moved(tau);
+            if c.4 && !previous_jump && !scratch.get_car_state(0).is_on_ground() {
+                airborne_press = true;
+                break;
+            }
+            previous_jump = c.4;
             scratch.set_car_controls(
                 0,
                 CarControls {
@@ -138,13 +169,20 @@ pub(in crate::infer) fn fit_jump_timing(
             );
             scratch.step_tick();
         }
+        if airborne_press {
+            continue;
+        }
         let end = scratch.get_car_state(0);
         let cost =
             (end.phys.pos - target_pos).length() + 0.1 * (end.phys.vel - target_vel).length();
         costs.push(((shift, together), cost));
     }
-    // The midpoint rule (shift 0, the other controls on the rule) unless another choice is strictly better.
-    let mut best = costs.iter().position(|(key, _)| *key == (0, false))?;
+    // The midpoint rule (shift 0, the other controls on the rule) unless another choice is strictly better; the
+    // cheapest when the rule presses in the air.
+    let mut best = costs
+        .iter()
+        .position(|(key, _)| *key == (0, false))
+        .or_else(|| (0..costs.len()).min_by(|&i, &j| costs[i].1.total_cmp(&costs[j].1)))?;
     for (i, (_, cost)) in costs.iter().enumerate() {
         if *cost < costs[best].1 - 1e-4 {
             best = i;
@@ -165,6 +203,7 @@ pub(in crate::infer) fn fit_jump_timing(
         end_tick: now_tick + ticks_ab as u64,
         entries: schedule,
         shift: None,
+        jump_only: !together,
     })
 }
 
@@ -172,12 +211,14 @@ pub(in crate::infer) fn fit_jump_timing(
 /// boost, jump counter odd).
 pub(super) type JumpEntry = (i64, i64, f32, f32, bool, bool, bool);
 
-/// The controls of the frames from three before `index` to one after `last_frame`, in play.
+/// The controls of the frames from three before `index` to one after `last_frame`, in play. With `even_steps`,
+/// a jump counter that rose by an even step counts as pressed in that frame.
 pub(super) fn control_entries(
     ctx: FitContext,
     index: usize,
     last_frame: usize,
     car: &NetworkCar,
+    even_steps: bool,
 ) -> Vec<JumpEntry> {
     let same_car = same_car(car);
     let mut entries = Vec::new();
@@ -189,11 +230,17 @@ pub(super) fn control_entries(
             continue;
         };
         let controls = network_controls(other);
-        let jump = other
-            .inputs
-            .jump_active_raw
-            .as_ref()
-            .is_some_and(|v| v.value % 2 == 1);
+        let counter = |c: &NetworkCar| c.inputs.jump_active_raw.as_ref().map(|v| v.value);
+        let before = (g > 0)
+            .then(|| ctx.frames[g - 1].cars.iter().find(&same_car))
+            .flatten()
+            .and_then(counter);
+        // A counter that rose by an even step: a press and its release between the frames (a client's replay
+        // updates another car's counters every 10 ticks or so), held for this frame.
+        let jump = counter(other).is_some_and(|v| {
+            v % 2 == 1
+                || (even_steps && before.is_some_and(|b| v != b && v.wrapping_sub(b) % 2 == 0))
+        });
         entries.push((
             ctx.timeline(g),
             ctx.control_change_tick(g),

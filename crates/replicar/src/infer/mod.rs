@@ -372,8 +372,12 @@ impl Inference for FittedInference<'_> {
                 dodge: None,
             });
         }
-        if let Some(schedule) = fits::fit_jump_timing(ctx, query, self.scratch.ground(query.hitbox))
+        if let Some(mut schedule) =
+            fits::fit_jump_timing(ctx, query, self.scratch.ground(query.hitbox))
         {
+            // The other controls of a car with a fitted control shift follow the shift and the ramps, as in an
+            // interval without a fit: a jump fitted with the other controls on the midpoint rule leaves them to it.
+            schedule.jump_only &= self.control_shift(life).is_some();
             return Some(GroundChoice {
                 schedule,
                 dodge: None,

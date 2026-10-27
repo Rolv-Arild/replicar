@@ -140,7 +140,7 @@ pub(in crate::infer) fn fit_ground_flip(
     if ticks_ab < 1 || ticks_ac <= ticks_ab || ticks_ac > 45 || activation_frame > last_frame {
         return None;
     }
-    let entries = control_entries(ctx, index, last_frame, car);
+    let entries = control_entries(ctx, index, last_frame, car, false);
     // The jump counter must turn odd after a and no later than the activation.
     if !entries
         .iter()
@@ -307,6 +307,7 @@ pub(in crate::infer) fn fit_ground_flip(
             end_tick: now_tick + ticks_ab_eff as u64,
             entries: entries_out,
             shift: None,
+            jump_only: false,
         },
         first_update,
         dodge: Some(DodgePlan {

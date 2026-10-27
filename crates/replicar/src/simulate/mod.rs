@@ -1921,6 +1921,11 @@ impl<'a> Simulator<'a, '_> {
             };
             let slot = player.get();
             let mut controls = *self.arena.get_car_controls(slot);
+            if schedule.jump_only {
+                controls.jump = entry.5.unwrap_or(controls.jump);
+                self.arena.set_car_controls(slot, controls);
+                continue;
+            }
             controls.throttle = entry.1;
             controls.steer = entry.2;
             controls.handbrake = entry.3;

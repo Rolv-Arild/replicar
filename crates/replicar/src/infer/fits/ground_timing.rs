@@ -268,5 +268,6 @@ pub(in crate::infer) fn fit_ground_timing(
         shift: zero_cost
             .filter(|&z| costs[best].1 < z - 1e-6)
             .map(|_| shift),
+        jump_only: false,
     })
 }
