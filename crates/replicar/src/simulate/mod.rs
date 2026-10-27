@@ -1251,10 +1251,10 @@ impl<'a> Simulator<'a, '_> {
     /// leaves the position `dt * J * ((n - 1) / 2 - k)` past `dt * ((n - 1) * v0 + (n + 1) * v1) / 2`, the path of
     /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse
     /// is the velocity change less gravity and boost. A car that can touch the ball or another car in the interval
-    /// (`may_touch`), whose update holds the contact too, is timed by simulation instead (`switch_by_simulation`;
-    /// not with a dodge planned for it). Not for a car with a wheel on a surface, still holding its jump (whose
-    /// force ends in the interval), whose boost switches in it, near the speed limit, or whose evidence does not fit
-    /// one impulse.
+    /// (`may_touch`), whose update holds the contact too, or near the speed limit (2,100 UU/s), is timed by
+    /// simulation instead (`switch_by_simulation`; not with a dodge planned for it). Not for a car with a wheel on
+    /// a surface, still holding its jump (whose force ends in the interval), whose boost switches in it, or whose
+    /// evidence does not fit one impulse.
     fn impulse_tick(
         &self,
         car: &NetworkCar,
@@ -1289,12 +1289,13 @@ impl<'a> Simulator<'a, '_> {
             || state.is_demoed
             || state.is_jumping
             || boost_switches
-            || state.phys.vel.length() > 2100.0
-            || v1.length() > 2100.0
         {
             return None;
         }
-        if self.may_touch(slot, v1, update) {
+        // Near the speed limit RocketSim scales the velocity back to 2,300 UU/s, which one impulse does not
+        // explain: simulated too.
+        let near_limit = state.phys.vel.length() > 2100.0 || v1.length() > 2100.0;
+        if near_limit || self.may_touch(slot, v1, update) {
             // The update holds the contact too: the press by simulation, the jump released before it. A dodge
             // planned for the car would be missing from the simulation.
             if self.plans_dodge(player) {
@@ -1410,8 +1411,8 @@ impl<'a> Simulator<'a, '_> {
     /// forward velocity changes by the boost (991.7 UU/s^2, with the air throttle at 1, 66.7) on the boosting ticks
     /// and by the air throttle on the others, beside gravity. The forward direction is the mean of the car's at the
     /// start and at the update. A car that can touch the ball or another car in the interval (`may_touch`), whose
-    /// update holds the contact too, is timed by simulation instead (`switch_by_simulation`). Not for a car with a
-    /// wheel on a surface, near the speed limit, or without boost.
+    /// update holds the contact too, or near the speed limit (2,200 UU/s), is timed by simulation instead
+    /// (`switch_by_simulation`). Not for a car with a wheel on a surface or without boost.
     fn plan_air_boost(
         &mut self,
         cars: &[&'a NetworkCar],
@@ -1458,8 +1459,6 @@ impl<'a> Simulator<'a, '_> {
                 || state.wheels_with_contact().iter().any(Option::is_some)
                 || state.is_demoed
                 || state.boost <= 1.0
-                || state.phys.vel.length() > 2200.0
-                || v1.length() > 2200.0
             {
                 continue;
             }
@@ -1467,7 +1466,10 @@ impl<'a> Simulator<'a, '_> {
             if update < 2 {
                 continue;
             }
-            if self.may_touch(slot, v1, update) {
+            // Near the speed limit RocketSim scales the velocity back to 2,300 UU/s, and the boost shows only in
+            // its direction: simulated too.
+            let near_limit = state.phys.vel.length() > 2200.0 || v1.length() > 2200.0;
+            if near_limit || self.may_touch(slot, v1, update) {
                 // A press planned for the car would be missing from the simulation.
                 if self.plans_dodge(player) || self.early_presses.iter().any(|p| p.player == player)
                 {
