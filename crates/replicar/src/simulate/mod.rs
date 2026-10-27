@@ -171,8 +171,9 @@ pub(super) struct EarlyPress {
 }
 
 /// A dodge the replay's counter shows while the simulated car is still on the ground (its takeoff not yet in the
-/// updates, which can lag the counters by frames): pressed at the first tick the car is airborne, unless the
-/// counter turns even or `until` passes first.
+/// updates, which can lag the counters by frames), or a dodge or double jump pressed while a leading car's jump is
+/// held for its release (`defer_held_press`): pressed at the first tick the car is airborne with the jump
+/// released, unless the counter turns even or `until` passes first.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DeferredDodge {
     pub(super) player: PlayerIndex,
@@ -437,6 +438,9 @@ struct Simulator<'a, 'i> {
     air_throttle: Vec<(u64, usize, f32)>,
     /// The current interval's jump releases (`plan_jump_release`): sim tick, player slot.
     jump_releases: Vec<(u64, usize)>,
+    /// The held jumps of cars showing their controls ahead of their effect (`leads`), released at their tick:
+    /// (tick, slot), across intervals.
+    pub(super) lead_releases: Vec<(u64, usize)>,
     /// Dodges waiting for their car to leave the ground (`DeferredDodge`).
     pub(super) deferred_dodges: Vec<DeferredDodge>,
     /// The ticks stepped in the current frame's interval.
@@ -499,6 +503,7 @@ pub fn simulate(
         air_boost: Vec::new(),
         air_throttle: Vec::new(),
         jump_releases: Vec::new(),
+        lead_releases: Vec::new(),
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
@@ -645,6 +650,7 @@ impl<'a> Simulator<'a, '_> {
         self.jump_releases.clear();
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
+            self.plan_lead_releases(&frame_cars, f, gap);
             if self.options.air_boost_timing {
                 self.plan_air_boost(&frame_cars, f, span, gap, &interval.switches);
                 self.plan_air_throttle(&frame_cars, f, span, gap);
@@ -991,6 +997,7 @@ impl<'a> Simulator<'a, '_> {
             self.press_early(sim_tick);
             self.press_deferred(sim_tick);
             self.release_jumps(sim_tick);
+            self.release_lead_jumps(sim_tick);
             self.release_before_presses(sim_tick);
             self.infer_flip_resets();
             self.record_tick();
@@ -1669,6 +1676,10 @@ impl<'a> Simulator<'a, '_> {
             if !released || !controls.jump || !state.is_jumping || state.is_demoed {
                 continue;
             }
+            // A car showing its controls ahead of their effect: `plan_lead_releases`.
+            if self.leads(car.life) {
+                continue;
+            }
             let update = span - self.car_ticks(car, f, true, gap).min(span);
             // The ticks the jump can still push before RocketSim's limit, and the ones it must.
             let left = u64::from(MAX_TICKS.saturating_sub(state.jump_ticks));
@@ -1780,6 +1791,57 @@ impl<'a> Simulator<'a, '_> {
         // A best change that still misses the update by 10 or more (an update that puts the car back at rest on
         // the ground, say) is no evidence of when it happened.
         (best.0 != default && best.1 < 10.0).then_some(best.0)
+    }
+
+    /// When a car that shows its controls ahead of their effect (`leads`) releases a held jump: its control shift
+    /// after the midpoint-rule switch of the frame whose jump counter turned even, held across the updates until
+    /// then (`lead_releases`). RocketSim ends the jump's force at its 24-tick limit itself.
+    fn plan_lead_releases(&mut self, cars: &[&'a NetworkCar], f: usize, gap: u64) {
+        let start = self.arena.tick_count();
+        let frame = FrameIndex(f as u32);
+        for &car in cars {
+            let Some(&(player, created)) = self.players.by_actor.get(&car.life.actor) else {
+                continue;
+            };
+            if created != car.life.created || !self.leads(car.life) {
+                continue;
+            }
+            let slot = player.get();
+            let state = self.arena.get_car_state(slot);
+            let released = car
+                .inputs
+                .jump_active_raw
+                .as_ref()
+                .is_some_and(|v| v.frame == frame && v.value % 2 == 0);
+            if !released
+                || !self.arena.get_car_controls(slot).jump
+                || !state.is_jumping
+                || state.is_demoed
+            {
+                continue;
+            }
+            let Some(shift) = self.inference.control_shift(car.life) else {
+                continue;
+            };
+            let at = (gap / 2).saturating_sub(2) + shift as u64;
+            self.lead_releases.retain(|&(_, s)| s != slot);
+            self.lead_releases.push((start + at + 1, slot));
+        }
+    }
+
+    /// Releases the held jumps of leading cars due at `sim_tick` (`lead_releases`).
+    fn release_lead_jumps(&mut self, sim_tick: u64) {
+        for i in 0..self.lead_releases.len() {
+            let (tick, slot) = self.lead_releases[i];
+            if sim_tick == tick {
+                let mut controls = *self.arena.get_car_controls(slot);
+                if controls.jump && self.arena.get_car_state(slot).prev_controls().jump {
+                    controls.jump = false;
+                    self.arena.set_car_controls(slot, controls);
+                }
+            }
+        }
+        self.lead_releases.retain(|&(tick, _)| tick > sim_tick);
     }
 
     /// Releases the jumps due at `sim_tick` (`plan_jump_release`), unless the jump was already released: a jump

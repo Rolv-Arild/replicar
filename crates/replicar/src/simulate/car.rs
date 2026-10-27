@@ -497,11 +497,20 @@ impl Simulator<'_, '_> {
                 let (pitch, yaw) = (-ty / 2.24, -tx / 2.60);
                 if (pitch * pitch + yaw * yaw).sqrt() > 0.01 {
                     if dodge_impulse_unseen(car, frame, state) {
-                        press = Press {
-                            jump: true,
-                            pitch,
-                            yaw,
-                        };
+                        let now = self.arena.tick_count();
+                        if !defer_held_press(
+                            &mut self.lead_releases,
+                            &mut self.deferred_dodges,
+                            now,
+                            (player, car.life),
+                            (pitch, yaw),
+                        ) {
+                            press = Press {
+                                jump: true,
+                                pitch,
+                                yaw,
+                            };
+                        }
                     } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                         if !state.is_on_ground() && !state.has_flip_or_jump() {
                             // The car could not flip in the simulation: a reset it missed (`infer_flip_resets`).
@@ -533,11 +542,20 @@ impl Simulator<'_, '_> {
             if activated && !press.jump && !early_double {
                 if dodge_impulse_unseen(car, frame, state) {
                     // A jump press with no direction is RocketSim's double jump.
-                    press = Press {
-                        jump: true,
-                        pitch: 0.0,
-                        yaw: 0.0,
-                    };
+                    let now = self.arena.tick_count();
+                    if !defer_held_press(
+                        &mut self.lead_releases,
+                        &mut self.deferred_dodges,
+                        now,
+                        (player, car.life),
+                        (0.0, 0.0),
+                    ) {
+                        press = Press {
+                            jump: true,
+                            pitch: 0.0,
+                            yaw: 0.0,
+                        };
+                    }
                 } else if !state.is_on_ground() || state.phys.pos.z > 50.0 {
                     // The velocity update at the activation already holds the impulse: only the flags.
                     state.has_jumped = true;
@@ -670,6 +688,14 @@ impl Simulator<'_, '_> {
                 Some(raw.value % 2 == 1 && (jump_impulse_unseen(car, frame) || track.jump_held));
         }
         controls.jump &= track.jump_gate.unwrap_or(false);
+        // A leading car's jump stays held until its release (`lead_releases`).
+        let slot = player.get();
+        if !controls.jump
+            && self.arena.get_car_controls(slot).jump
+            && self.lead_releases.iter().any(|&(_, s)| s == slot)
+        {
+            controls.jump = true;
+        }
         let airborne = !state.is_on_ground() || (new_life && state.phys.pos.z > 50.0);
         // A car showing its controls ahead of their effect keeps the boost and throttle its shifted switches set.
         if airborne && !new_life && self.leads(car.life) {
@@ -723,4 +749,28 @@ impl Simulator<'_, '_> {
             (air_source, GroundControlSource::Network);
         (controls, airborne)
     }
+}
+
+/// A press now while a leading car's jump is held for its release (`lead_releases`) would be no press: the release
+/// comes first and the press a tick later (a deferred dodge; no direction is a double jump).
+fn defer_held_press(
+    lead_releases: &mut Vec<(u64, usize)>,
+    deferred_dodges: &mut Vec<super::DeferredDodge>,
+    now: u64,
+    (player, life): (PlayerIndex, CarLife),
+    (pitch, yaw): (f32, f32),
+) -> bool {
+    let slot = player.get();
+    if !lead_releases.iter().any(|&(_, s)| s == slot) {
+        return false;
+    }
+    lead_releases.retain(|&(_, s)| s != slot);
+    deferred_dodges.push(super::DeferredDodge {
+        player,
+        life,
+        pitch,
+        yaw,
+        until: now + 60,
+    });
+    true
 }
