@@ -2914,4 +2914,4 @@ The leads left in the last section looked tied to the LAN client recording; meas
 
 Deterministic; the workspace tests pass; the resimulation of the game 1 recordings and of a train replay reproduces their files. New references `target/ref-v2-lead/`.
 
-**What is left.** A leading car's double jumps (too few to measure) and its handbrake's air roll; the rest as in the last section.
+**What is left.** A leading car's double jumps: in six train replays the double-jump counter leads the first rising update by a median of 12 ticks for the leading cars (34 double jumps) and 8 for the others (66), about half the jump counter's lead; with about 880 of the train evaluator's million one-step samples after a double jump, and a deferral by the full shift worse for dodges, not pursued. The leading car's handbrake's air roll; the rest as in the last section.
