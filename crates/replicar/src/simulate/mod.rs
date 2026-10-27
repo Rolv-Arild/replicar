@@ -1385,13 +1385,14 @@ impl<'a> Simulator<'a, '_> {
     /// Whether the car shows its controls ahead of their effect: its control shift is at least `LEAD_MIN_SHIFT`
     /// now and was in most of its frames so far.
     fn leads(&self, life: CarLife) -> bool {
-        self.inference
-            .control_shift(life)
-            .is_some_and(|s| s >= LEAD_MIN_SHIFT)
+        // The votes first: most cars fail them, and each question is recorded for the resimulation.
+        self.lead_votes
+            .get(&life)
+            .is_some_and(|&(lead, all)| 2 * lead > all)
             && self
-                .lead_votes
-                .get(&life)
-                .is_some_and(|&(lead, all)| 2 * lead > all)
+                .inference
+                .control_shift(life)
+                .is_some_and(|s| s >= LEAD_MIN_SHIFT)
     }
 
     fn may_touch(&self, slot: usize, v1: glam::Vec3A, ticks: u64) -> bool {
