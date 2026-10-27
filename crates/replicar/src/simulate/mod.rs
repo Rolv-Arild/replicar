@@ -26,6 +26,10 @@ use players::Players;
 
 /// Gaps between frames in play longer than this (10 s) are not simulated.
 const MAX_GAP_TICKS: u64 = 1200;
+/// A car whose fitted control shift (`Inference::control_shift`) is at least this many ticks in most of its life's
+/// frames so far shows its controls ahead of their effect (a remote player whose inputs the server buffers): in
+/// the air its boost and throttle follow the shifted switches too.
+const LEAD_MIN_SHIFT: i64 = 6;
 
 /// How the simulation runs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -440,6 +444,8 @@ struct Simulator<'a, 'i> {
     /// The interval's cars whose throttle and steer ramp across a change (by player slot), the replay tick of sim
     /// tick 0 (replay tick = sim tick + offset), and the frame.
     ramp_cars: Vec<(usize, &'a NetworkCar)>,
+    /// Per car life: the frames whose control shift was at least `LEAD_MIN_SHIFT`, and all frames with a shift.
+    lead_votes: HashMap<CarLife, (u32, u32)>,
     ramp_offset: i64,
     ramp_frame: usize,
     /// Per player slot: what last set the car's pitch, yaw and roll, and its throttle, steer, handbrake and boost.
@@ -496,6 +502,7 @@ pub fn simulate(
         deferred_dodges: Vec::new(),
         stepped: Vec::new(),
         ramp_cars: Vec::new(),
+        lead_votes: HashMap::new(),
         ramp_offset: 0,
         ramp_frame: 0,
         control_sources: Vec::new(),
@@ -613,6 +620,13 @@ impl<'a> Simulator<'a, '_> {
             },
             next_switch: 0,
         };
+        for &car in &frame_cars {
+            if let Some(shift) = self.inference.control_shift(car.life) {
+                let votes = self.lead_votes.entry(car.life).or_default();
+                votes.0 += u32::from(shift >= LEAD_MIN_SHIFT);
+                votes.1 += 1;
+            }
+        }
         self.ramp_cars.clear();
         if simulated && !withheld && !from_release && self.ticks.is_some() {
             self.ramp_frame = f;
@@ -918,6 +932,10 @@ impl<'a> Simulator<'a, '_> {
             // "Inputs between frames").
             if !self.arena.get_car_state(player.get()).is_on_ground() {
                 controls.steer = next.steer;
+                if self.leads(car.life) {
+                    controls.throttle = next.throttle;
+                    controls.boost = next.boost;
+                }
                 self.arena.set_car_controls(player.get(), controls);
                 continue;
             }
@@ -1357,6 +1375,18 @@ impl<'a> Simulator<'a, '_> {
     /// the ball and boost on another car) keeps them apart by their bounding spheres (the hitbox's half diagonal plus
     /// its offset, the ball's radius), a copy of the arena is stepped with the controls held, and the car may touch
     /// if on any tick its hitbox comes within 15 UU of the ball or its bounding sphere within 10 UU of another car's.
+    /// Whether the car shows its controls ahead of their effect: its control shift is at least `LEAD_MIN_SHIFT`
+    /// now and was in most of its frames so far.
+    fn leads(&self, life: CarLife) -> bool {
+        self.inference
+            .control_shift(life)
+            .is_some_and(|s| s >= LEAD_MIN_SHIFT)
+            && self
+                .lead_votes
+                .get(&life)
+                .is_some_and(|&(lead, all)| 2 * lead > all)
+    }
+
     fn may_touch(&self, slot: usize, v1: glam::Vec3A, ticks: u64) -> bool {
         const BALL_RADIUS: f32 = 91.25;
         const MARGIN: f32 = 10.0;
@@ -1430,6 +1460,9 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             };
             if created != car.life.created {
+                continue;
+            }
+            if self.leads(car.life) {
                 continue;
             }
             let slot = player.get();
@@ -1529,6 +1562,9 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             };
             if created != car.life.created {
+                continue;
+            }
+            if self.leads(car.life) {
                 continue;
             }
             let slot = player.get();

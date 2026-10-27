@@ -671,6 +671,12 @@ impl Simulator<'_, '_> {
         }
         controls.jump &= track.jump_gate.unwrap_or(false);
         let airborne = !state.is_on_ground() || (new_life && state.phys.pos.z > 50.0);
+        // A car showing its controls ahead of their effect keeps the boost and throttle its shifted switches set.
+        if airborne && !new_life && self.leads(car.life) {
+            let current = self.arena.get_car_controls(player.get());
+            controls.throttle = current.throttle;
+            controls.boost = current.boost;
+        }
         let mut air_controls_applied = None;
         if airborne
             && !press.jump
