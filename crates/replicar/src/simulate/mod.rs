@@ -627,7 +627,7 @@ impl<'a> Simulator<'a, '_> {
         if simulated && !withheld && self.ticks.is_some() {
             self.plan_early_presses(&frame_cars, f, span, gap);
             if self.options.air_boost_timing {
-                self.plan_air_boost(&frame_cars, f, span, gap);
+                self.plan_air_boost(&frame_cars, f, span, gap, &interval.switches);
                 self.plan_air_throttle(&frame_cars, f, span, gap);
                 self.plan_jump_release(&frame_cars, f, span, gap, &interval.switches);
             }
@@ -1205,7 +1205,7 @@ impl<'a> Simulator<'a, '_> {
                 let timed = self
                     .options
                     .air_boost_timing
-                    .then(|| self.impulse_tick(car, f, kind, update))
+                    .then(|| self.impulse_tick(car, f, kind, update, rule))
                     .flatten();
                 if timed.is_some() {
                     self.diagnostics.air_presses_timed += 1;
@@ -1265,15 +1265,18 @@ impl<'a> Simulator<'a, '_> {
     /// does not switch): with RocketSim's integration (velocity, then position), an impulse in step `k` of `n`
     /// leaves the position `dt * J * ((n - 1) / 2 - k)` past `dt * ((n - 1) * v0 + (n + 1) * v1) / 2`, the path of
     /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse
-    /// is the velocity change less gravity and boost. Not for a car with a wheel on a surface or that can touch the
-    /// ball or another car in the interval (`may_touch`), still holding its jump (whose force ends in the interval),
-    /// whose boost switches in it, near the speed limit, or whose evidence does not fit one impulse.
+    /// is the velocity change less gravity and boost. A car that can touch the ball or another car in the interval
+    /// (`may_touch`), whose update holds the contact too, is timed by simulation instead (`switch_by_simulation`;
+    /// not with a dodge planned for it). Not for a car with a wheel on a surface, still holding its jump (whose
+    /// force ends in the interval), whose boost switches in it, near the speed limit, or whose evidence does not fit
+    /// one impulse.
     fn impulse_tick(
         &self,
         car: &NetworkCar,
         f: usize,
         kind: EarlyKind,
         update: u64,
+        rule: u64,
     ) -> Option<u64> {
         const BOOST: f32 = 2975.0 / 3.0;
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
@@ -1303,9 +1306,27 @@ impl<'a> Simulator<'a, '_> {
             || boost_switches
             || state.phys.vel.length() > 2100.0
             || v1.length() > 2100.0
-            || self.may_touch(slot, v1, update)
         {
             return None;
+        }
+        if self.may_touch(slot, v1, update) {
+            // The update holds the contact too: the press by simulation, the jump released before it. A dodge
+            // planned for the car would be missing from the simulation.
+            if self.plans_dodge(player) {
+                return None;
+            }
+            let pressed = |c: &mut CarControls, step: u64, k: u64| {
+                c.jump = step == k + 1;
+                if c.jump {
+                    let (pitch, yaw) = match kind {
+                        EarlyKind::Dodge { pitch, yaw } => (pitch, yaw),
+                        _ => (0.0, 0.0),
+                    };
+                    (c.pitch, c.yaw, c.roll) = (pitch, yaw, 0.0);
+                }
+            };
+            let target = UpdateTarget::new(update, p1, v1, car, &[]);
+            return self.switch_by_simulation(slot, &target, 0..update, rule, pressed);
         }
         let [x, y, z, w] = rotation.value;
         let end = glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize());
@@ -1403,9 +1424,17 @@ impl<'a> Simulator<'a, '_> {
     /// at the car's update; the update's velocity shows when it did: from the interval's start to the update, the
     /// forward velocity changes by the boost (991.7 UU/s^2, with the air throttle at 1, 66.7) on the boosting ticks
     /// and by the air throttle on the others, beside gravity. The forward direction is the mean of the car's at the
-    /// start and at the update. Not for a car with a wheel on a surface or that can touch the ball or another car in
-    /// the interval (`may_touch`), near the speed limit, or without boost.
-    fn plan_air_boost(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+    /// start and at the update. A car that can touch the ball or another car in the interval (`may_touch`), whose
+    /// update holds the contact too, is timed by simulation instead (`switch_by_simulation`). Not for a car with a
+    /// wheel on a surface, near the speed limit, or without boost.
+    fn plan_air_boost(
+        &mut self,
+        cars: &[&'a NetworkCar],
+        f: usize,
+        span: u64,
+        gap: u64,
+        switches: &[(u64, &'a NetworkCar)],
+    ) {
         const BOOST: f32 = 2975.0 / 3.0;
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
         let start = self.arena.tick_count();
@@ -1450,7 +1479,24 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             }
             let update = span - self.car_ticks(car, f, true, gap).min(span);
-            if update < 2 || self.may_touch(slot, v1, update) {
+            if update < 2 {
+                continue;
+            }
+            if self.may_touch(slot, v1, update) {
+                // A press planned for the car would be missing from the simulation.
+                if self.plans_dodge(player) || self.early_presses.iter().any(|p| p.player == player) {
+                    continue;
+                }
+                let Some(position) = car.body.position.as_ref().filter(|p| p.frame == frame) else {
+                    continue;
+                };
+                let position = glam::Vec3A::from(position.value);
+                let target = UpdateTarget::new(update, position, v1, car, switches);
+                let switched = |c: &mut CarControls, step: u64, k: u64| c.boost = boost == (step > k);
+                if let Some(k) = self.switch_by_simulation(slot, &target, 0..update, update, switched) {
+                    self.air_boost.push((start + k + 1, slot, boost));
+                    self.diagnostics.air_boost_switches += 1;
+                }
                 continue;
             }
             let [x, y, z, w] = rotation.value;
@@ -1479,9 +1525,10 @@ impl<'a> Simulator<'a, '_> {
 
     /// When an airborne car's throttle changed in this interval. In the air the throttle switches only at the car's
     /// update; without boost the throttle pushes the car forward by 66.7 UU/s^2 times its value, so the forward
-    /// velocity change to the update, beside gravity, shows how many ticks had the old value. As for the boost (`plan_air_boost`): not for a car with a wheel on a surface or that can touch the
-    /// ball or another car in the interval, near the speed limit, boosting or switching its boost, with a planned
-    /// press, flipping, or for a change of less than 0.5.
+    /// velocity change to the update, beside gravity, shows how many ticks had the old value. Not for a car with a
+    /// wheel on a surface or that can touch the ball or another car in the interval (`may_touch`: the throttle's
+    /// force is too small to time beside a contact), near the speed limit, boosting or switching its boost, with a
+    /// planned press, flipping, or for a change of less than 0.5.
     fn plan_air_throttle(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
         let start = self.arena.tick_count();
@@ -1551,9 +1598,10 @@ impl<'a> Simulator<'a, '_> {
     /// update's velocity shows how many of the interval's ticks the jump force (1,458.3 UU/s^2 along the car's up
     /// axis) still pushed: the velocity along that axis (the mean of the car's at the interval's start and at the
     /// update) changes by it beside gravity; boost and air throttle push along the forward axis, across it. A car
-    /// with a wheel on a surface at the start (a jump a few ticks old, whose suspension still pushes) is timed by
-    /// simulation instead (`switch_by_simulation`). A release at the limit, or one the evidence puts at the update,
-    /// is left as it was.
+    /// with a wheel on a surface at the start (a jump a few ticks old, whose suspension still pushes) or that can
+    /// touch the ball or another car in the interval (`may_touch`) is timed by simulation instead
+    /// (`switch_by_simulation`). A release at the limit, or one the evidence puts at the update, is left as it
+    /// was.
     fn plan_jump_release(
         &mut self,
         cars: &[&'a NetworkCar],
@@ -1602,7 +1650,9 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             }
             let v1 = glam::Vec3A::from(velocity.value);
-            if state.is_on_ground() || state.wheels_with_contact().iter().any(Option::is_some) {
+            let on_surface =
+                state.is_on_ground() || state.wheels_with_contact().iter().any(Option::is_some);
+            if on_surface || self.may_touch(slot, v1, update) {
                 // A fit's schedule drives the jump itself; a press or boost switch planned for the car would be
                 // missing from the simulation.
                 if self.ground_schedules.iter().any(|(p, _)| *p == player)
