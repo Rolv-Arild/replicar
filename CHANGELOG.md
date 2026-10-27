@@ -21,6 +21,7 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - A planned dodge sets only the jump, pitch, yaw and roll; throttle, steer, boost and handbrake follow their switches (they were held as when the dodge was planned): air steer error of the host replays' bots 0.0335 / 0.0398 -> 0.0302 / 0.0363, handbrake disagreement of the client recordings' humans 2.4% / 2.2% -> 2.0% / 2.0%.
 - A car that shows its controls ahead of their effect (a remote player whose inputs the server buffers, about one player per match in the corpus: a fitted control shift of 6 ticks or more in most of its frames) has its airborne boost and throttle follow its shifted switches (they switched at the update), and a held jump released its shift after the counter shows the release. Held-out one-step car velocity p90 37.06 / 38.08 -> 35.41 / 36.47 UU/s (train / validation); on the client recordings the humans' air boost press error 3.69 / 4.67 -> 2.36 / 2.84 ticks.
 - RocketSim 0.3.3 (any compatible release from 0.3.3; 0.3.2 is no longer accepted): it added a field to `BoostPadState` and dropped `Copy`, so replicar did not build with it and the daily dependency check had rejected it. Conversions are nearly unchanged (held-out pooled rows in the fourth digit).
+- A leading car's air controls taken from its steer (where nothing solved them) follow its shifted steer.
 
 ## 2.1.1 (2026-10-26)
 
