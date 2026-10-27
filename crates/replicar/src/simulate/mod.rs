@@ -130,7 +130,7 @@ pub enum FittedKind {
 }
 
 /// A dodge to press: jump with the direction at `start_tick`, then the pitch cancel until `end_tick`; `base`
-/// carries the other controls.
+/// carries the air controls before the press (throttle, steer, boost and handbrake follow the car's switches).
 #[derive(Debug, Clone, Copy)]
 struct PendingDodge {
     player: PlayerIndex,
@@ -1988,7 +1988,16 @@ impl<'a> Simulator<'a, '_> {
                 }
                 continue;
             }
-            let mut controls = dodge.base;
+            // The air controls from the plan; throttle, steer, boost and handbrake as the car's switches have them
+            // (a boost switch timed inside the plan).
+            let current = *self.arena.get_car_controls(slot);
+            let mut controls = CarControls {
+                throttle: current.throttle,
+                steer: current.steer,
+                boost: current.boost,
+                handbrake: current.handbrake,
+                ..dodge.base
+            };
             controls.jump = false;
             if sim_tick < dodge.start_tick {
                 // A ground schedule of the same car sets the jump input itself.
