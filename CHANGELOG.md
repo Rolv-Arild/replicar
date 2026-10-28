@@ -22,6 +22,7 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - A car that shows its controls ahead of their effect (a remote player whose inputs the server buffers, about one player per match in the corpus: a fitted control shift of 6 ticks or more in most of its frames) has its airborne boost and throttle follow its shifted switches (they switched at the update), and a held jump released its shift after the counter shows the release. Held-out one-step car velocity p90 37.06 / 38.08 -> 35.41 / 36.47 UU/s (train / validation); on the client recordings the humans' air boost press error 3.69 / 4.67 -> 2.36 / 2.84 ticks.
 - RocketSim 0.3.3 (any compatible release from 0.3.3; 0.3.2 is no longer accepted): it added a field to `BoostPadState` and dropped `Copy`, so replicar did not build with it and the daily dependency check had rejected it. Conversions are nearly unchanged (held-out pooled rows in the fourth digit).
 - A leading car's air controls taken from its steer (where nothing solved them) follow its shifted steer.
+- A leading car's handbrake in the air follows its shifted switch too (it picks roll or yaw for the steer), and a double jump its counter shows before any update does is pressed where a later update places it, or its control shift after the counter's press at the latest (it was pressed before the counter's update). Held-out one-step car velocity p90 35.41 / 36.47 -> 35.16 / 36.27 UU/s (train / validation).
 
 ## 2.1.1 (2026-10-26)
 
