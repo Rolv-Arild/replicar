@@ -444,8 +444,9 @@ impl Simulator<'_, '_> {
 
     /// Actions from the counters. A dodge counter turning odd with a torque is a dodge: pressed now when its
     /// impulse is not in the updates yet, else only the flip state is set. A double-jump counter turning odd
-    /// is a double jump the same way. When airborne, counters that changed since the car last stood on the
-    /// ground set the jump, double-jump and flip flags the updates imply.
+    /// is a double jump the same way (a leading car's deferred, `lead_double_jump_delay`). When airborne, counters
+    /// that changed since the car last stood on the ground set the jump, double-jump and flip flags the updates
+    /// imply.
     fn actions(
         &mut self,
         ctx: &FrameContext,
@@ -480,6 +481,12 @@ impl Simulator<'_, '_> {
         }
         // A flip reset inferred since the last frame (`infer_flip_resets`), or below.
         let mut inferred_reset = self.inferred_resets.remove(&player.get());
+        // A leading car's double jump comes after its counter (`lead_double_jump_delay`).
+        let lead_delay = (fresh(&car.inputs.double_jump_active_raw).is_some()
+            && self.leads(car.life))
+        .then(|| self.inference.control_shift(car.life))
+        .flatten()
+        .map(super::lead_double_jump_delay);
         let track = self.cars.entry(car.life).or_default();
         if !state.is_on_ground() {
             track.airborne_frame = Some(frame.get());
@@ -531,6 +538,7 @@ impl Simulator<'_, '_> {
                             life: car.life,
                             pitch,
                             yaw,
+                            from: 0,
                             until: self.arena.tick_count() + 60,
                         });
                     }
@@ -539,11 +547,26 @@ impl Simulator<'_, '_> {
         }
         if let Some(raw) = fresh(&car.inputs.double_jump_active_raw) {
             let activated = rising(track.last_double_jump_raw.replace(raw), raw);
-            if activated && !press.jump && !early_double {
+            // Already deferred before the update (`plan_early_presses`).
+            let deferred = self
+                .deferred_dodges
+                .iter()
+                .any(|d| d.life == car.life && d.from > 0);
+            if activated && !press.jump && !early_double && !deferred {
                 if dodge_impulse_unseen(car, frame, state) {
                     // A jump press with no direction is RocketSim's double jump.
                     let now = self.arena.tick_count();
-                    if !defer_held_press(
+                    if let Some(delay) = lead_delay.filter(|&d| d > 0) {
+                        self.lead_releases.retain(|&(_, s)| s != player.get());
+                        self.deferred_dodges.push(super::DeferredDodge {
+                            player,
+                            life: car.life,
+                            pitch: 0.0,
+                            yaw: 0.0,
+                            from: now + delay,
+                            until: now + delay + 60,
+                        });
+                    } else if !defer_held_press(
                         &mut self.lead_releases,
                         &mut self.deferred_dodges,
                         now,
@@ -770,6 +793,7 @@ fn defer_held_press(
         life,
         pitch,
         yaw,
+        from: 0,
         until: now + 60,
     });
     true

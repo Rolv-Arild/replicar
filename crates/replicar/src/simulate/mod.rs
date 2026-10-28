@@ -28,8 +28,15 @@ use players::Players;
 const MAX_GAP_TICKS: u64 = 1200;
 /// A car whose fitted control shift (`Inference::control_shift`) is at least this many ticks in most of its life's
 /// frames so far shows its controls ahead of their effect (a remote player whose inputs the server buffers): in
-/// the air its boost and throttle follow the shifted switches too.
+/// the air its boost, throttle and handbrake follow the shifted switches too.
 const LEAD_MIN_SHIFT: i64 = 6;
+
+/// How long after the counter's press a leading car's double jump waits for an update to show it: its control
+/// shift. The double-jump counter leads by about half as much as the jump counter (whose lead is the shift), so an
+/// update usually shows the rise first and places the press (`plan_early_presses`); the wait is the latest it comes.
+fn lead_double_jump_delay(shift: i64) -> u64 {
+    shift.max(0) as u64
+}
 
 /// How the simulation runs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -171,8 +178,9 @@ pub(super) struct EarlyPress {
 }
 
 /// A dodge the replay's counter shows while the simulated car is still on the ground (its takeoff not yet in the
-/// updates, which can lag the counters by frames), or a dodge or double jump pressed while a leading car's jump is
-/// held for its release (`defer_held_press`): pressed at the first tick the car is airborne with the jump
+/// updates, which can lag the counters by frames), a dodge or double jump pressed while a leading car's jump is
+/// held for its release (`defer_held_press`), or a leading car's double jump its update does not show yet
+/// (`lead_double_jump_delay`, from `from`): pressed at the first tick from `from` the car is airborne with the jump
 /// released, unless the counter turns even or `until` passes first.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DeferredDodge {
@@ -180,6 +188,8 @@ pub(super) struct DeferredDodge {
     pub(super) life: CarLife,
     pub(super) pitch: f32,
     pub(super) yaw: f32,
+    /// Not pressed before this tick: nonzero only for a leading car's double jump (0: no wait).
+    pub(super) from: u64,
     pub(super) until: u64,
 }
 
@@ -952,7 +962,14 @@ impl<'a> Simulator<'a, '_> {
                         } else {
                             controls.yaw = next.steer;
                         }
+                        if next.handbrake {
+                            controls.yaw = 0.0;
+                        } else {
+                            controls.roll = 0.0;
+                        }
                     }
+                    // The handbrake too: it picks roll or yaw, and RocketSim carries its value into the landing.
+                    controls.handbrake = next.handbrake;
                 }
                 self.arena.set_car_controls(player.get(), controls);
                 continue;
@@ -1156,7 +1173,9 @@ impl<'a> Simulator<'a, '_> {
     /// frame while the car's update in it carries the impulse. Without a press here the update would set the car's
     /// flags and the controls would never show the press. A jump is placed by the time since it started (from the
     /// update's rise speed: the impulse of 291.7 UU/s, then 1,458.3 UU/s^2 of hold force against 650 of gravity); a
-    /// double jump or dodge at the midpoint rule, before the update. Cars a fit already plans are left to it.
+    /// double jump or dodge at the midpoint rule, before the update (a leading car's double jump that the update
+    /// does not fit is deferred instead, `lead_double_jump_delay`, and pressed where a later update places it).
+    /// Cars a fit already plans are left to it.
     fn plan_early_presses(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
         if f == 0 {
             return;
@@ -1195,11 +1214,59 @@ impl<'a> Simulator<'a, '_> {
             };
             let update = span - self.car_ticks(car, f, true, gap).min(span);
             if update == 0 {
+                // An update from before the interval that shows a deferred double jump's rise: it is behind.
+                if let Some(i) = self
+                    .deferred_dodges
+                    .iter()
+                    .position(|d| d.life == car.life && d.from > 0)
+                {
+                    let state = self.arena.get_car_state(player.get());
+                    let rise = (glam::Vec3A::from(velocity.value) - state.phys.vel)
+                        .dot(state.phys.rot_mat.z_axis);
+                    if rise > 200.0 {
+                        self.deferred_dodges.remove(i);
+                    }
+                }
                 continue;
             }
             let state = self.arena.get_car_state(player.get());
             let airborne = !state.is_on_ground() || state.phys.pos.z > 50.0;
             let rule = (gap / 2).saturating_sub(2).min(update - 1);
+            // A leading car's double jump deferred from an earlier frame: pressed where this update places it, or
+            // at the midpoint rule when the update shows the rise but not where; else it waits past this update.
+            if airborne
+                && let Some(i) = self
+                    .deferred_dodges
+                    .iter()
+                    .position(|d| d.life == car.life && d.from > 0)
+            {
+                let up = state.phys.rot_mat.z_axis;
+                let rise = (glam::Vec3A::from(velocity.value) - state.phys.vel).dot(up);
+                let timed = self
+                    .options
+                    .air_boost_timing
+                    .then(|| self.impulse_tick(car, f, EarlyKind::DoubleJump, update, rule))
+                    .flatten();
+                let tick = timed.or((rise > 200.0).then_some(rule));
+                if let Some(tick) = tick {
+                    self.deferred_dodges.remove(i);
+                    if timed.is_some() {
+                        self.diagnostics.air_presses_timed += 1;
+                    }
+                    self.early_presses.push(EarlyPress {
+                        player,
+                        life: car.life,
+                        kind: EarlyKind::DoubleJump,
+                        tick: start + tick + 1,
+                        update_tick: start + update,
+                        applied: false,
+                    });
+                    continue;
+                }
+                let dodge = &mut self.deferred_dodges[i];
+                dodge.from = dodge.from.max(start + update + 1);
+                dodge.until = dodge.until.max(dodge.from + 60);
+            }
             // A dodge or double jump the counters show, pressed before the update; when that does not apply (a
             // fit plans the dodge, or the simulated car is still on the ground), the frame may still show the
             // takeoff of the jump before it.
@@ -1231,6 +1298,23 @@ impl<'a> Simulator<'a, '_> {
                     .flatten();
                 if timed.is_some() {
                     self.diagnostics.air_presses_timed += 1;
+                }
+                // A leading car's double jump the update does not show: it comes after the counter's press.
+                if timed.is_none()
+                    && kind == EarlyKind::DoubleJump
+                    && self.leads(car.life)
+                    && let Some(shift) = self.inference.control_shift(car.life)
+                {
+                    let from = start + rule + 1 + lead_double_jump_delay(shift);
+                    self.deferred_dodges.push(DeferredDodge {
+                        player,
+                        life: car.life,
+                        pitch: 0.0,
+                        yaw: 0.0,
+                        from,
+                        until: from + 60,
+                    });
+                    continue;
                 }
                 (kind, timed.unwrap_or(rule))
             } else if (rose(
@@ -1389,11 +1473,6 @@ impl<'a> Simulator<'a, '_> {
         Some((k.round().max(0.0) as u64).min(update - 1))
     }
 
-    /// Whether the car in `slot` can touch the ball or another car in the next `ticks`: unless the distance at the
-    /// start less how far each can move (its speed at the start, and the car's at the update `v1`, plus gravity on
-    /// the ball and boost on another car) keeps them apart by their bounding spheres (the hitbox's half diagonal plus
-    /// its offset, the ball's radius), a copy of the arena is stepped with the controls held, and the car may touch
-    /// if on any tick its hitbox comes within 15 UU of the ball or its bounding sphere within 10 UU of another car's.
     /// Whether the car shows its controls ahead of their effect: its control shift is at least `LEAD_MIN_SHIFT`
     /// now and was in most of its frames so far.
     fn leads(&self, life: CarLife) -> bool {
@@ -1407,6 +1486,11 @@ impl<'a> Simulator<'a, '_> {
                 .is_some_and(|s| s >= LEAD_MIN_SHIFT)
     }
 
+    /// Whether the car in `slot` can touch the ball or another car in the next `ticks`: unless the distance at the
+    /// start less how far each can move (its speed at the start, and the car's at the update `v1`, plus gravity on
+    /// the ball and boost on another car) keeps them apart by their bounding spheres (the hitbox's half diagonal plus
+    /// its offset, the ball's radius), a copy of the arena is stepped with the controls held, and the car may touch
+    /// if on any tick its hitbox comes within 15 UU of the ball or its bounding sphere within 10 UU of another car's.
     fn may_touch(&self, slot: usize, v1: glam::Vec3A, ticks: u64) -> bool {
         const BALL_RADIUS: f32 = 91.25;
         const MARGIN: f32 = 10.0;
@@ -1961,6 +2045,9 @@ impl<'a> Simulator<'a, '_> {
         self.deferred_dodges.retain(|d| d.until >= sim_tick);
         let mut done = Vec::new();
         for (i, dodge) in self.deferred_dodges.iter().enumerate() {
+            if sim_tick < dodge.from {
+                continue;
+            }
             let slot = dodge.player.get();
             let mut state = *self.arena.get_car_state(slot);
             if state.is_on_ground() || state.has_flipped || state.is_demoed {
@@ -2085,6 +2172,7 @@ impl<'a> Simulator<'a, '_> {
                     life: dodge.life,
                     pitch: dodge.pitch,
                     yaw: dodge.yaw,
+                    from: 0,
                     until: sim_tick + 60,
                 });
                 continue;
