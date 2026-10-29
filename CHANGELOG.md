@@ -23,6 +23,9 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - RocketSim 0.3.3 (any compatible release from 0.3.3; 0.3.2 is no longer accepted): it added a field to `BoostPadState` and dropped `Copy`, so replicar did not build with it and the daily dependency check had rejected it. Conversions are nearly unchanged (held-out pooled rows in the fourth digit).
 - A leading car's air controls taken from its steer (where nothing solved them) follow its shifted steer.
 - A leading car's handbrake in the air follows its shifted switch too (it picks roll or yaw for the steer), and a double jump its counter shows before any update does is pressed where a later update places it, or its control shift after the counter's press at the latest (it was pressed before the counter's update). Held-out one-step car velocity p90 35.41 / 36.47 -> 35.16 / 36.27 UU/s (train / validation).
+- The ground timing fit of a car whose control shift is at least 6 ticks also reads the earlier frames a shift can move into the span, and the jump timing fit that moves the jump frame's other controls moves every later frame with them. Held-out one-step car velocity p90 35.16 / 36.27 -> 34.29 / 35.19 UU/s (train / validation); client humans' steer |error| 0.069 -> 0.065 / 0.063; conversion about 7% slower.
+- The air boost, throttle and jump release timings leave a car whose ground schedule writes those controls to it; a double jump or dodge timed by simulation gets the interval's switches and counts a confirmed midpoint rule as a timing.
+- Fixed: a panic (`f32::clamp`) in the analytic jump release when the jump must push through the whole interval.
 
 ## 2.1.1 (2026-10-26)
 
