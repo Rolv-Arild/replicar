@@ -6,7 +6,7 @@ the error of the inferred update tick, by how it was inferred (`chain`: the car'
 the resimulation group; `median`: the frame's median car, or half the frame gap), and on the ground or in the air.
 
 usage: python scripts/check_update_ticks.py <states.jsonl or .rlpr> <file.parquet> [label]   (PYTHONPATH=python/v2/src;
-the file needs --with resimulation)
+the file needs --with resimulation,network)
 """
 
 import collections
@@ -29,7 +29,9 @@ def main() -> None:
     a = f.arrays()
     chains = f.records("resim_car_update_ticks").to_pydict()
     chained = set(zip(chains["frame"], chains["actor"]))
-    actor = a["network_car_actor"] if "network_car_actor" in a else None
+    if "network_car_actor" not in a:
+        sys.exit(f"{path}: no network_car_actor column; convert with --with resimulation,network")
+    actor = a["network_car_actor"]
     key = lambda x: (round(x[0] * 100), round(x[1] * 100), round(x[2] * 100))
     errors = collections.defaultdict(list)
     names = {name: name for name in true}

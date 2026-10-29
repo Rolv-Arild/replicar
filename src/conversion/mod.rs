@@ -811,8 +811,6 @@ fn hitbox_for_body_product(id: u32) -> Option<(&'static str, CarBodyConfig)> {
     })
 }
 
-/// RocketSim limits speeds at the start of each tick, so a state read after stepping can exceed
-/// the limits that recorded server states obey. Apply them to the reported state.
 /// Sets a pad's cooldown and keeps the rest of its state (since RocketSim 0.3.3 the cars touching it).
 fn set_pad_cooldown(arena: &mut Arena, idx: usize, cooldown: f32) {
     let mut state = arena.get_boost_pad_state(idx);
@@ -820,6 +818,8 @@ fn set_pad_cooldown(arena: &mut Arena, idx: usize, cooldown: f32) {
     arena.set_boost_pad_state(idx, state);
 }
 
+/// RocketSim limits speeds at the start of each tick, so a state read after stepping can exceed
+/// the limits that recorded server states obey. Apply them to the reported state.
 fn limit_reported_velocities(arena: &mut Arena, car_count: usize) {
     const CAR_MAX_SPEED: f32 = 2300.0;
     const CAR_MAX_ANGULAR_SPEED: f32 = 5.5;

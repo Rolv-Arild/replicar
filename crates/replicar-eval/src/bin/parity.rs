@@ -300,6 +300,8 @@ fn simulate_rung(bytes: &[u8], rung: Rung) -> Result<Option<String>, Box<dyn Err
         simulated_pad_pickups: masked,
         simulated_demolitions: masked,
         withheld: withheld_frames.clone(),
+        // As `evaluate_corpus`: the air timings read the update the interval ends at, held out with the lookahead.
+        air_boost_timing: rung.air_lookahead && !held_out,
         ..Default::default()
     };
     let meshes = replicar::Meshes::load("collision_meshes")?;
