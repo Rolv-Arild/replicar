@@ -389,6 +389,9 @@ struct UpdateTarget {
     velocity: glam::Vec3A,
     /// The car's network switches in the interval: (ticks after the start, the controls).
     switches: Vec<(u64, CarControls)>,
+    /// The car shows its controls ahead of their effect (`leads`): in the air its switches set more, as in
+    /// `advance_to`.
+    leads: bool,
 }
 
 impl UpdateTarget {
@@ -409,6 +412,7 @@ impl UpdateTarget {
             position,
             velocity,
             switches,
+            leads: false,
         }
     }
 }
@@ -659,7 +663,7 @@ impl<'a> Simulator<'a, '_> {
         self.air_throttle.clear();
         self.jump_releases.clear();
         if simulated && !withheld && self.ticks.is_some() {
-            self.plan_early_presses(&frame_cars, f, span, gap);
+            self.plan_early_presses(&frame_cars, f, span, gap, &interval.switches);
             self.plan_lead_releases(&frame_cars, f, gap);
             if self.options.air_boost_timing {
                 self.plan_air_boost(&frame_cars, f, span, gap, &interval.switches);
@@ -1176,7 +1180,14 @@ impl<'a> Simulator<'a, '_> {
     /// double jump or dodge at the midpoint rule, before the update (a leading car's double jump that the update
     /// does not fit is deferred instead, `lead_double_jump_delay`, and pressed where a later update places it).
     /// Cars a fit already plans are left to it.
-    fn plan_early_presses(&mut self, cars: &[&'a NetworkCar], f: usize, span: u64, gap: u64) {
+    fn plan_early_presses(
+        &mut self,
+        cars: &[&'a NetworkCar],
+        f: usize,
+        span: u64,
+        gap: u64,
+        switches: &[(u64, &'a NetworkCar)],
+    ) {
         if f == 0 {
             return;
         }
@@ -1245,7 +1256,9 @@ impl<'a> Simulator<'a, '_> {
                 let timed = self
                     .options
                     .air_boost_timing
-                    .then(|| self.impulse_tick(car, f, EarlyKind::DoubleJump, update, rule))
+                    .then(|| {
+                        self.impulse_tick(car, f, EarlyKind::DoubleJump, update, rule, switches)
+                    })
                     .flatten();
                 let tick = timed.or((rise > 200.0).then_some(rule));
                 if let Some(tick) = tick {
@@ -1294,7 +1307,7 @@ impl<'a> Simulator<'a, '_> {
                 let timed = self
                     .options
                     .air_boost_timing
-                    .then(|| self.impulse_tick(car, f, kind, update, rule))
+                    .then(|| self.impulse_tick(car, f, kind, update, rule, switches))
                     .flatten();
                 if timed.is_some() {
                     self.diagnostics.air_presses_timed += 1;
@@ -1373,7 +1386,8 @@ impl<'a> Simulator<'a, '_> {
     /// the velocities `v0` at the start and `v1` at the update, whatever the steady forces are. The dodge's impulse
     /// is the velocity change less gravity and boost. A car that can touch the ball or another car in the interval
     /// (`may_touch`), whose update holds the contact too, or near the speed limit (2,100 UU/s), is timed by
-    /// simulation instead (`switch_by_simulation`; not with a dodge planned for it). Not for a car with a wheel on
+    /// simulation instead (`best_by_simulation`, with the interval's switches; not with another dodge planned for it),
+    /// and the midpoint rule confirmed there is a timing too. Not for a car with a wheel on
     /// a surface, still holding its jump (whose force ends in the interval), whose boost switches in it, or whose
     /// evidence does not fit one impulse.
     fn impulse_tick(
@@ -1383,6 +1397,7 @@ impl<'a> Simulator<'a, '_> {
         kind: EarlyKind,
         update: u64,
         rule: u64,
+        switches: &[(u64, &NetworkCar)],
     ) -> Option<u64> {
         const BOOST: f32 = 2975.0 / 3.0;
         const AIR_THROTTLE: f32 = 200.0 / 3.0;
@@ -1419,7 +1434,13 @@ impl<'a> Simulator<'a, '_> {
         if near_limit || self.may_touch(slot, v1, update) {
             // The update holds the contact too: the press by simulation, the jump released before it. A dodge
             // planned for the car would be missing from the simulation.
-            if self.plans_dodge(player) {
+            // (A leading car's deferred double jump is this press, not another.)
+            let other_dodge = self.pending_dodges.iter().any(|d| d.player == player)
+                || self
+                    .deferred_dodges
+                    .iter()
+                    .any(|d| d.player == player && !(d.life == car.life && d.from > 0));
+            if other_dodge {
                 return None;
             }
             let pressed = |c: &mut CarControls, step: u64, k: u64| {
@@ -1432,8 +1453,11 @@ impl<'a> Simulator<'a, '_> {
                     (c.pitch, c.yaw, c.roll) = (pitch, yaw, 0.0);
                 }
             };
-            let target = UpdateTarget::new(update, p1, v1, car, &[]);
-            return self.switch_by_simulation(slot, &target, 0..update, rule, pressed);
+            // The rule confirmed is a timing too: `None` would read as an update that does not show it.
+            let mut target = UpdateTarget::new(update, p1, v1, car, switches);
+            target.leads = self.leads(car.life);
+            let (k, cost) = self.best_by_simulation(slot, &target, 0..update, rule, pressed);
+            return (cost < 10.0).then_some(k);
         }
         let [x, y, z, w] = rotation.value;
         let end = glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize());
@@ -1569,6 +1593,14 @@ impl<'a> Simulator<'a, '_> {
             if self.leads(car.life) {
                 continue;
             }
+            // A ground schedule writes the throttle and boost on every tick: a one-tick switch would not hold.
+            if self
+                .ground_schedules
+                .iter()
+                .any(|(p, s)| *p == player && s.end_tick > start && !s.jump_only)
+            {
+                continue;
+            }
             let slot = player.get();
             let state = *self.arena.get_car_state(slot);
             let controls = *self.arena.get_car_controls(slot);
@@ -1669,6 +1701,14 @@ impl<'a> Simulator<'a, '_> {
                 continue;
             }
             if self.leads(car.life) {
+                continue;
+            }
+            // A ground schedule writes the throttle and boost on every tick: a one-tick switch would not hold.
+            if self
+                .ground_schedules
+                .iter()
+                .any(|(p, s)| *p == player && s.end_tick > start && !s.jump_only)
+            {
                 continue;
             }
             let slot = player.get();
@@ -1777,6 +1817,14 @@ impl<'a> Simulator<'a, '_> {
             if self.leads(car.life) {
                 continue;
             }
+            // A ground schedule that sets the jump writes it on every tick: the release would be pressed again.
+            if self.ground_schedules.iter().any(|(p, s)| {
+                *p == player
+                    && s.end_tick > start
+                    && (s.jump_only || s.entries.iter().any(|e| e.5.is_some()))
+            }) {
+                continue;
+            }
             let update = span - self.car_ticks(car, f, true, gap).min(span);
             // The ticks the jump can still push before RocketSim's limit, and the ones it must.
             let left = u64::from(MAX_TICKS.saturating_sub(state.jump_ticks));
@@ -1815,6 +1863,10 @@ impl<'a> Simulator<'a, '_> {
             let end_up =
                 glam::Mat3A::from_quat(glam::Quat::from_xyzw(x, y, z, w).normalize()).z_axis;
             let up = (state.phys.rot_mat.z_axis + end_up).normalize_or_zero();
+            // The jump must push past this update: no release in the interval (`clamp` needs `least <= n`).
+            if least >= update {
+                continue;
+            }
             let n = update as f32;
             let change = (glam::Vec3A::from(velocity.value) - state.phys.vel).dot(up);
             // Along `up`: change (UU/s) = (k * HOLD - n * 650 * up.z) / 120.
@@ -1842,6 +1894,22 @@ impl<'a> Simulator<'a, '_> {
         default: u64,
         set: impl Fn(&mut CarControls, u64, u64),
     ) -> Option<u64> {
+        let (k, cost) = self.best_by_simulation(slot, target, candidates, default, set);
+        // A best change that still misses the update by 10 or more (an update that puts the car back at rest on
+        // the ground, say) is no evidence of when it happened.
+        (k != default && cost < 10.0).then_some(k)
+    }
+
+    /// The step of `candidates` or `default` whose simulation comes closest to the update, and its cost
+    /// (`switch_by_simulation`); `default` unless another is strictly better.
+    fn best_by_simulation(
+        &self,
+        slot: usize,
+        target: &UpdateTarget,
+        candidates: std::ops::Range<u64>,
+        default: u64,
+        set: impl Fn(&mut CarControls, u64, u64),
+    ) -> (u64, f32) {
         let start = self.arena.tick_count();
         let update = target.update;
         // The last schedule wins, as in `step`.
@@ -1860,6 +1928,21 @@ impl<'a> Simulator<'a, '_> {
                         controls.throttle = next.throttle;
                         controls.handbrake = next.handbrake;
                         controls.boost = next.boost;
+                    } else if target.leads {
+                        controls.throttle = next.throttle;
+                        controls.boost = next.boost;
+                        if self
+                            .control_sources
+                            .get(slot)
+                            .is_some_and(|s| s.0 == AirControlSource::Steer)
+                        {
+                            (controls.yaw, controls.roll) = if next.handbrake {
+                                (0.0, next.steer)
+                            } else {
+                                (next.steer, 0.0)
+                            };
+                        }
+                        controls.handbrake = next.handbrake;
                     }
                 }
                 if let Some(schedule) = schedule
@@ -1885,9 +1968,7 @@ impl<'a> Simulator<'a, '_> {
                 best = (k, c);
             }
         }
-        // A best change that still misses the update by 10 or more (an update that puts the car back at rest on
-        // the ground, say) is no evidence of when it happened.
-        (best.0 != default && best.1 < 10.0).then_some(best.0)
+        best
     }
 
     /// When a car that shows its controls ahead of their effect (`leads`) releases a held jump: its control shift

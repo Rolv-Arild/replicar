@@ -359,7 +359,9 @@ impl Inference for FittedInference<'_> {
         }
         let ctx = self.fit_context();
         let life = query.car.life;
-        let timing = fits::fit_ground_timing(ctx, query, self.scratch.ground(query.hitbox));
+        let car_shift = self.control_shift(life);
+        let timing =
+            fits::fit_ground_timing(ctx, query, self.scratch.ground(query.hitbox), car_shift);
         if let Some(shift) = timing.as_ref().and_then(|s| s.shift) {
             self.shifts
                 .entry(life)

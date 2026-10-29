@@ -13,6 +13,11 @@ use crate::infer::FitQuery;
 /// "Client replays: the ground timing fit's shifts").
 const SHIFTS: std::ops::RangeInclusive<i64> = -24..=40;
 
+/// The control shift (`Inference::control_shift`) from which a car's fit also reads the earlier frames whose
+/// changes a shift moves into the span, before the three it always reads. For every car they took the lag-free
+/// players' labels away from the true inputs (RESULTS.md, "The code review's findings").
+const WIDE_MIN_SHIFT: i64 = 6;
+
 /// The longest boost, in midpoint-rule ticks from the frame that shows it on to the one that shows it off, whose
 /// release may lie before the network's: RocketSim, like the game, keeps boosting for 0.1 s (12 ticks) after a
 /// press however short, and the network's boost is that latched state; four ticks for the frames' quantization.
@@ -39,6 +44,7 @@ pub(in crate::infer) fn fit_ground_timing(
     ctx: FitContext,
     query: &FitQuery,
     scratch: &mut Arena,
+    car_shift: Option<i64>,
 ) -> Option<GroundSchedule> {
     let FitQuery {
         index,
@@ -115,7 +121,18 @@ pub(in crate::infer) fn fit_ground_timing(
     }
     // The observed controls of the frames around the span, at their midpoint-rule switch ticks.
     let mut entries: Vec<(i64, f32, f32, bool, bool)> = Vec::new();
-    for g in index.saturating_sub(3)..=(last_frame + 1).min(frames.len() - 1) {
+    let mut first = index.saturating_sub(3);
+    let last = (last_frame + 1).min(frames.len() - 1);
+    // A car that lags: every earlier frame a shift can move into the span, and the one before the earliest (the
+    // controls in effect before it). The later frames stay at the one after the span: reading every frame a
+    // negative shift can move into it took the host's labels away from the true inputs (RESULTS.md, "The code
+    // review's findings").
+    if car_shift.is_some_and(|s| s >= WIDE_MIN_SHIFT) {
+        while first > 0 && ctx.control_change_tick(first) + SHIFTS.end() >= t_a {
+            first -= 1;
+        }
+    }
+    for g in first..=last {
         if !ctx.in_play(g) {
             continue;
         }

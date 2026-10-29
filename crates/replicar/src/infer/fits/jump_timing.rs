@@ -265,7 +265,7 @@ pub(super) fn controls_at(
     controls_with(entries, own, shift, tau, false)
 }
 
-/// As `controls_at`; with `together`, the other controls of a frame whose jump counter switches move with the
+/// As `controls_at`; with `together`, the other controls of the press's frame and every later one move with the
 /// counter (the latest frame in effect sets them).
 fn controls_with(
     entries: &[JumpEntry],
@@ -274,10 +274,13 @@ fn controls_with(
     tau: i64,
     together: bool,
 ) -> (f32, f32, bool, bool, bool) {
-    let switches = |i: usize| together && entries[i].6 != (i > 0 && entries[i - 1].6);
+    // From the press on every frame's controls move with it: the frames after it (which repeat them) would
+    // otherwise take over at their own rule ticks.
+    let press = (0..entries.len()).find(|&i| entries[i].6 && !(i > 0 && entries[i - 1].6));
+    let moved = |i: usize| together && press.is_some_and(|p| i >= p);
     let base = (0..entries.len())
         .rev()
-        .find(|&i| entries[i].1 + if switches(i) { shift } else { 0 } <= tau)
+        .find(|&i| entries[i].1 + if moved(i) { shift } else { 0 } <= tau)
         .map_or(own, |i| {
             let e = entries[i];
             (e.2, e.3, e.4, e.5)
