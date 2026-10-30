@@ -14,6 +14,7 @@ pub mod decode;
 mod diagnostics_columns;
 mod error;
 pub mod hitbox;
+mod holds;
 pub mod infer;
 mod meshes;
 mod network_columns;

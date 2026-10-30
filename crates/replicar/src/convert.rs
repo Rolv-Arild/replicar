@@ -323,6 +323,7 @@ fn run(
         },
     )?;
     let mut frames = rows.frames;
+    crate::holds::apply(&mut frames, &rows.jump_ticks, &simulation.players);
     fill_pings(network, &simulation, &mut frames);
     fill_stats(network, &simulation, &mut frames);
     let mut header = header(
@@ -382,6 +383,8 @@ struct Rows<'a> {
     last_state: Option<ArenaState>,
     /// The tick rows kept: every `n`-th sim tick, none for `Frames`.
     rate: RowRate,
+    /// Every simulated tick's jump, for the holds set after the simulation (`holds`).
+    jump_ticks: crate::holds::JumpTicks,
 }
 
 impl<'a> Rows<'a> {
@@ -409,6 +412,7 @@ impl<'a> Rows<'a> {
             diagnostics: Vec::with_capacity(network.frames.len()),
             last_state: None,
             rate,
+            jump_ticks: crate::holds::JumpTicks::default(),
         }
     }
 
@@ -495,6 +499,17 @@ impl<'a> Rows<'a> {
         // values are the countdown's with the cars released.
         let starts_segment =
             segment.is_some() && self.frames.last().is_none_or(|p| p.segment != segment);
+        // Every tick, whatever rows are kept: the first is the previous row's tick (its segment's) unless it starts
+        // the segment.
+        let first_segment = if starts_segment {
+            segment
+        } else {
+            self.frames.last().and_then(|p| p.segment)
+        };
+        self.jump_ticks.push(first_segment, first);
+        for record in between {
+            self.jump_ticks.push(segment, record);
+        }
         if !starts_segment
             && let Some(previous) = self.frames.last_mut()
             && previous.sim_tick == first.sim_tick
