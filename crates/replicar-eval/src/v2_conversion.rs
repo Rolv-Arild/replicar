@@ -372,6 +372,18 @@ pub fn convert_network(
             withheld,
         ))
     };
+    if inferred
+        && let Some(found) = &ticks
+        && !found.lag_free
+    {
+        ticks = Some(replicar::bridge::bridge_runs(
+            network,
+            found,
+            &meshes,
+            inference_options,
+            &simulation_options,
+        )?);
+    }
     if options.align_contacts
         && inferred
         && let Some(found) = &ticks

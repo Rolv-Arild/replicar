@@ -190,6 +190,17 @@ impl<'m> Converter<'m> {
         let mut ticks = config.update_ticks.then(|| {
             crate::update_ticks::infer(&network, config.simulation.loadout_hitboxes, withheld)
         });
+        if let Some(found) = &ticks
+            && !found.lag_free
+        {
+            ticks = Some(crate::bridge::bridge_runs(
+                &network,
+                found,
+                self.meshes,
+                config.inference,
+                &config.simulation,
+            )?);
+        }
         if config.align_contacts
             && let Some(found) = &ticks
         {

@@ -206,6 +206,10 @@ later update: control timings, presses, air controls, contact alignment.
 **Contact alignment.** Moving a car's update tick by a tick or two so that a simulated hit reproduces the ball's
 next update. Part of update-tick inference.
 
+**Run bridging.** Joining two runs of a car's chained updates (each run is placed on the timeline on its own) where
+the car's path simulated from one update meets the next update clearly best at one interval. Part of update-tick
+inference on client replays.
+
 **Inference** (code: the `Inference` trait). The part of replicar that makes these choices. *Fitted inference*
 computes them; *recorded inference* reads them back from a file's `resimulation` group. Each value it hands the
 simulator is a **choice** (code: `Choice`): an update tick, a control timing, a press, an air-control segment.

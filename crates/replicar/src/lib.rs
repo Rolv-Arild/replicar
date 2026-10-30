@@ -8,6 +8,7 @@
 pub mod air;
 pub mod align;
 pub mod annotate;
+pub mod bridge;
 mod convert;
 pub mod corpus;
 pub mod decode;

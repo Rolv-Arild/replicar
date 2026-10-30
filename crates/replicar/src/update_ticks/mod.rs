@@ -141,6 +141,18 @@ struct CarSample {
 /// frame.
 #[must_use]
 pub fn infer(network: &NetworkReplay, loadout_hitboxes: bool, withheld: Withheld) -> UpdateTicks {
+    infer_bridged(network, loadout_hitboxes, withheld, &BTreeMap::new())
+}
+
+/// As `infer`, with the interval in ticks of car update pairs the motion does not chain, by (car life, first
+/// update's frame, second's): a pair with one joins their runs (`crate::bridge`).
+#[must_use]
+pub fn infer_bridged(
+    network: &NetworkReplay,
+    loadout_hitboxes: bool,
+    withheld: Withheld,
+    bridges: &BTreeMap<(CarLife, usize, usize), i64>,
+) -> UpdateTicks {
     let frames = &network.frames;
     let active = |f: usize| {
         frames[f]
@@ -259,7 +271,12 @@ pub fn infer(network: &NetworkReplay, loadout_hitboxes: bool, withheld: Withheld
                     && (na - nb).abs() <= 0.4 * na.max(nb)
                     && !dodges.iter().any(|f| (a.frame..=b.frame).contains(f))
             },
-            |_, _, _, _| None,
+            |a, b, _, _| {
+                bridges
+                    .get(&(*life, a.frame, b.frame))
+                    .copied()
+                    .filter(|_| bridge_ok(a.frame, b.frame))
+            },
         );
         car_owned.extend(owned_entries(&runs));
         car_runs.extend(runs.into_iter().map(|run| (*life, run)));
