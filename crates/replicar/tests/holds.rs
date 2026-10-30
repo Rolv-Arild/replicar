@@ -1,6 +1,7 @@
-//! The jump holds set on the rows after the simulation change no state (`holds`): wherever a car holds the jump on
-//! two ticks in a row with no ground jump pushing, RocketSim steps a restored row to the same state with the jump
-//! released. Needs the collision meshes and a train replay, which are local; skips without them.
+//! The jump releases set on the rows after the simulation change no state (`holds`): wherever a car's jump is
+//! released on a tick after a held one with no ground jump's push reading it, RocketSim steps a restored row to the
+//! same state with the jump held on. Needs the collision meshes and a train replay, which are local; skips without
+//! them.
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ fn arena_from(state: &ArenaState) -> Arena {
 }
 
 #[test]
-fn a_held_jump_without_a_push_changes_no_state() {
+fn a_released_jump_without_a_push_changes_no_state() {
     let meshes = root().join("collision_meshes");
     let train = root().join("replays/train/2v2");
     if !meshes.join("soccar").is_dir() || !train.is_dir() {
@@ -54,33 +55,33 @@ fn a_held_jump_without_a_push_changes_no_state() {
             sim_tick: frame.sim_tick,
             state: frame.state.clone(),
         };
-        let held: Vec<usize> = frame
+        let released: Vec<usize> = frame
             .state
             .cars
             .iter()
             .enumerate()
             .filter_map(|(p, car)| {
                 let car = car.as_ref()?;
-                (car.controls.jump
+                (!car.controls.jump
                     && car.previous_controls.jump
-                    && !car.internals.is_jumping
+                    && !(car.internals.is_jumping && car.internals.jump_ticks < 24)
                     && !car.internals.is_demoed)
                     .then_some(p)
             })
             .collect();
-        if held.is_empty() {
+        if released.is_empty() {
             continue;
         }
         let state = replicar::restore::arena_state(&conversion.header, &row).expect("restore");
-        for p in held {
-            let mut released = state.clone();
-            let slot = released
+        for p in released {
+            let mut held = state.clone();
+            let slot = held
                 .cars
                 .iter()
                 .position(|(info, _)| info.idx == p)
                 .expect("car");
-            released.cars[slot].1.controls.jump = false;
-            let (mut a, mut b) = (arena_from(&state), arena_from(&released));
+            held.cars[slot].1.controls.jump = true;
+            let (mut a, mut b) = (arena_from(&state), arena_from(&held));
             a.step_tick();
             b.step_tick();
             for car in 0..a.num_cars() {
@@ -94,12 +95,12 @@ fn a_held_jump_without_a_push_changes_no_state() {
                         && x.has_double_jumped == y.has_double_jumped
                         && x.has_flipped == y.has_flipped
                         && x.is_flipping == y.is_flipping,
-                    "sim tick {}: holding player {p}'s jump changed car {car}",
+                    "sim tick {}: releasing player {p}'s jump changed car {car}",
                     frame.sim_tick
                 );
             }
             checked += 1;
         }
     }
-    assert!(checked > 100, "only {checked} held ticks checked");
+    assert!(checked > 100, "only {checked} released ticks checked");
 }

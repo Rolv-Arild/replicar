@@ -334,7 +334,7 @@ fn run(
         },
     )?;
     let mut frames = rows.frames;
-    crate::holds::apply(&mut frames, &rows.jump_ticks, &simulation.players);
+    crate::holds::apply(&mut frames, &rows.jump_ticks);
     fill_pings(network, &simulation, &mut frames);
     fill_stats(network, &simulation, &mut frames);
     let mut header = header(
@@ -394,7 +394,7 @@ struct Rows<'a> {
     last_state: Option<ArenaState>,
     /// The tick rows kept: every `n`-th sim tick, none for `Frames`.
     rate: RowRate,
-    /// Every simulated tick's jump, for the holds set after the simulation (`holds`).
+    /// Every simulated tick's jump, for the releases set after the simulation (`holds`).
     jump_ticks: crate::holds::JumpTicks,
 }
 
