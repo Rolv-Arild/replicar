@@ -26,6 +26,7 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - The ground timing fit of a car whose control shift is at least 6 ticks also reads the earlier frames a shift can move into the span, and the jump timing fit that moves the jump frame's other controls moves every later frame with them. Held-out one-step car velocity p90 35.16 / 36.27 -> 34.29 / 35.19 UU/s (train / validation); client humans' steer |error| 0.069 -> 0.065 / 0.063; conversion about 7% slower.
 - The air boost, throttle and jump release timings leave a car whose ground schedule writes those controls to it; a double jump or dodge timed by simulation gets the interval's switches and counts a confirmed midpoint rule as a timing.
 - Fixed: a panic (`f32::clamp`) in the analytic jump release when the jump must push through the whole interval.
+- A double jump or dodge press stays held 20 ticks (a bot's 8), and a ground jump held to RocketSim's 24-tick limit is released 6 ticks past it (a bot's at it), as the true inputs hold them; neither hold changes the simulation, so only the `controls_jump` and `previous_controls_jump` columns change. Humans' jump release error on the LAN client recordings 11.0 / 10.8 -> 6.4 / 5.3 ticks, host 9.8 / 9.6 -> 3.8 / 3.7.
 
 ## 2.1.1 (2026-10-26)
 
