@@ -129,7 +129,10 @@ pub fn bridge_runs(
                 .collect();
             errors.sort_by(|a, b| a.1.total_cmp(&b.1));
             let speed = path[&ta].1.length().min(last_vel.length());
-            if speed >= MIN_SPEED && errors.len() >= 2 && errors[1].1 >= RATIO * errors[0].1.max(1e-3) {
+            if speed >= MIN_SPEED
+                && errors.len() >= 2
+                && errors[1].1 >= RATIO * errors[0].1.max(1e-3)
+            {
                 bridges.insert((*life, fa, fb), errors[0].0);
             }
         }
