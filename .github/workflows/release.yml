@@ -39,7 +39,7 @@ jobs:
           - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
           - { name: windows-x86_64, runner: windows-latest, target: x64, manylinux: "" }
           # One wheel for Apple silicon and Intel Macs, built on the arm64 runner (the macos-13 Intel runner is gone).
-          - { name: macos-universal2, runner: macos-14, target: universal2-apple-darwin, manylinux: "" }
+          - { name: macos-universal2, runner: macos-15, target: universal2-apple-darwin, manylinux: "" }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -105,7 +105,7 @@ jobs:
           - { name: linux-x86_64, runner: ubuntu-latest, binary: replicar }
           - { name: linux-aarch64, runner: ubuntu-24.04-arm, binary: replicar }
           - { name: windows-x86_64, runner: windows-latest, binary: replicar.exe }
-          - { name: macos-aarch64, runner: macos-14, binary: replicar }
+          - { name: macos-aarch64, runner: macos-15, binary: replicar }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v5
