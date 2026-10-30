@@ -55,7 +55,7 @@ are dictionary-encoded strings.
 | `car_<i>_position_{x,y,z}`, `car_<i>_velocity_{x,y,z}`, `car_<i>_angular_velocity_{x,y,z}`, `car_<i>_rotation_{x,y,z,w}` | float32 | as for the ball |
 | `car_<i>_boost` | float32, 0-100 | |
 | `car_<i>_controls_{throttle,steer,pitch,yaw,roll}` | float32 | the controls RocketSim applied in the step after the row's tick |
-| `car_<i>_controls_{jump,boost,handbrake}` | bool | |
+| `car_<i>_controls_{jump,boost,handbrake}` | bool | the jump released where RocketSim does not read it: a double jump or dodge press lasts one tick (glossary, "Jump release") |
 | `car_<i>_previous_controls_{throttle,steer,pitch,yaw,roll}`, `car_<i>_previous_controls_{jump,boost,handbrake}` | | RocketSim's controls of the tick before |
 | `car_<i>_{is_on_ground,has_jumped,has_double_jumped,has_flipped,is_flipping,is_jumping,is_boosting,is_supersonic,is_auto_flipping,is_demoed}` | bool | RocketSim's car flags |
 | `car_<i>_wheel_{0,1,2,3}_contact` | bool | the wheel touches a surface |

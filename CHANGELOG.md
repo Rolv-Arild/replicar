@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1 (2026-10-30)
+
+Conversion output changes in the `controls_jump` and `previous_controls_jump` columns only; the states, the header and the evaluator's results are unchanged.
+
+- How long the jump is held where RocketSim does not read it is a convention: a double jump or dodge press lasts one tick, and a ground jump held to RocketSim's 24-tick limit ends at it, for humans and bots alike (glossary, "Jump release"). 2.2.0 held a double jump or dodge 20 ticks (a bot's 8) and a ground jump 6 ticks past the limit, a fit to the true inputs of a few recordings that the replay cannot show; and the action counters' holds, which reached past a landing for 0.4% of the air presses, are released too. The jump release error against the true inputs rises (humans on the LAN client recordings 6.6 / 5.3 -> 11.7 / 11.8 ticks): it measures the players' real holds, which are not in the replay.
+
 ## 2.2.0 (2026-10-30)
 
 Conversion output changes (inputs in the air, and on the ground through the jump and ground timing fits). The air timings read the update the interval ends at, so they are off where the air lookahead or the in-sample fits are and do not change the evaluator's held-out results; the two fit changes run there too and change them slightly (better).

@@ -176,8 +176,9 @@ in RocketSim between updates, so that every frame has a full state.
 
 **Controls** (`car_controls`: throttle, steer, pitch, yaw, roll, jump, boost, handbrake). The input RocketSim applied
 in the step after the row's tick (the action taken at the row's state), in RocketSim's ranges. Throttle, steer, handbrake and boost are network values (their
-timing inferred); jump and dodge come from the replay's action counters; pitch, yaw and roll are inferred, because
-the replay does not carry them.
+timing inferred); jump and dodge come from the replay's action counters, and how long the jump is held where it
+changes nothing is a convention (*jump release*); pitch, yaw and roll are inferred, because the replay does not carry
+them.
 
 **Controls source** (`car_air_controls_source`, `car_ground_controls_source`). What set a row's controls, per car.
 For pitch, yaw and roll: `none` (not inferred, 0: the car was on the ground at its last update), `steer` (in the air
@@ -199,6 +200,11 @@ update interval that reproduces the observed rotation: not the player's per-tick
 
 **Press.** The tick a jump or dodge input started, with a dodge's direction and *flip cancel* (how much of the
 flip's pitch the player cancelled, 0-1). Inferred by fitting.
+
+**Jump release.** How long a jump is held where RocketSim does not read it, a convention: RocketSim acts on a jump
+press and, while a ground jump pushes, on its release; a held jump on any other tick changes nothing, so the replay
+cannot show it. Such ticks are released: a double jump or dodge press lasts one tick, and a ground jump held to the
+24-tick limit ends at it. A player's real hold (humans hold a dodge some 20 ticks) is not in the file.
 
 **Fit.** An inference that tries candidate values in a scratch simulation and keeps the one that best reproduces a
 later update: control timings, presses, air controls, contact alignment.
