@@ -27,6 +27,7 @@ Conversion output changes (inputs in the air, and on the ground through the jump
 - The air boost, throttle and jump release timings leave a car whose ground schedule writes those controls to it; a double jump or dodge timed by simulation gets the interval's switches and counts a confirmed midpoint rule as a timing.
 - Fixed: a panic (`f32::clamp`) in the analytic jump release when the jump must push through the whole interval.
 - A double jump or dodge press stays held 20 ticks (a bot's 8), and a ground jump held to RocketSim's 24-tick limit is released 6 ticks past it (a bot's at it), as the true inputs hold them; neither hold changes the simulation, so only the `controls_jump` and `previous_controls_jump` columns change. Humans' jump release error on the LAN client recordings 11.0 / 10.8 -> 6.4 / 5.3 ticks, host 9.8 / 9.6 -> 3.8 / 3.7.
+- On client replays a car's runs of chained updates are joined where its path simulated from one update meets the next clearly best at one interval (run bridging), and the update ticks inferred again; the ball keeps its placement. On the LAN client recordings car updates within a tick of the server's 92% -> 94%, car position p90 against the server's 17.8 / 17.9 -> 16.7 / 17.1 UU; the replay's dodges without a simulated flip 0.9% -> 0.6% (train). About 4% slower.
 
 ## 2.1.1 (2026-10-26)
 
