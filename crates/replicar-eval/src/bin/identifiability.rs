@@ -12,7 +12,14 @@
 //! its true tick instead of the inferred one, and updates without one are left out: that separates the inputs from
 //! update-tick inference.
 //!
-//! usage: identifiability <replay> <truth.csv> <collision_meshes> <out.json> [stride] [horizon] [true_update_ticks.csv]
+//! With `[true_states.csv]` as well (each car's server state and the ball's (slot -1) at the file's sim ticks:
+//! `slot`, `sim_tick`, position, velocity, rotation matrix row-major, angular velocity, boost; written by
+//! `scripts/ml/truth_states.py`) only windows with a true state of every body at their start count, and each is
+//! simulated a second time from those states (physics and boost; the rest replicar's): the rows `true start ...`
+//! (RESULTS.md, "The client replays' states against the server's").
+//!
+//! usage: identifiability <replay> <truth.csv> <collision_meshes> <out.json> [stride] [horizon]
+//! [true_update_ticks.csv] [true_states.csv]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -157,7 +164,7 @@ fn quantiles(values: &[[f32; 4]]) -> Quantiles {
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: identifiability <replay> <truth.csv> <collision_meshes> <out.json> [stride] [horizon]".into());
+        return Err("usage: identifiability <replay> <truth.csv> <collision_meshes> <out.json> [stride] [horizon] [true_update_ticks.csv] [true_states.csv]".into());
     }
     let stride: usize = args.get(5).map_or(Ok(4), |s| s.parse())?;
     let horizon: usize = args.get(6).map_or(Ok(4), |s| s.parse())?;
@@ -197,6 +204,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
         );
     }
+    let true_start: Option<HashMap<(i64, u64), Vec<f32>>> = args
+        .get(8)
+        .map(|path| -> Result<_, Box<dyn Error>> {
+            let mut map = HashMap::new();
+            for line in fs::read_to_string(path)?.lines() {
+                let v: Vec<f32> = line.split(',').filter_map(|x| x.parse().ok()).collect();
+                if v.len() == 21 {
+                    map.insert((v[0] as i64, v[1] as u64), v[2..].to_vec());
+                }
+            }
+            Ok(map)
+        })
+        .transpose()?;
     let bytes = fs::read(&args[1])?;
     let meshes = replicar::Meshes::load(std::path::Path::new(&args[3]))?;
     let converter = replicar::Converter::new(&meshes, replicar::Config::default());
@@ -205,7 +225,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut window: VecDeque<SimulatedFrame> = VecDeque::new();
     let mut seen = 0usize;
     // (horizon frame, situation) -> samples
-    let mut groups: BTreeMap<(usize, &'static str), Samples> = BTreeMap::new();
+    // (from the true start, horizon frame, situation) -> samples
+    let mut groups: BTreeMap<(bool, usize, &'static str), Samples> = BTreeMap::new();
     // With IDENT_DUMP=<path>: one line per scored update (frame, slot, horizon, situation, then the position error
     // of each variant), for inspecting windows.
     let mut dump: Vec<String> = Vec::new();
@@ -292,67 +313,98 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (false, true) => "air near ball or car",
             }
         };
-        let mut arenas: Vec<Arena> = VARIANTS.iter().map(|_| arena_from(&start.state)).collect();
-        let mut at_tick: Vec<HashMap<u64, Vec<replicar::rocketsim::CarState>>> =
-            VARIANTS.iter().map(|_| HashMap::new()).collect();
-        for t in t0..t_end {
-            for (variant, arena) in arenas.iter_mut().enumerate() {
-                for slot in 0..slots {
-                    let ours = controls[&t].get(slot).copied().unwrap_or_default();
-                    let c = truth
-                        .get(&(slot, t))
-                        .map_or(ours, |&true_| mixed(ours, true_, VARIANTS[variant].1));
-                    arena.set_car_controls(slot, c);
-                }
-                arena.step_tick();
-                at_tick[variant]
-                    .insert(t + 1, (0..slots).map(|s| *arena.get_car_state(s)).collect());
-            }
-        }
-        for (tick, slot, h, body, frame) in targets {
-            let fresh = |f: Option<replicar::FrameIndex>| f == Some(frame);
-            let Some(position) = body.position.as_ref().filter(|p| fresh(Some(p.frame))) else {
-                continue;
+        let mut starts = vec![(false, start.state.clone())];
+        if let Some(true_start) = &true_start {
+            let mut state = start.state.clone();
+            let phys = |v: &[f32], p: &mut replicar::rocketsim::PhysState| {
+                p.pos = Vec3A::new(v[0], v[1], v[2]);
+                p.vel = Vec3A::new(v[3], v[4], v[5]);
+                p.rot_mat = Mat3A::from_cols(
+                    Vec3A::new(v[6], v[9], v[12]),
+                    Vec3A::new(v[7], v[10], v[13]),
+                    Vec3A::new(v[8], v[11], v[14]),
+                );
+                p.ang_vel = Vec3A::new(v[15], v[16], v[17]);
             };
-            let mut errors = vec![[0f32; 4]; VARIANTS.len()];
-            for variant in 0..VARIANTS.len() {
-                let car = at_tick[variant][&tick][slot];
-                let p = Vec3A::from(position.value);
-                errors[variant][0] = (car.phys.pos - p).length();
-                errors[variant][1] = body
-                    .linear_velocity
-                    .as_ref()
-                    .filter(|v| fresh(Some(v.frame)))
-                    .map_or(f32::NAN, |v| (car.phys.vel - Vec3A::from(v.value)).length());
-                errors[variant][2] = body.rotation.as_ref().map_or(f32::NAN, |r| {
-                    let [x, y, z, w] = r.value;
-                    rotation_degrees(
-                        car.phys.rot_mat,
-                        Mat3A::from_quat(Quat::from_xyzw(x, y, z, w).normalize()),
-                    )
-                });
-                errors[variant][3] = body
-                    .angular_velocity_raw
-                    .as_ref()
-                    .filter(|v| fresh(Some(v.frame)))
-                    .map_or(f32::NAN, |v| {
-                        (car.phys.ang_vel - Vec3A::from(v.value) * 0.01).length()
+            let Some(ball) = true_start.get(&(-1, t0)) else {
+                return;
+            };
+            if (0..slots).any(|s| !true_start.contains_key(&(s as i64, t0))) {
+                return;
+            }
+            phys(ball, &mut state.ball.phys);
+            for (info, car) in state.cars.iter_mut() {
+                let v = &true_start[&(info.idx as i64, t0)];
+                phys(v, &mut car.phys);
+                car.boost = v[18];
+            }
+            starts.push((true, state));
+        }
+        for (from_truth, start_state) in &starts {
+            let mut arenas: Vec<Arena> = VARIANTS.iter().map(|_| arena_from(start_state)).collect();
+            let mut at_tick: Vec<HashMap<u64, Vec<replicar::rocketsim::CarState>>> =
+                VARIANTS.iter().map(|_| HashMap::new()).collect();
+            for t in t0..t_end {
+                for (variant, arena) in arenas.iter_mut().enumerate() {
+                    for slot in 0..slots {
+                        let ours = controls[&t].get(slot).copied().unwrap_or_default();
+                        let c = truth
+                            .get(&(slot, t))
+                            .map_or(ours, |&true_| mixed(ours, true_, VARIANTS[variant].1));
+                        arena.set_car_controls(slot, c);
+                    }
+                    arena.step_tick();
+                    at_tick[variant]
+                        .insert(t + 1, (0..slots).map(|s| *arena.get_car_state(s)).collect());
+                }
+            }
+            for (tick, slot, h, body, frame) in &targets {
+                let (tick, slot, h, frame) = (*tick, *slot, *h, *frame);
+                let fresh = |f: Option<replicar::FrameIndex>| f == Some(frame);
+                let Some(position) = body.position.as_ref().filter(|p| fresh(Some(p.frame))) else {
+                    continue;
+                };
+                let mut errors = vec![[0f32; 4]; VARIANTS.len()];
+                for variant in 0..VARIANTS.len() {
+                    let car = at_tick[variant][&tick][slot];
+                    let p = Vec3A::from(position.value);
+                    errors[variant][0] = (car.phys.pos - p).length();
+                    errors[variant][1] = body
+                        .linear_velocity
+                        .as_ref()
+                        .filter(|v| fresh(Some(v.frame)))
+                        .map_or(f32::NAN, |v| (car.phys.vel - Vec3A::from(v.value)).length());
+                    errors[variant][2] = body.rotation.as_ref().map_or(f32::NAN, |r| {
+                        let [x, y, z, w] = r.value;
+                        rotation_degrees(
+                            car.phys.rot_mat,
+                            Mat3A::from_quat(Quat::from_xyzw(x, y, z, w).normalize()),
+                        )
                     });
-            }
-            if dumping {
-                let errors: Vec<String> = errors.iter().map(|e| format!("{:.4}", e[0])).collect();
-                dump.push(format!(
-                    "{},{slot},{h},{},{}",
-                    frame.get(),
-                    situation(slot),
-                    errors.join(",")
-                ));
-            }
-            for key in [(h, situation(slot)), (h, "all")] {
-                let group = groups.entry(key).or_default();
-                group.errors.resize(VARIANTS.len(), Vec::new());
-                for (variant, e) in errors.iter().enumerate() {
-                    group.errors[variant].push(*e);
+                    errors[variant][3] = body
+                        .angular_velocity_raw
+                        .as_ref()
+                        .filter(|v| fresh(Some(v.frame)))
+                        .map_or(f32::NAN, |v| {
+                            (car.phys.ang_vel - Vec3A::from(v.value) * 0.01).length()
+                        });
+                }
+                if dumping && !from_truth {
+                    let errors: Vec<String> =
+                        errors.iter().map(|e| format!("{:.4}", e[0])).collect();
+                    dump.push(format!(
+                        "{},{slot},{h},{},{}",
+                        frame.get(),
+                        situation(slot),
+                        errors.join(",")
+                    ));
+                }
+                for key in [(*from_truth, h, situation(slot)), (*from_truth, h, "all")] {
+                    let group = groups.entry(key).or_default();
+                    group.errors.resize(VARIANTS.len(), Vec::new());
+                    for (variant, e) in errors.iter().enumerate() {
+                        group.errors[variant].push(*e);
+                    }
                 }
             }
         }
@@ -368,7 +420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     })?;
     let mut out: BTreeMap<String, Row> = BTreeMap::new();
-    for ((h, situation), samples) in &groups {
+    for ((from_truth, h, situation), samples) in &groups {
         let ours = &samples.errors[0];
         let n = ours.len();
         let better_by = |a: &[[f32; 4]], b: &[[f32; 4]], margin: f32| {
@@ -396,7 +448,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .collect();
         out.insert(
-            format!("h{h} {situation}"),
+            format!(
+                "{}h{h} {situation}",
+                if *from_truth { "true start " } else { "" }
+            ),
             Row {
                 samples: n,
                 variants,
