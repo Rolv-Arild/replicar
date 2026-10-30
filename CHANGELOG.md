@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 (2026-10-30)
 
 Conversion output changes (inputs in the air, and on the ground through the jump and ground timing fits). The air timings read the update the interval ends at, so they are off where the air lookahead or the in-sample fits are and do not change the evaluator's held-out results; the two fit changes run there too and change them slightly (better).
 
