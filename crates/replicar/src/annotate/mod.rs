@@ -65,7 +65,7 @@ pub struct BoostPickup {
     /// The player of the car the replay names.
     pub player: Option<PlayerIndex>,
     /// That car's path (straight lines between the exported poses of the last frames) enters the pad's
-    /// trigger cylinder (radius 144 small, 208 big, plus 60 for the car's size).
+    /// trigger cylinder (radius 144 small, 208 big, plus 60 for the car's size; RocketSim's own test before 0.3.4).
     pub verified: bool,
     /// The named car's closest horizontal distance to the pad (UU).
     pub distance: Option<f32>,
@@ -310,7 +310,9 @@ impl Annotator {
             .pad_index
             .and_then(|index| frame.state.boost_pads.get(index))
             .map(|(config, _)| (config.pos, config.is_big));
-        // The trigger radius plus half a car (the game tests the hitbox, RocketSim the centre).
+        // The trigger radius plus half a car (the game tests the hitbox). RocketSim before 0.3.4 tested the centre
+        // against these radii; 0.3.4 tests the centre against 176 (small) or 208 (big), or the hitbox against a box of
+        // half-width 96 or 160, which reaches about 224 or 314 UU from the pad at a corner (not re-fitted here).
         let radius = if pad.is_some_and(|p| p.1) {
             208.0
         } else {

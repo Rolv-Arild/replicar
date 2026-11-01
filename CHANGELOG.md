@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- RocketSim 0.3.4 (any compatible release from 0.3.4) and glam 0.34.2 (RocketSim 0.3.4 needs it but requires only 0.34, so a lock with glam 0.34.1 did not build). Conversions move slightly, none worse in the pooled results (held-out one-step velocity p50 0.944 -> 0.930 UU/s on train); conversions about 6% slower. As with every RocketSim release, a published replicar already resolves 0.3.4 on a fresh install; the raised requirements only keep older locks from pairing it with glam 0.34.1.
+
 ## 2.2.1 (2026-10-30)
 
 Conversion output changes in the `controls_jump` and `previous_controls_jump` columns only; the states, the header and the evaluator's results are unchanged.

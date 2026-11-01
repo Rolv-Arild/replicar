@@ -1,6 +1,6 @@
 # RocketSim observations for its developers
 
-This project does **not** modify RocketSim. Since 2026-10-27 it accepts any compatible crates.io `rocketsim` release from 0.3.3 (`rocketsim = "0.3.3"`; the newest is assumed best, and every file records the release that simulated it; 13); from 2026-10-23 any from 0.3.2; from 2026-10-09 any 0.2 release from 0.2.9; it depended on exactly 0.2.7 (identical to `v3-rust` `dc5d60e`, 2026-10-06) from 2026-10-07; it was pinned to `9910c58` (2026-10-01, 0.2.4) until then, to `0b02051` (2026-09-28, 0.2.1) until 2026-10-04 and to `79f4d22f` (2026-08-26) until 2026-09-29, and entries below say what changed between those. **Re-check at 0.2.7 (2026-10-07):** every reproduction gives the same numbers as at `9910c58` to the printed precision apart from last digits (RESULTS.md, "RocketSim `9910c58` to crates.io 0.2.7"); no status changes, and the flipping car still reports |w| 7.45 rad/s. **Re-check at `9910c58` (2026-10-04):** the reproductions of every entry (`simulate_hit_probe` with scale 1 and 3, `simulate_flip_profile`, `diagnose_contact_model` with and without the impulse, `diagnose_contact_fit`, `diagnose_contacts`, `audit_tick_integrality`, `audit_car_tick_integrality`, `rlbot_onestep`) give the same numbers as at `0b02051` to the printed precision, apart from the last digit of a few tails, so no status changes; the flipping car still reports |w| 7.45 rad/s against the replay's 5.50. Where a difference from the game matters, the converter works around it in its own code. This file records apparent inaccuracies, with the evidence, the RocketSim source location, the workaround used here, and how sure we are, as hints for the RocketSim developers.
+This project does **not** modify RocketSim. Since 2026-11-01 it accepts any compatible crates.io `rocketsim` release from 0.3.4 (`rocketsim = "0.3.4"`, with `glam = "0.34.2"`; the newest is assumed best, and every file records the release that simulated it; 14); from 2026-10-27 any from 0.3.3 (13); from 2026-10-23 any from 0.3.2; from 2026-10-09 any 0.2 release from 0.2.9; it depended on exactly 0.2.7 (identical to `v3-rust` `dc5d60e`, 2026-10-06) from 2026-10-07; it was pinned to `9910c58` (2026-10-01, 0.2.4) until then, to `0b02051` (2026-09-28, 0.2.1) until 2026-10-04 and to `79f4d22f` (2026-08-26) until 2026-09-29, and entries below say what changed between those. **Re-check at 0.2.7 (2026-10-07):** every reproduction gives the same numbers as at `9910c58` to the printed precision apart from last digits (RESULTS.md, "RocketSim `9910c58` to crates.io 0.2.7"); no status changes, and the flipping car still reports |w| 7.45 rad/s. **Re-check at `9910c58` (2026-10-04):** the reproductions of every entry (`simulate_hit_probe` with scale 1 and 3, `simulate_flip_profile`, `diagnose_contact_model` with and without the impulse, `diagnose_contact_fit`, `diagnose_contacts`, `audit_tick_integrality`, `audit_car_tick_integrality`, `rlbot_onestep`) give the same numbers as at `0b02051` to the printed precision, apart from the last digit of a few tails, so no status changes; the flipping car still reports |w| 7.45 rad/s against the replay's 5.50. Where a difference from the game matters, the converter works around it in its own code. This file records apparent inaccuracies, with the evidence, the RocketSim source location, the workaround used here, and how sure we are, as hints for the RocketSim developers.
 
 **How to read the evidence.** Replay packets are exact 120 Hz server states (`RESULTS.md`, "Replay packets are exact server ticks"): where RocketSim, started from one packet, disagrees with a later packet at that packet's exact tick, and the cause is not an unobserved player input, the discrepancy points at RocketSim. Sparse packets and missing inputs (pitch, roll, hold lengths) limit how much can be attributed. All measurements use the 60 `replays/train` replays unless noted; `replays/test` is untouched.
 
@@ -157,3 +157,31 @@ From `9910c58` to 0.2.7 (= `v3-rust` `dc5d60e`; RESULTS.md, "RocketSim `9910c58`
   digit; `rlbot_reconstruction`, the hit probe, the flip profile and the contact model identical; `rlbot_onestep` and
   `error_budget` the last digit; `diagnose_contacts` slightly better for long contacts (velocity error p90 of contacts
   lasting 12 ticks or more 110.0 -> 103.4 UU/s). No status of the entries above changes.
+
+## 14. 0.3.4: it needs glam 0.34.2 but requires 0.34 (verified, 2026-11-01)
+
+- **Symptom.** RocketSim 0.3.4 calls `Mat3A::transpose_mul_vec3a`, which glam added in 0.34.2
+  (`src/bullet/collision/dispatch/box_box_detector.rs:291`, `convex_concave_collision_alg.rs:53`,
+  `internal_edge_utility.rs:295`), but its `Cargo.toml` requires `glam = "0.34"`. A lock that already holds glam 0.34.1
+  (every replicar lock before 0.3.4) keeps it when only RocketSim is updated (`cargo update -p rocketsim`), and the
+  build fails with error E0599 (no method named `transpose_mul_vec3a`). A fresh resolution picks the newest
+  glam and builds. The daily dependency check, CI and the release builds failed this way until they ran
+  `cargo update --recursive -p rocketsim -p boxcars` (`f99113f`); a downstream project with a lock hit it too
+  (`cargo update -p glam` fixes it). Reproduce: on `993bece` (RocketSim 0.3.3, glam 0.34.1), `cargo update -p rocketsim`
+  and `cargo build`.
+- **Workaround.** replicar now requires `glam = "0.34.2"` (and `rocketsim = "0.3.4"`), so any lock that resolves
+  replicar has a glam RocketSim 0.3.4 builds with. Upstream, `glam = "0.34.2"` in RocketSim's requirement would fix it.
+- **The rest of 0.3.4** changes the collision and the constraint solver, the wheel ray's minimum hit distance, the
+  dodge torque (rounded constants), the auto-flip test (`UP_DOT_THRESH` -0.966), the Plank and Psyclops steer curves,
+  the small pad's trigger (`CYL_RAD_SMALL` 144 -> 176, or the hitbox overlapping a box of half-width 96; 160 and 208
+  for big pads), the demolitions and bumps (a cone from the hitbox centre; a bump's cooldown no longer blocks a
+  demolition; replicar runs with `DemoMode::Disabled`, so only bumps reach it), and the car cache (`world_wheels_prev`,
+  read by the next tick's auto-roll and set by `refresh_car_sticky_gate` and `refresh_car_contacts`, `demo_tick`,
+  `demoer_idx`; `set_car_state_full` copies them). Measured against 0.3.3 on the same code (RESULTS.md, "RocketSim
+  0.3.4"): the evaluator's held-out one-step velocity p50 0.944 -> 0.930 / 0.917 -> 0.906 UU/s and position p99
+  30.78 -> 30.59 / 30.96 -> 30.74 UU (train / validation), no pooled row worse; against the server truth of the LAN
+  recordings exact states 93.0 -> 93.2% (host) and 56.8 -> 57.3% (client); flips, takeoffs, true-input scores,
+  `rlbot_reconstruction`, `rlbot_onestep`, `error_budget`, the hit probe, the flip profile and the contact model in
+  the last digit; `diagnose_contacts` 943 -> 941 of 4,820 real touches missed (entry 3), velocity error p90 of contacts
+  lasting 12 ticks or more 103.4 -> 102.5 UU/s, 9-11 ticks 544.3 -> 567.2 (the value at 0.3.2); conversion about 6% slower. No status of the
+  entries above changes.
