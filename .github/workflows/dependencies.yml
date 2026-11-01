@@ -1,5 +1,5 @@
 # Keeps replicar on the newest compatible RocketSim and boxcars (the newest is assumed best): daily, it updates both in
-# Cargo.lock; if that changes the lock, it runs the checks of ci.yml with the new lock, commits it to master when they
+# Cargo.lock (with their dependencies); if either has a new release, it runs the checks of ci.yml with the new lock, commits it to master when they
 # pass, and rebuilds the latest release's native wheels with a wheel build number (release.yml), so pip users get the
 # new simulator without a replicar release. A failing check leaves master as it was and shows as a failed run.
 name: dependencies
@@ -31,11 +31,14 @@ jobs:
           toolchain: "1.97.1"
       - id: update
         run: |
-          cargo update -p rocketsim -p boxcars
           version() { grep -A1 "^name = \"$1\"$" Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p'; }
+          before="rocketsim $(version rocketsim), boxcars $(version boxcars)"
+          # With their own dependencies' newest releases (RocketSim 0.3.4 needs glam 0.34.2 but requires only 0.34).
+          cargo update --recursive -p rocketsim -p boxcars
           summary="rocketsim $(version rocketsim), boxcars $(version boxcars)"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"
-          if git diff --quiet -- Cargo.lock; then
+          # A new RocketSim or boxcars only: an update of their dependencies alone is not worth a commit and a rebuild.
+          if [ "$summary" = "$before" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Cargo.lock already has $summary"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"; echo "Cargo.lock updated: $summary"

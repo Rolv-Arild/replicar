@@ -52,7 +52,7 @@ jobs:
         with:
           toolchain: "1.97.1"
       # Every build takes the newest compatible RocketSim and boxcars; the files it writes record which RocketSim.
-      - run: cargo update -p rocketsim -p boxcars
+      - run: cargo update --recursive -p rocketsim -p boxcars
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -116,7 +116,7 @@ jobs:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       # Every build takes the newest compatible RocketSim and boxcars; the files it writes record which RocketSim.
-      - run: cargo update -p rocketsim -p boxcars
+      - run: cargo update --recursive -p rocketsim -p boxcars
       - run: cargo build --release --locked -p replicar-cli
       - uses: actions/upload-artifact@v4
         with:
