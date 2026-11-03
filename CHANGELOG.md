@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- boxcars 0.13 (any compatible release from 0.13.0). Conversions are identical on every replay checked. Rust users: `replicar::parse` returns a boxcars 0.13 `Replay` and `Error::Parse` holds its `ParseError`, so code that names them needs boxcars 0.13.
 - RocketSim 0.3.5 (any compatible release from 0.3.5) and glam 0.34.2 (RocketSim 0.3.4 and 0.3.5 need it but require only 0.34, so a lock with glam 0.34.1 did not build). 0.3.4 moves conversions slightly, none worse in the pooled results (held-out one-step velocity p50 0.944 -> 0.930 UU/s on train), and makes them about 6% slower; 0.3.5 changes them only in the last digits and is a few percent faster. As with every RocketSim release, a published replicar already resolves the newest on a fresh install; the raised requirements only keep older locks from pairing it with glam 0.34.1.
 
 ## 2.2.1 (2026-10-30)
