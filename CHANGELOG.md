@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- RocketSim 0.3.4 (any compatible release from 0.3.4) and glam 0.34.2 (RocketSim 0.3.4 needs it but requires only 0.34, so a lock with glam 0.34.1 did not build). Conversions move slightly, none worse in the pooled results (held-out one-step velocity p50 0.944 -> 0.930 UU/s on train); conversions about 6% slower. As with every RocketSim release, a published replicar already resolves 0.3.4 on a fresh install; the raised requirements only keep older locks from pairing it with glam 0.34.1.
+- RocketSim 0.3.5 (any compatible release from 0.3.5) and glam 0.34.2 (RocketSim 0.3.4 and 0.3.5 need it but require only 0.34, so a lock with glam 0.34.1 did not build). 0.3.4 moves conversions slightly, none worse in the pooled results (held-out one-step velocity p50 0.944 -> 0.930 UU/s on train), and makes them about 6% slower; 0.3.5 changes them only in the last digits and is a few percent faster. As with every RocketSim release, a published replicar already resolves the newest on a fresh install; the raised requirements only keep older locks from pairing it with glam 0.34.1.
 
 ## 2.2.1 (2026-10-30)
 
