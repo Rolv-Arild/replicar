@@ -938,9 +938,9 @@ dependencies = [
 
 [[package]]
 name = "rocketsim"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "184e4ea1409189fdc497360bc71709d4124b19059da078e27cb4b7a5742806de"
+checksum = "04b40adc6d80a4c6f2e370dfb6f740ca0b7359f9a8a8728e1888584e376d11c5"
 dependencies = [
  "arrayvec",
  "byteorder",
