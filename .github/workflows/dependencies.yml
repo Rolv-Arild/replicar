@@ -75,7 +75,11 @@ jobs:
               echo "::warning::could not compare $crate (required '$required', newest '$newest')"
             elif [ "$(key "$required")" != "$(key "$newest")" ]; then
               title="$crate $newest is out (outside the requirement \"$required\")"
-              if [ -z "$(gh issue list --state all --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+              # An exact title match: a search for the title found nothing (its quotes end the search phrase), so the
+              # check opened one issue a day for boxcars 0.13.0. The list is read first: with pipefail, grep -q
+              # closing the pipe early could fail gh and the pipeline.
+              titles=$(gh issue list --state all --limit 1000 --json title --jq '.[].title')
+              if ! grep -Fxq "$title" <<< "$titles"; then
                 gh issue create --title "$title" --body "The daily dependency check found $crate $newest on crates.io. Cargo.toml requires a release compatible with $required, so the automatic update does not reach it: port replicar to it, measure it (RESULTS.md, \"RocketSim 0.2.8 and 0.2.9\"), and raise the requirement."
               fi
             fi
